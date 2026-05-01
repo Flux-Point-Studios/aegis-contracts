@@ -1,0 +1,80 @@
+{
+  "network": "preprod",
+  "previous_version": "configs/deploy-state.preprod.v2.json",
+  "steps": {
+    "init_pool": {
+      "bootstrap_lovelace": 2000000,
+      "lp_token_policy_hash": "58af32ba42a7724969dd3a24e88696d499187913bfdf54c3812cc9eb",
+      "pool_address": "addr_test1wqz0a0e9tcg0dwuhcf4uqzkuhfjg7zjhqpn9fslkqgfra6qkncpr9",
+      "pool_nft_asset_hex": "41454749535f504f4f4c5f5634",
+      "pool_nft_policy_id": "7592f501c184173994bfd75337afcd7276899d1bceb5a65e47702a72",
+      "pool_utxo_id": "76fec9a7f2180639784a63457b05342094abe0dbd398946830e91e0e09be70f9#0",
+      "pool_validator_hash": "04febf255e10f6bb97c26bc00adcba648f0a57006654c3f602123ee8",
+      "protocol_fee_bps": 200,
+      "submitted_at": 1777594942,
+      "tx_hash": "76fec9a7f2180639784a63457b05342094abe0dbd398946830e91e0e09be70f9"
+    },
+    "mint_pool_nft": {
+      "asset_name_ascii": "AEGIS_POOL_V4",
+      "asset_name_hex": "41454749535f504f4f4c5f5634",
+      "compiled_script_hex": "5901f6010100332229800aba2aba1aab9faab9eaab9dab9a9bae002488888896600264646644b30013370e900018039baa0018991991192cc0056600264660020026eb0c03c014896600200314a115980099baf3010300e3754602000202914a313300200230110014030807a2b30013370e6466446600400400244b3001001801c4c8cc896600266e4403c00a2b30013371e01e00510018032020899802802980a8022020375c601e0026eb4c040004c044005010191919800800803112cc00400600713233225980099b910090028acc004cdc78048014400600c808a26600a00a602c0088088dd718080009bab301100130120014044297adef6c601480012002899b870014800a294100a452820148a51899b880014800100a1919800800801912cc0040062900044c8cc88cc88cc008008004896600200310038994c004dd71809000cdd69809800ccc00c00cc0580092225980099b8f00800c899b800010028800a028180a000a026375660200066eb8c034004cc00c00cc044008c03c00500e1bab300b300c300c300c300c001375c601660126ea8008c020dd51805002459006180400098041804800980400098021baa0088a4d1365640084c126d879825820cf978a5adbb61b72d164acd00685030142c812c613574c6d5277145724a376db01004c010e4d41454749535f504f4f4c5f56340001",
+      "init_utxo": "cf978a5adbb61b72d164acd00685030142c812c613574c6d5277145724a376db#1",
+      "operator_address": "addr_test1qrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t99zx9jlzjdkarq5v5n68e37hss6jgyuyutjn6dstg4evgwqfnsjd5",
+      "policy_id": "7592f501c184173994bfd75337afcd7276899d1bceb5a65e47702a72",
+      "submitted_at": 1777594829,
+      "tx_hash": "9546c2150c0fda582f234a9f45e0e397e1718158c4ea8bbba0e08f13ee776cb8"
+    },
+    "publish_refs": {
+      "results": [
+        {
+          "carryover_from_v2": "policy_validator hash byte-stable across all 4 deployments.",
+          "fee_ada": "0.3042",
+          "fee_lovelace": 304189,
+          "label": "policy_validator",
+          "ref_utxo_ada": "15.68",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "74ad05aa6d117d1bdb2e6e280b406ae90e51f831b77f23c2b4c20fd7bcf4bfd0#0",
+          "ref_utxo_lovelace": 15684170,
+          "script_hash": "d492179e5f6ff762ae526d874cac032e5b6a02cb1470d2b249c358d7",
+          "script_size_bytes": 3107,
+          "submitted": true,
+          "submitted_at": 1777583083,
+          "title": "policy.policy_validator.spend",
+          "tx_hash": "74ad05aa6d117d1bdb2e6e280b406ae90e51f831b77f23c2b4c20fd7bcf4bfd0"
+        },
+        {
+          "fee_ada": "0.4173",
+          "fee_lovelace": 417269,
+          "label": "pool_validator",
+          "ref_utxo_ada": "26.76",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "43e68daf39266c178b762b4f50847020d958ef5dba98ca05a1c4647585e7f7b8#0",
+          "ref_utxo_lovelace": 26760870,
+          "script_hash": "04febf255e10f6bb97c26bc00adcba648f0a57006654c3f602123ee8",
+          "script_size_bytes": 5677,
+          "submitted": true,
+          "submitted_at": 1777594840,
+          "title": "pool.pool_validator.spend",
+          "tx_hash": "43e68daf39266c178b762b4f50847020d958ef5dba98ca05a1c4647585e7f7b8"
+        },
+        {
+          "fee_ada": "0.1869",
+          "fee_lovelace": 186885,
+          "label": "lp_token_policy",
+          "ref_utxo_ada": "4.19",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "d1bdca694c952a3dae7c45f34457b4da89568ec776b14a53ded06220b1491d4a#0",
+          "ref_utxo_lovelace": 4193710,
+          "script_hash": "58af32ba42a7724969dd3a24e88696d499187913bfdf54c3812cc9eb",
+          "script_size_bytes": 441,
+          "submitted": true,
+          "submitted_at": 1777594932,
+          "title": "lp_token.lp_token_policy.mint",
+          "tx_hash": "d1bdca694c952a3dae7c45f34457b4da89568ec776b14a53ded06220b1491d4a"
+        }
+      ],
+      "updated_at": 1777594932
+    }
+  },
+  "version": "v3-a024"
+}

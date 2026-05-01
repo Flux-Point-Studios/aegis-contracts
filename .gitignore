@@ -1,0 +1,51 @@
+# Aiken build artifacts
+contracts/build/
+*.uplc
+*.uplc.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+
+# Secrets — these MUST never enter the repo
+*.env
+.env
+.env.*
+!.env.example
+*.skey
+*.vkey
+*.mnemonic
+mnemonic.txt
+wallet.json
+*.signing.json
+
+# Local backups / temp
+*.bak
+*.tmp
+.work/
+_work_*
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Build outputs (preserve plutus.json — that IS the deployable artifact)
+# Note: plutus.json IS committed because it's the parameter-free blueprint
+# that downstream tools and auditors verify against.

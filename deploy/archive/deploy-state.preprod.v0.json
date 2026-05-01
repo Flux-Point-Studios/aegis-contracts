@@ -1,0 +1,76 @@
+{
+  "network": "preprod",
+  "steps": {
+    "init_pool": {
+      "bootstrap_lovelace": 2000000,
+      "lp_token_policy_hash": "c6b1dbe206956ca54344d6f310fd2f1c0f3cd22d94048a0a7f926176",
+      "pool_address": "addr_test1wzk8xnpxwn5vxrehm8nnhchlsffrcvt98kc60th0s5s0ewgpqyjde",
+      "pool_nft_asset_hex": "41454749535f504f4f4c",
+      "pool_nft_policy_id": "0c1ed4ecd286fde17037846c90242c988090d3a0572579d2b9f2b423",
+      "pool_utxo_id": "d4f0ab3243f09391f6e27d443306a275fda2cb23b17bbf40f7cf13000837ec87#0",
+      "pool_validator_hash": "ac734c2674e8c30f37d9e73be2ff82523c31653db1a7aeef8520fcb9",
+      "protocol_fee_bps": 200,
+      "submitted_at": 1777583430,
+      "tx_hash": "d4f0ab3243f09391f6e27d443306a275fda2cb23b17bbf40f7cf13000837ec87"
+    },
+    "mint_pool_nft": {
+      "asset_name_ascii": "AEGIS_POOL",
+      "asset_name_hex": "41454749535f504f4f4c",
+      "init_utxo": "ebb5d58e381ac20a4b4180958334d20d746ced8c1611b9569e805c34a830ab9f#0",
+      "operator_address": "addr_test1qrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t99zx9jlzjdkarq5v5n68e37hss6jgyuyutjn6dstg4evgwqfnsjd5",
+      "policy_id": "0c1ed4ecd286fde17037846c90242c988090d3a0572579d2b9f2b423",
+      "submitted_at": 1777582435,
+      "tx_hash": "d859cf516ddcb8deb7f562118eb367aed4db8d9bbd6d6ab4b8dc39af30b038e7"
+    },
+    "publish_refs": {
+      "results": [
+        {
+          "fee_ada": "0.3042",
+          "fee_lovelace": 304189,
+          "label": "policy_validator",
+          "ref_utxo_ada": "15.68",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "74ad05aa6d117d1bdb2e6e280b406ae90e51f831b77f23c2b4c20fd7bcf4bfd0#0",
+          "ref_utxo_lovelace": 15684170,
+          "script_hash": "d492179e5f6ff762ae526d874cac032e5b6a02cb1470d2b249c358d7",
+          "script_size_bytes": 3107,
+          "submitted": true,
+          "submitted_at": 1777583083,
+          "title": "policy.policy_validator.spend",
+          "tx_hash": "74ad05aa6d117d1bdb2e6e280b406ae90e51f831b77f23c2b4c20fd7bcf4bfd0"
+        },
+        {
+          "fee_ada": "0.4013",
+          "fee_lovelace": 401297,
+          "label": "pool_validator",
+          "ref_utxo_ada": "25.20",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "7a564bf6087d74219c5ad4c72ab1831b2c6d589195999e5d90f5130600436ead#0",
+          "ref_utxo_lovelace": 25196340,
+          "script_hash": "ac734c2674e8c30f37d9e73be2ff82523c31653db1a7aeef8520fcb9",
+          "script_size_bytes": 5314,
+          "submitted": true,
+          "submitted_at": 1777583163,
+          "title": "pool.pool_validator.spend",
+          "tx_hash": "7a564bf6087d74219c5ad4c72ab1831b2c6d589195999e5d90f5130600436ead"
+        },
+        {
+          "fee_ada": "0.1869",
+          "fee_lovelace": 186885,
+          "label": "lp_token_policy",
+          "ref_utxo_ada": "4.19",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "38068cfdd7b463edcaf9dbc07f0a9558e873116b64bd72865eb5c5fcc03a14bb#0",
+          "ref_utxo_lovelace": 4193710,
+          "script_hash": "c6b1dbe206956ca54344d6f310fd2f1c0f3cd22d94048a0a7f926176",
+          "script_size_bytes": 441,
+          "submitted": true,
+          "submitted_at": 1777583286,
+          "title": "lp_token.lp_token_policy.mint",
+          "tx_hash": "38068cfdd7b463edcaf9dbc07f0a9558e873116b64bd72865eb5c5fcc03a14bb"
+        }
+      ],
+      "updated_at": 1777583286
+    }
+  }
+}
