@@ -33,6 +33,7 @@ aegis-contracts/
 │   ├── ARCHITECTURE.md             # On-chain protocol architecture
 │   ├── BACKEND_INTERACTION.md      # How the off-chain backend calls the validators
 │   ├── AUDITING_GUIDE.md           # Starting points + scope for the external auditor
+│   ├── GREEN_PATH_PROOFS.md        # On-chain txs proving every user-facing branch executes correctly
 │   └── audit/
 │       ├── SECURITY_AUDIT_REPORT.md   # 24 findings, 22 closed (3 rounds of red-team)
 │       ├── TREASURY_DONATION_SCOPE.md # Conway donation feature design
@@ -102,7 +103,8 @@ This is **v5** — the post-A-025 build. See [`deploy/deploy-state.preprod.json`
 3. Read the audit report:
    - Start at [`docs/audit/SECURITY_AUDIT_REPORT.md`](docs/audit/SECURITY_AUDIT_REPORT.md)
    - Cross-reference cited validator file:line references against the source
-   - For Round-2 / Round-3 findings, verify the on-chain pre-fix tx via [preprod.cardanoscan.io](https://preprod.cardanoscan.io)
+   - For Round-2 / Round-3 findings, verify the on-chain **pre-fix** tx via [preprod.cardanoscan.io](https://preprod.cardanoscan.io)
+   - For the **post-fix green path** (validators working as intended), see [`docs/GREEN_PATH_PROOFS.md`](docs/GREEN_PATH_PROOFS.md) — every user-facing branch with on-chain `valid_contract: true` proof
 4. Audit the contracts:
    - Primary: [`contracts/validators/`](contracts/validators/)
    - Helpers: [`contracts/lib/aegis/`](contracts/lib/aegis/)
