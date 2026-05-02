@@ -36,7 +36,8 @@ aegis-contracts/
 │   └── audit/
 │       ├── SECURITY_AUDIT_REPORT.md   # 24 findings, 22 closed (3 rounds of red-team)
 │       ├── TREASURY_DONATION_SCOPE.md # Conway donation feature design
-│       └── RELAY_PRESIGNED_AUTH_SCOPE.md  # Auto-claim relay design (planned)
+│       ├── RELAY_PRESIGNED_AUTH_SCOPE.md   # Auto-claim relay design (planned)
+│       └── ORCFAX_INTEGRATION_SCOPE.md     # Multi-oracle redundancy design (Aegis v2 — planned)
 ├── deploy/
 │   ├── README.md                   # Operator deploy runbook
 │   ├── deploy-state.preprod.json   # Live v5 state (Cardano preprod, May 2026)
