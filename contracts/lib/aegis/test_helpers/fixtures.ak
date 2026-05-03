@@ -6,8 +6,10 @@
 // =============================================================================
 
 use aegis/oracle.{create_oracle_datum}
-use aegis/types
-use aegis/types.{PolicyDatum, PoolDatum}
+use aegis/types.{
+  Charli3, Orcfax, PolicyDatum, PoolDatum, orcfax_ada_usd_feed_id,
+  orcfax_fs_asset_name, orcfax_fsp_asset_name,
+}
 use aiken/crypto.{ScriptHash}
 use aiken/interval.{Finite, Interval, IntervalBound}
 use cardano/address.{Address, Inline, Script, VerificationKey}
@@ -81,6 +83,7 @@ pub fn default_policy_datum() -> PolicyDatum {
     oracle_nft: oracle_nft_policy,
     pool_script_hash,
     pool_nft: pool_nft_policy,
+    oracle_provider: Charli3,
   }
 }
 
@@ -98,7 +101,125 @@ pub fn synthetic_attack_policy_datum() -> PolicyDatum {
     oracle_nft: oracle_nft_policy,
     pool_script_hash,
     pool_nft: pool_nft_policy,
+    oracle_provider: Charli3,
   }
+}
+
+/// [v6] Variant policy-datum builder: same as `default_policy_datum` but
+/// bound to Orcfax instead of Charli3. The `oracle_nft` field carries an
+/// Orcfax FSP script hash (NOT an NFT policy id) — semantics branch on
+/// `oracle_provider`. Used by the v6 multi-provider security tests.
+pub fn default_policy_datum_orcfax() -> PolicyDatum {
+  PolicyDatum {
+    ..default_policy_datum(),
+    oracle_nft: orcfax_fsp_hash_test,
+    oracle_provider: Orcfax,
+  }
+}
+
+/// [v6] Mock Orcfax FSP script hash used by tests. On preprod the live
+/// deploy will pin this to the deployed mock validator's hash; on preview
+/// and mainnet it pins to the canonical Orcfax FSP hash. This test fixture
+/// uses an arbitrary deterministic byte string so test assertions are
+/// reproducible without depending on any external state.
+pub const orcfax_fsp_hash_test: ByteArray =
+  #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230"
+
+/// [v6] Mock Orcfax FS validator/policy hash used by tests. In production
+/// this hash is dynamic — the consumer reads it from the FSP datum at
+/// claim time. The mock fixtures hardwire it for deterministic test inputs.
+pub const orcfax_fs_hash_test: ByteArray =
+  #"193ee65211bb39193ee65211bb39193ee65211bb39193ee65211bb39"
+
+/// [v6] Test-only feed_id matching `orcfax_ada_usd_feed_id` — re-exposed
+/// here so test cases can compare against a named constant rather than
+/// re-typing the hex.
+pub const orcfax_test_feed_id: ByteArray = orcfax_ada_usd_feed_id
+
+/// [v6] Build a mock Orcfax FSP UTxO whose inline datum is `bytes(fs_hash)`.
+/// The FSP NFT (asset_name = `orcfax_fsp_asset_name`) lives under the FSP
+/// script's own hash policy. Mirrors the production Orcfax shape: the FSP
+/// datum is an opaque byte array whose value is the dynamic FS validator
+/// hash.
+pub fn orcfax_fsp_input(target_fs_hash: ByteArray) -> Input {
+  let fsp_value =
+    assets.from_lovelace(2_000_000)
+      |> assets.add(orcfax_fsp_hash_test, orcfax_fsp_asset_name, 1)
+  make_input(
+    tx_id_two,
+    1,
+    Address {
+      payment_credential: Script(orcfax_fsp_hash_test),
+      stake_credential: None,
+    },
+    fsp_value,
+    InlineDatum(target_fs_hash),
+  )
+}
+
+/// [v6] Build a mock Orcfax FS UTxO carrying the FS NFT and a
+/// `FsDat<Rational>` inline datum. The FS NFT policy equals the FS validator
+/// hash itself (Orcfax's design); the FS asset name is the empty bytestring
+/// (`orcfax_fs_asset_name`).
+///
+/// `feed_id` defaults to `orcfax_ada_usd_feed_id` (`"CER/ADA-USD/"`).
+/// `(num, denom)` encodes the price as `num/denom` (USD per 1 ADA).
+/// `created_at` is POSIX milliseconds.
+pub fn orcfax_fs_input(num: Int, denom: Int, created_at: Int) -> Input {
+  orcfax_fs_input_with_feed(num, denom, created_at, orcfax_ada_usd_feed_id)
+}
+
+/// [v6] Same as `orcfax_fs_input` but accepts an explicit feed_id. Used by
+/// negative tests (wrong feed, ADA-USDM trailing-slash defense, etc.).
+pub fn orcfax_fs_input_with_feed(
+  num: Int,
+  denom: Int,
+  created_at: Int,
+  feed_id: ByteArray,
+) -> Input {
+  // Build the FsDat<Rational> shape inline via raw record literal. We use a
+  // local copy of the Orcfax types here to keep test_helpers free of any
+  // dependency on `aegis/oracle/orcfax` (which would create a circular
+  // module dep through the validators).
+  let rational_body = OrcfaxFixtureRational { num, denom }
+  let stmt = OrcfaxFixtureStatement { feed_id, created_at, body: rational_body }
+  let fs_dat = OrcfaxFixtureFsDat { statement: stmt, context: 0 }
+  let fs_value =
+    assets.from_lovelace(2_000_000)
+      |> assets.add(orcfax_fs_hash_test, orcfax_fs_asset_name, 1)
+  make_input(
+    tx_id_two,
+    2,
+    Address {
+      payment_credential: Script(orcfax_fs_hash_test),
+      stake_credential: None,
+    },
+    fs_value,
+    InlineDatum(fs_dat),
+  )
+}
+
+/// Test-only mirror of `aegis/oracle/orcfax.Statement<t>`. The CBOR encoding
+/// of this struct must match the production type byte-for-byte (positional
+/// fields, same ordering) so the same `expect fs_dat: RationalFsDat = idat`
+/// decode resolves transparently. We re-declare here rather than importing
+/// to avoid a circular module dep through `aegis/oracle`.
+pub type OrcfaxFixtureStatement<t> {
+  feed_id: ByteArray,
+  created_at: Int,
+  body: t,
+}
+
+/// Test-only mirror of `aegis/oracle/orcfax.Rational`.
+pub type OrcfaxFixtureRational {
+  num: Int,
+  denom: Int,
+}
+
+/// Test-only mirror of `aegis/oracle/orcfax.FsDat<t>`.
+pub type OrcfaxFixtureFsDat<t> {
+  statement: OrcfaxFixtureStatement<t>,
+  context: Data,
 }
 
 pub fn default_pool_datum() -> PoolDatum {
@@ -182,10 +303,7 @@ pub const oracle_nft_policy_alt: ByteArray =
 /// A policy datum identical to `default_policy_datum` except for the
 /// `oracle_nft` field, which points at `oracle_nft_policy_alt`.
 pub fn default_policy_datum_alt_oracle() -> PolicyDatum {
-  PolicyDatum {
-    ..default_policy_datum(),
-    oracle_nft: oracle_nft_policy_alt,
-  }
+  PolicyDatum { ..default_policy_datum(), oracle_nft: oracle_nft_policy_alt }
 }
 
 pub fn pool_continuation(
@@ -233,7 +351,12 @@ pub fn pool_input(
     tx_id,
     idx,
     script_addr(pool_script_hash),
-    assets.add(assets.from_lovelace(lovelace), pool_nft_policy, pool_nft_name, 1),
+    assets.add(
+      assets.from_lovelace(lovelace),
+      pool_nft_policy,
+      pool_nft_name,
+      1,
+    ),
     InlineDatum(datum),
   )
 }

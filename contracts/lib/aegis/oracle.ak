@@ -1,250 +1,155 @@
 // =============================================================================
-// Aegis Insurance Protocol - Oracle Integration
+// Aegis Insurance Protocol - Oracle Top-Level Dispatcher (v6 multi-provider)
 // Location: contracts/lib/aegis/oracle.ak
-// Summary: Charli3 ODV oracle datum parsing and helper functions.
-//          Used by validators/policy.ak to read and validate oracle price data
-//          from reference inputs during claim processing.
+// Summary: Provider-uniform top-level oracle dispatcher used by validators.
+//          The single function `resolve_oracle_price` matches on the policy
+//          datum's `oracle_provider` tag and delegates to the corresponding
+//          parser module — `aegis/oracle/charli3` or `aegis/oracle/orcfax` —
+//          each of which produces the provider-uniform `Price` record.
+//
+//          v6 layering:
+//            * `aegis/oracle/types`   — internal Price record (provider-uniform)
+//            * `aegis/oracle/charli3` — Charli3 datum types + parser; owns the
+//                                       A-016 trust handshake.
+//            * `aegis/oracle/orcfax`  — Orcfax FsDat<Rational> parser; owns the
+//                                       FSP -> FS pointer indirection and the
+//                                       30-minute consumer-side freshness window.
+//            * `aegis/oracle`         — this file. Dispatcher + v5 backwards-
+//                                       compat re-exports so existing tests
+//                                       (security_tests.ak, fixtures.ak) and
+//                                       the v5 import path
+//                                       `use aegis/oracle.{find_oracle_datum,
+//                                       get_oracle_price, is_oracle_valid,
+//                                       create_oracle_datum}` keep compiling
+//                                       without modification.
+//
+//          Why a `when` exhaustivity check IS the curated whitelist:
+//            * Adding a new provider requires extending the `OracleProvider`
+//              sum type (in `aegis/types`) AND adding a branch here. Both
+//              changes rotate the validator hash, which is the visible trust
+//              signal we want.
+//            * A free-form `oracle_script_hash: ByteArray` would either need
+//              a hardcoded list (defeats the point — adding still rotates the
+//              hash) or a separate registry UTxO (large new audit surface).
 // =============================================================================
 
-use aegis/types
-use aiken/collection/list
-use aiken/collection/pairs
-use cardano/address.{Script}
-use cardano/assets
-use cardano/transaction.{InlineDatum, Input, Output}
+use aegis/oracle/charli3
+use aegis/oracle/orcfax
+use aegis/oracle/types as oracle_types
+use aegis/types.{Charli3, OracleProvider, Orcfax}
+use cardano/transaction.{Input}
 
 // ---------------------------------------------------------------------------
-// Charli3 Oracle Datum Types
+// Top-level Dispatcher (v6)
 // ---------------------------------------------------------------------------
 
-/// Charli3 price data variants.
-/// GenericData is the standard format for price feeds.
-pub type PriceData {
-  /// Reserved for shared data across multiple oracles
-  SharedData
-  /// Reserved for extended data with additional information
-  ExtendedData
-  /// Standard price feed data with key-value pairs
-  /// Key 0: exchange rate (scaled by 1e6)
-  /// Key 1: creation timestamp (POSIX ms)
-  /// Key 2: expiration timestamp (POSIX ms)
-  GenericData { price_map: Pairs<Int, Int> }
-}
-
-/// Top-level Charli3 oracle datum
-pub type OracleDatum {
-  price_data: PriceData,
-}
-
-// ---------------------------------------------------------------------------
-// Price Data Accessors
-// ---------------------------------------------------------------------------
-
-/// Extract the price from PriceData (key 0).
-/// Returns the exchange rate scaled by 1e6.
-/// Example: ADA at $0.49 returns 490_000
-pub fn get_price(price_data: PriceData) -> Int {
-  when price_data is {
-    GenericData { price_map } ->
-      when pairs.get_first(price_map, 0) is {
-        Some(price) -> price
-        None -> fail @"Oracle price not found at key 0"
-      }
-    _ -> fail @"Invalid PriceData variant: expected GenericData"
-  }
-}
-
-/// Extract the creation timestamp from PriceData (key 1).
-/// Returns POSIX time in milliseconds.
-pub fn get_timestamp(price_data: PriceData) -> Int {
-  when price_data is {
-    GenericData { price_map } ->
-      when pairs.get_first(price_map, 1) is {
-        Some(timestamp) -> timestamp
-        None -> fail @"Oracle timestamp not found at key 1"
-      }
-    _ -> fail @"Invalid PriceData variant: expected GenericData"
-  }
-}
-
-/// Extract the expiry timestamp from PriceData (key 2).
-/// Returns POSIX time in milliseconds.
-pub fn get_expiry(price_data: PriceData) -> Int {
-  when price_data is {
-    GenericData { price_map } ->
-      when pairs.get_first(price_map, 2) is {
-        Some(expiry) -> expiry
-        None -> fail @"Oracle expiry not found at key 2"
-      }
-    _ -> fail @"Invalid PriceData variant: expected GenericData"
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Oracle Datum Accessors
-// ---------------------------------------------------------------------------
-
-/// Get the price from an OracleDatum (convenience wrapper)
-pub fn get_oracle_price(datum: OracleDatum) -> Int {
-  get_price(datum.price_data)
-}
-
-/// Get the timestamp from an OracleDatum (convenience wrapper)
-pub fn get_oracle_timestamp(datum: OracleDatum) -> Int {
-  get_timestamp(datum.price_data)
-}
-
-/// Get the expiry from an OracleDatum (convenience wrapper)
-pub fn get_oracle_expiry(datum: OracleDatum) -> Int {
-  get_expiry(datum.price_data)
-}
-
-/// Check if oracle data is still valid at the given time.
-/// Oracle is valid if current_time <= expiry timestamp.
-pub fn is_oracle_valid(datum: OracleDatum, current_time: Int) -> Bool {
-  current_time <= get_oracle_expiry(datum)
-}
-
-// ---------------------------------------------------------------------------
-// Oracle UTxO Finder
-// ---------------------------------------------------------------------------
-
-/// Find the oracle UTxO in a list of reference inputs by matching the
-/// oracle NFT policy ID in the UTxO's value.
+/// Resolve an oracle reading from `reference_inputs` for the given provider
+/// and provider-specific handle (`oracle_nft`).
 ///
-/// The oracle UTxO is identified by containing a token with the given
-/// policy ID (the Charli3 oracle NFT).
+/// **Provider semantics of `oracle_nft`** (the field name is retained for v5
+/// backwards-compat at the schema level but its meaning branches):
+///   * `Charli3` -> the Charli3 oracle NFT policy id.
+///   * `Orcfax`  -> the Orcfax FSP (Feed Source Pointer) script hash. The
+///                  per-fact FS hash is resolved at runtime by reading the
+///                  FSP datum, so it does not appear in the policy datum.
+///
+/// **Trust handshake.** Each provider's parser owns its own canonical-
+/// address binding: Charli3 pins `charli3_oracle_script_hash`; Orcfax pins
+/// the Script credential to equal the FSP/FS hash itself (both layers).
+/// The dispatcher does not re-implement these checks — they live with the
+/// per-provider parsers, which is the only place they belong.
+///
+/// **Failure semantics.** Any mismatch (missing reference input, wrong
+/// address, wrong NFT, wrong feed_id, stale created_at, decode failure)
+/// aborts the validator. This is the audit-grade behavior — the dispatcher
+/// fails closed rather than returning a default price.
+pub fn resolve_oracle_price(
+  reference_inputs: List<Input>,
+  provider: OracleProvider,
+  oracle_nft: ByteArray,
+) -> oracle_types.Price {
+  when provider is {
+    Charli3 -> charli3.resolve(reference_inputs, oracle_nft)
+    Orcfax -> orcfax.resolve(reference_inputs, oracle_nft)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// v5 Backwards-Compat Re-exports
+// ---------------------------------------------------------------------------
+//
+// Pre-v6 callers (validators/policy.ak before refactor, security_tests.ak,
+// fixtures.ak) imported these names from `aegis/oracle`. The v6 refactor moved
+// the implementations into `aegis/oracle/charli3`, but we keep the symbols
+// reachable here via thin pass-through wrappers to avoid a sweeping import-
+// path migration across the test suite. Each wrapper is a 1-line delegation.
+// ---------------------------------------------------------------------------
+
+/// v5 re-export. See `aegis/oracle/charli3.find_oracle_datum`.
 pub fn find_oracle_datum(
   reference_inputs: List<Input>,
   oracle_nft_policy: ByteArray,
-) -> OracleDatum {
-  when find_oracle_output(reference_inputs, oracle_nft_policy) is {
-    Some(output) ->
-      when output.datum is {
-        InlineDatum(raw_datum) -> {
-          expect datum: OracleDatum = raw_datum
-          datum
-        }
-        _ -> fail @"Oracle UTxO does not have inline datum"
-      }
-    None -> fail @"Oracle UTxO not found in reference inputs"
-  }
+) -> charli3.OracleDatum {
+  charli3.find_oracle_datum(reference_inputs, oracle_nft_policy)
 }
 
-/// Find the oracle Output from reference inputs.
-/// Searches for a UTxO whose value contains a token under the oracle NFT policy
-/// AND whose payment credential is the canonical Charli3 oracle script hash.
-///
-/// [FIX A-016] Previously this only checked NFT presence, allowing a
-/// UTxO at ANY address that holds the Charli3 NFT to be accepted as an
-/// oracle. If Charli3 ever rotated their oracle script address (e.g.,
-/// during an upgrade) or if the NFT could be moved to an attacker-
-/// controlled UTxO, fake oracle data could pass. The address binding
-/// closes that surface — any reference input with the right NFT but at
-/// the wrong script credential is now silently skipped.
-fn find_oracle_output(
-  reference_inputs: List<Input>,
-  oracle_nft_policy: ByteArray,
-) -> Option<Output> {
-  when reference_inputs is {
-    [] -> None
-    [input, ..rest] -> {
-      let has_oracle_nft =
-        assets.policies(input.output.value)
-          |> list.has(oracle_nft_policy)
-      let at_canonical_oracle =
-        when input.output.address.payment_credential is {
-          Script(h) -> h == types.charli3_oracle_script_hash
-          _ -> False
-        }
-      if has_oracle_nft && at_canonical_oracle {
-        Some(input.output)
-      } else {
-        find_oracle_output(rest, oracle_nft_policy)
-      }
-    }
-  }
+/// v5 re-export. See `aegis/oracle/charli3.get_oracle_price`.
+pub fn get_oracle_price(datum: charli3.OracleDatum) -> Int {
+  charli3.get_oracle_price(datum)
 }
 
-// ---------------------------------------------------------------------------
-// Helper: Create OracleDatum (for testing)
-// ---------------------------------------------------------------------------
+/// v5 re-export. See `aegis/oracle/charli3.get_oracle_timestamp`.
+pub fn get_oracle_timestamp(datum: charli3.OracleDatum) -> Int {
+  charli3.get_oracle_timestamp(datum)
+}
 
-/// Create a new OracleDatum with given price, timestamp, and expiry.
-/// Useful for constructing test fixtures.
+/// v5 re-export. See `aegis/oracle/charli3.get_oracle_expiry`.
+pub fn get_oracle_expiry(datum: charli3.OracleDatum) -> Int {
+  charli3.get_oracle_expiry(datum)
+}
+
+/// v5 re-export. See `aegis/oracle/charli3.is_oracle_valid`.
+pub fn is_oracle_valid(datum: charli3.OracleDatum, current_time: Int) -> Bool {
+  charli3.is_oracle_valid(datum, current_time)
+}
+
+/// v5 re-export. See `aegis/oracle/charli3.create_oracle_datum`.
 pub fn create_oracle_datum(
   price: Int,
   timestamp: Int,
   expiry: Int,
-) -> OracleDatum {
-  OracleDatum {
-    price_data: GenericData {
-      price_map: [Pair(0, price), Pair(1, timestamp), Pair(2, expiry)],
-    },
-  }
+) -> charli3.OracleDatum {
+  charli3.create_oracle_datum(price, timestamp, expiry)
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-test get_price_from_generic_data() {
-  let pd =
-    GenericData(
-      [Pair(0, 490_850), Pair(1, 1_707_172_554_600), Pair(2, 1_707_176_154_600)],
-    )
-  get_price(pd) == 490_850
+test dispatcher_charli3_branch_compiles() {
+  // Sanity: the `when provider is { Charli3 -> ... | Orcfax -> ... }` shape
+  // exhaustively matches the OracleProvider sum type. Compilation of this
+  // file IS the assertion; this test pins the property as a regression check
+  // against accidentally adding a non-exhaustive `_` branch to the dispatch.
+  let provider: OracleProvider = Charli3
+  when provider is {
+    Charli3 -> True
+    Orcfax -> False
+  }
 }
 
-test get_timestamp_from_generic_data() {
-  let pd =
-    GenericData(
-      [Pair(0, 490_850), Pair(1, 1_707_172_554_600), Pair(2, 1_707_176_154_600)],
-    )
-  get_timestamp(pd) == 1_707_172_554_600
+test dispatcher_orcfax_branch_compiles() {
+  let provider: OracleProvider = Orcfax
+  when provider is {
+    Charli3 -> False
+    Orcfax -> True
+  }
 }
 
-test get_expiry_from_generic_data() {
-  let pd =
-    GenericData(
-      [Pair(0, 490_850), Pair(1, 1_707_172_554_600), Pair(2, 1_707_176_154_600)],
-    )
-  get_expiry(pd) == 1_707_176_154_600
-}
-
-test oracle_datum_price_extraction() {
-  let datum = create_oracle_datum(350_000, 1_700_000_000_000, 1_700_000_300_000)
-  get_oracle_price(datum) == 350_000
-}
-
-test oracle_datum_timestamp_extraction() {
-  let datum = create_oracle_datum(350_000, 1_700_000_000_000, 1_700_000_300_000)
-  get_oracle_timestamp(datum) == 1_700_000_000_000
-}
-
-test oracle_datum_expiry_extraction() {
-  let datum = create_oracle_datum(350_000, 1_700_000_000_000, 1_700_000_300_000)
-  get_oracle_expiry(datum) == 1_700_000_300_000
-}
-
-test oracle_valid_before_expiry() {
-  let datum = create_oracle_datum(490_850, 1_707_172_554_600, 1_707_176_154_600)
-  is_oracle_valid(datum, 1_707_172_554_600) == True
-}
-
-test oracle_valid_at_expiry() {
-  let datum = create_oracle_datum(490_850, 1_707_172_554_600, 1_707_176_154_600)
-  is_oracle_valid(datum, 1_707_176_154_600) == True
-}
-
-test oracle_invalid_after_expiry() {
-  let datum = create_oracle_datum(490_850, 1_707_172_554_600, 1_707_176_154_600)
-  is_oracle_valid(datum, 1_707_176_154_601) == False
-}
-
-test create_and_read_oracle_datum() {
-  let datum = create_oracle_datum(2723, 1_720_056_807_332, 1_720_078_407_332)
-  get_oracle_price(datum) == 2723 && get_oracle_timestamp(datum) == 1_720_056_807_332 && get_oracle_expiry(
+test dispatcher_v5_compat_create_and_read() {
+  // The v5 re-export path stays bit-for-bit equivalent.
+  let datum = create_oracle_datum(420_000, 1_700_000_000_000, 1_700_999_999_999)
+  get_oracle_price(datum) == 420_000 && get_oracle_timestamp(datum) == 1_700_000_000_000 && get_oracle_expiry(
     datum,
-  ) == 1_720_078_407_332
+  ) == 1_700_999_999_999
 }

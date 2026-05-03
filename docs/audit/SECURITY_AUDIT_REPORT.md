@@ -2327,5 +2327,72 @@ Located at `D:/aegis/offchain/scripts/`:
 
 ---
 
+## v6 Multi-Oracle Scope Expansion (2026-04-30)
+
+**Trigger.** Charli3 CEO Robert Hever signaled potential restructuring/sale of the company. To remove single-vendor oracle risk before mainnet, Aegis added Orcfax as a redundant secondary oracle provider behind a per-policy switch.
+
+**Architectural impact (informational; NO new findings opened).** All v5 invariants remain in force; v6 is a scope expansion, not a security-finding closure. The expansion is independently scoped in `docs/audit/ORCFAX_INTEGRATION_SCOPE.md`.
+
+### What changed in v6
+
+1. **`OracleProvider` sum type** added to `aegis/types.ak`:
+   ```aiken
+   pub type OracleProvider {
+     Charli3
+     Orcfax
+   }
+   ```
+   `when provider is { Charli3 -> ... | Orcfax -> ... }` exhaustivity check IS the curated whitelist — adding a new provider rotates every validator hash.
+
+2. **`PolicyDatum` gained 11th field** `oracle_provider: OracleProvider` (appended). Every policy is bound at creation time to one and only one provider; cross-provider mixing is prevented at every spending branch.
+
+3. **Top-level dispatcher** `aegis/oracle.resolve_oracle_price(refs, provider, oracle_nft) -> Price` matches on `OracleProvider` and delegates to per-provider parser modules:
+   - `aegis/oracle/charli3.ak` — owns A-016 trust handshake (canonical script-hash binding)
+   - `aegis/oracle/orcfax.ak` — owns the FSP→FS pointer indirection, `FsDat<Rational>` parsing, and the 30-minute consumer-side freshness window
+   - `aegis/oracle/types.ak` — provider-uniform internal `Price` record
+
+4. **`oracle_nft` field semantics** are now provider-dependent:
+   - `Charli3` → Charli3 oracle NFT policy id (existing meaning)
+   - `Orcfax` → Orcfax FSP (Feed Source Pointer) script hash
+
+5. **A-012 generalized for batches.** `BatchClaim` now requires uniform `(oracle_provider, oracle_nft)` across batched policies, preventing cross-provider batches and preserving the original "single oracle reading" property.
+
+6. **Compile-time pinned constants** for Orcfax (per network):
+   - `orcfax_fsp_script_hash_preview = #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230"`
+   - `orcfax_fsp_script_hash_mainnet = #"8793893b5dda6a513ba63c80e9d7b2d4f108060c11979bfc7d863ff0"`
+   - `orcfax_ada_usd_feed_id = #"4345522f4144412d5553442f"` (UTF-8 `"CER/ADA-USD/"`, trailing slash mandatory)
+   - `orcfax_freshness_window_ms = 30 * 60 * 1_000`
+
+7. **v5 backwards-compat re-exports** in `aegis/oracle.ak` (`find_oracle_datum`, `get_oracle_price`, `is_oracle_valid`, `create_oracle_datum`) keep `security_tests.ak` and `fixtures.ak` compiling unchanged.
+
+### v6 deployment artifacts (live on preprod)
+
+| Artifact | v5 | v6-multi-oracle |
+|---|---|---|
+| `policy_validator_hash` | `b63091c33ee34451f59f3186bd493db39cc46387b04be59d616e146b` | `0a05ff62e413f298c535ff2c26883b8fd9a31acbeb7d49451a4e0193` |
+| `policy_validator_address` | `addr_test1wzmrpywr8m35g504nuccd02f8keee3rrs7cyhevav9hpg6ckww474` | `addr_test1wq9qtlmzusfl9xx9xhljcf5g8w8angc6e04h6j29rf8qryc5c6swd` |
+| `pool_validator_hash` | `c7cf3d90e885ddc54d1187edd491d68d1e1c2bd5cb7b2c986f632377` | `5902fbe6bd1aefd0124341ce4dcc00b7bc6ea05e1b1112fb92d34a6d` |
+| `pool_validator_address` | `addr_test1wrru70vsazzam32dzxr7m4y366x3u8pt6h9hktycda3jxac2mfn8q` | `addr_test1wpvs97lxh5dwl5qjgdquunwvqzmmcm4qtcd3zyhmjtf55mgxmrqpv` |
+| `lp_token_policy_hash` | `08ca63fe64473b547dcce9279770bbbcd0a39ff8525082dc48eefc7a` | `119709323f283fdbe569a817a8183c771b6d6f4d1b4d1561ba6906ea` |
+| `pool_nft` | `AEGIS_POOL_V6` (`4720c6e6...`) | `AEGIS_POOL_V7` (`6569cc54822498cb789508b63f56c57816f115f6bccf6bf067ff436d`) |
+| `policy_validator` ref UTxO | `4c8e91df...c14d9c354#0` | `4a95631a1a3ca91352df405722118663dcf8b246ba97ed1895b0bdea2a9dda10#0` |
+| `pool_validator` ref UTxO | `b6d1e7c2...868b52#0` | `a06757914f720c9b5dd5bbf0e34983e1444eef216ff33e7c3548d934787cd175#0` |
+| `lp_token_policy` ref UTxO | `714004ae...cf43d#0` | `1a9faaba15d09489f0ba79941f9696104a59d12ca714108a9cba6db35d486f28#0` |
+| Pool init UTxO | `6d8dd3ca...e81e#0` | `c6b5ea058d2030de3dc9f8c8799a0ca285f60063be1c02cb0d4486cb7d9ab54c#0` |
+
+### v6 green-path proof on chain
+
+Underwrite via Charli3 path through the new dispatcher: tx `ff940ca1c89f5824c0ac9a7f897f2c81bb2f7d15b53cc69507a9b5a42f95fe13` (10 ADA coverage, 2 ADA premium, 0.01 ADA Conway treasury donation, `oracle_provider: Charli3` in the new 11-field PolicyDatum). `valid_contract: true`. See `GREEN_PATH_PROOFS.md` §2 for full catalog.
+
+### Mainnet readiness — v6 status
+
+- **All v5 closed findings remain closed.** v6 modifies the oracle-resolution layer; it does not weaken any existing invariant.
+- **Test coverage:** new `green_v6_*` tests (12) + dispatcher tests (3) added to `security_tests.ak`. Aiken green tests pass on v6 contracts.
+- **Off-chain parity:** Python `OracleProviderCharli3` (Constr 0) / `OracleProviderOrcfax` (Constr 1) match Aiken side; `_try_parse_policy_datum` requires 11 fields; cross-provider mixing rejected client-side as well.
+- **External auditor:** notified of v5→v6 scope expansion 2026-04-30. Audit scope updated accordingly.
+- **Preprod Orcfax:** real Orcfax does not deploy to preprod. A mock FSP/FS validator pair will be deployed for the dev loop; production preview/mainnet uses the real Orcfax constants pinned above.
+
+---
+
 *Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30*
-*Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows.*
+*Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows. v6 multi-oracle expansion deployed 2026-04-30; no new findings opened by the expansion.*
