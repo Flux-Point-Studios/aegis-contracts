@@ -10,19 +10,31 @@ Every transaction below is on Cardano preprod and verifiable via [preprod.cardan
 
 These prove the deploy scripts (`mint_pool_nft.py`, `publish_refs.py`, `init_pool.py`) produce txs the chain accepts. Each deployment version also proves the parameterization cascade (policy hash → pool hash → lp_token hash) is correct end-to-end.
 
-### Latest live deploy — v5
+### Latest live deploy — v6-multi-oracle (2026-04-30)
+
+v6 introduces the multi-oracle dispatcher (Charli3 + Orcfax) and rotates every script hash because PolicyDatum gained an 11th field (`oracle_provider: OracleProvider`).
 
 | Step | Tx hash | Verifier link |
 |---|---|---|
-| `pool_nft` mint (one-shot, A-011) | `75a60bc896ac7a820f844df20a9ee5101355e8e8f3ae81667b29038c6620b53e` | [explorer](https://preprod.cardanoscan.io/transaction/75a60bc896ac7a820f844df20a9ee5101355e8e8f3ae81667b29038c6620b53e) |
-| publish ref `policy_validator` (carryover from v4) | `4c8e91df115b4354ad880271ad0e918e013c5653985160350b5643cc14d9c354` | [explorer](https://preprod.cardanoscan.io/transaction/4c8e91df115b4354ad880271ad0e918e013c5653985160350b5643cc14d9c354) |
-| publish ref `pool_validator` | `b6d1e7c25b624e7dfc7f6fd9b08b2589e621695e9734eb0dcb5173bf63868b52` | [explorer](https://preprod.cardanoscan.io/transaction/b6d1e7c25b624e7dfc7f6fd9b08b2589e621695e9734eb0dcb5173bf63868b52) |
-| publish ref `lp_token_policy` | `714004aefb267b4b5ef5977cc694db4b2f7f3c8a9d16d9368da3e26fc61cf43d` | [explorer](https://preprod.cardanoscan.io/transaction/714004aefb267b4b5ef5977cc694db4b2f7f3c8a9d16d9368da3e26fc61cf43d) |
-| `init_pool` (locks NFT + datum) | `6d8dd3cae2a782a397a073a84294120237555caed361a696ebeae0a39282e81e` | [explorer](https://preprod.cardanoscan.io/transaction/6d8dd3cae2a782a397a073a84294120237555caed361a696ebeae0a39282e81e) |
+| `pool_nft` mint (AEGIS_POOL_V7, one-shot A-011) | `bbdf643e0a0dde247004ba3c08c89095c1fcdd7c322b555f237be8c3816ed286` | [explorer](https://preprod.cardanoscan.io/transaction/bbdf643e0a0dde247004ba3c08c89095c1fcdd7c322b555f237be8c3816ed286) |
+| publish ref `policy_validator` (hash `0a05ff62...`) | `4a95631a1a3ca91352df405722118663dcf8b246ba97ed1895b0bdea2a9dda10` | [explorer](https://preprod.cardanoscan.io/transaction/4a95631a1a3ca91352df405722118663dcf8b246ba97ed1895b0bdea2a9dda10) |
+| publish ref `pool_validator` (hash `5902fbe6...`) | `a06757914f720c9b5dd5bbf0e34983e1444eef216ff33e7c3548d934787cd175` | [explorer](https://preprod.cardanoscan.io/transaction/a06757914f720c9b5dd5bbf0e34983e1444eef216ff33e7c3548d934787cd175) |
+| publish ref `lp_token_policy` (hash `11970932...`) | `1a9faaba15d09489f0ba79941f9696104a59d12ca714108a9cba6db35d486f28` | [explorer](https://preprod.cardanoscan.io/transaction/1a9faaba15d09489f0ba79941f9696104a59d12ca714108a9cba6db35d486f28) |
+| `init_pool` (locks AEGIS_POOL_V7 + 6-field PoolDatum) | `c6b5ea058d2030de3dc9f8c8799a0ca285f60063be1c02cb0d4486cb7d9ab54c` | [explorer](https://preprod.cardanoscan.io/transaction/c6b5ea058d2030de3dc9f8c8799a0ca285f60063be1c02cb0d4486cb7d9ab54c) |
+
+**v6 canonical state on preprod:**
+- `policy_validator` hash: `0a05ff62e413f298c535ff2c26883b8fd9a31acbeb7d49451a4e0193`
+- `policy_validator` address: `addr_test1wq9qtlmzusfl9xx9xhljcf5g8w8angc6e04h6j29rf8qryc5c6swd`
+- `pool_validator` hash: `5902fbe6bd1aefd0124341ce4dcc00b7bc6ea05e1b1112fb92d34a6d`
+- `pool_validator` address: `addr_test1wpvs97lxh5dwl5qjgdquunwvqzmmcm4qtcd3zyhmjtf55mgxmrqpv`
+- `lp_token_policy` hash: `119709323f283fdbe569a817a8183c771b6d6f4d1b4d1561ba6906ea`
+- `pool_nft` policy id: `6569cc54822498cb789508b63f56c57816f115f6bccf6bf067ff436d`
+- `pool_nft` asset name: `AEGIS_POOL_V7`
+- canonical pool UTxO: `c6b5ea058d2030de3dc9f8c8799a0ca285f60063be1c02cb0d4486cb7d9ab54c#0`
 
 ### Historical deploy txs
 
-Prior versions' deploy hashes are in [`deploy/archive/deploy-state.preprod.v0..v4.json`](../deploy/archive/). Each rotation was driven by a closed audit finding (see `SECURITY_AUDIT_REPORT.md` "Hash rotation history").
+Prior version (v5) deploy state archived at [`configs/deploy-state.preprod.v5.json`](../configs/). Each hash rotation is driven by a closed audit finding or scope expansion (see `SECURITY_AUDIT_REPORT.md` "Hash rotation history").
 
 ---
 
@@ -49,13 +61,16 @@ LP burns aLP tokens, withdraws proportional ADA. Validator branches: `pool.Remov
 
 ### `pool.Underwrite` + Conway `treasury_donation`
 
-Single-policy underwrite. The headline demo: validator's `donation_ok` clause executes, the treasury donation is in body field 22, the policy output binds to the canonical pool, and the policy's coverage is held in lovelace per A-004. **This is the most important proof** — it exercises the bulk of the v5 invariant set in one tx.
+Single-policy underwrite. The headline demo: validator's `donation_ok` clause executes, the treasury donation is in body field 22, the policy output binds to the canonical pool, and the policy's coverage is held in lovelace per A-004. **This is the most important proof** — it exercises the bulk of the v6 invariant set in one tx, including the new oracle dispatcher (`oracle_provider: Charli3` in PolicyDatum field 11).
 
-| Tx hash | Coverage | Premium | Donation (body field 22) | Verifier |
-|---|---|---|---|---|
-| `6ff0ebac89fbcb56823a9f94d38c231269389ee7a31b922f33fb918c2f3a6caa` | 10 ADA | 2 ADA | 10,000 lovelace | [explorer](https://preprod.cardanoscan.io/transaction/6ff0ebac89fbcb56823a9f94d38c231269389ee7a31b922f33fb918c2f3a6caa) |
+| Version | Tx hash | Coverage | Premium | Donation (body field 22) | Verifier |
+|---|---|---|---|---|---|
+| v6-multi-oracle | `ff940ca1c89f5824c0ac9a7f897f2c81bb2f7d15b53cc69507a9b5a42f95fe13` | 10 ADA | 2 ADA | 10,000 lovelace | [explorer](https://preprod.cardanoscan.io/transaction/ff940ca1c89f5824c0ac9a7f897f2c81bb2f7d15b53cc69507a9b5a42f95fe13) |
+| v5 (historical) | `6ff0ebac89fbcb56823a9f94d38c231269389ee7a31b922f33fb918c2f3a6caa` | 10 ADA | 2 ADA | 10,000 lovelace | [explorer](https://preprod.cardanoscan.io/transaction/6ff0ebac89fbcb56823a9f94d38c231269389ee7a31b922f33fb918c2f3a6caa) |
 
 `valid_contract: true`. Body CBOR includes `body[22] = 10000` — verified via `curl /api/v0/txs/<hash>/cbor` and decoding. Donation amount = exactly `calculate_treasury_cut(2_000_000, 200, 2500) = 10_000`.
+
+The v6 tx also proves the new 11-field PolicyDatum encoding parses correctly on-chain through `aegis/oracle.resolve_oracle_price` -> `aegis/oracle/charli3.resolve` for the Charli3 branch.
 
 ### `pool.BatchUnderwrite` (multi-policy single-tx)
 
@@ -126,9 +141,9 @@ We have multi-policy state on chain (the BatchUnderwrite above produced 2 fresh 
 The validators currently powering Aegis preprod are stored as CIP-33 reference scripts. Auditors can fetch the raw script bytes from any of the ref-script UTxOs above and recompute the hash:
 
 ```bash
-# Fetch the pool_validator's reference script
+# Fetch the v6 pool_validator's reference script
 curl -H "project_id: <YOUR_BLOCKFROST_KEY>" \
-  https://cardano-preprod.blockfrost.io/api/v0/scripts/c7cf3d90e885ddc54d1187edd491d68d1e1c2bd5cb7b2c986f632377/cbor
+  https://cardano-preprod.blockfrost.io/api/v0/scripts/5902fbe6bd1aefd0124341ce4dcc00b7bc6ea05e1b1112fb92d34a6d/cbor
 
 # Recompute the hash with cardano-cli or any UPLC tooling — should match.
 ```
@@ -141,10 +156,10 @@ The committed `contracts/plutus.json` is the **parameter-free** blueprint; produ
 
 | Branch | Aiken green test | On-chain proof |
 |---|---|---|
-| `pool_nft.mint` | `pool_nft_logic_*` | ✅ 5 deploys |
-| `policy_validator` byte-stability across deploys | (n/a) | ✅ ref UTxO `4c8e91df...c14d9c354` carried v4 → v5 |
-| `pool.Underwrite` + treasury donation | `green_a_021_*` | ✅ `6ff0ebac...` |
-| `pool.BatchUnderwrite` + treasury donation aggregate | `green_a_021_batch_underwrite_aggregate_donation_correct`, `green_a_022_*`, `green_a_025_*` | ✅ `b1f1ec3e...` |
+| `pool_nft.mint` | `pool_nft_logic_*` | ✅ 6 deploys (incl. v6 `bbdf643e...`) |
+| `policy_validator` v6 schema migration | `dispatcher_*`, `green_v6_*` | ✅ ref UTxO `4a95631a...` (v6) |
+| `pool.Underwrite` + treasury donation + oracle dispatcher | `green_a_021_*`, `green_v6_charli3_underwrite_*` | ✅ v6 `ff940ca1...`, v5 `6ff0ebac...` |
+| `pool.BatchUnderwrite` + treasury donation aggregate | `green_a_021_batch_underwrite_aggregate_donation_correct`, `green_a_022_*`, `green_a_025_*`, A-012 multi-oracle uniform check | ✅ `b1f1ec3e...` (v5; v6 batch demo pending) |
 | `pool.AddLiquidity` + `lp_token.MintLP` | `verify_add_liquidity_datum_*` | ✅ `4ac30d4c...`, `df16e1cf...` |
 | `pool.RemoveLiquidity` + `lp_token.BurnLP` | `verify_remove_liquidity_datum_*`, `solve_lp_burn_for_withdrawal_*` | ✅ `3322c5a5...` |
 | `policy.Claim` + `pool.ProcessClaim` | `verify_claim_datum_*`, `green_a_001_*`, `green_a_005_*`, `green_a_009_*` | ⏳ blocked by stale Charli3 preprod oracle |

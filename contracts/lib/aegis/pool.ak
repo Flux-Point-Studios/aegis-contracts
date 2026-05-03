@@ -124,12 +124,7 @@ pub fn verify_claim_datum(
   new_active: Int,
   payout: Int,
 ) -> Bool {
-  payout >= 0
-    && payout <= old_active
-    && new_total == old_total - payout
-    && new_active == old_active - payout
-    && new_total >= 0
-    && new_active >= 0
+  payout >= 0 && payout <= old_active && new_total == old_total - payout && new_active == old_active - payout && new_total >= 0 && new_active >= 0
 }
 
 /// Verify that pool datum is updated correctly for AddLiquidity.
@@ -145,9 +140,7 @@ pub fn verify_add_liquidity_datum(
   amount: Int,
 ) -> Bool {
   let lp_minted = calculate_lp_mint(amount, old_total, old_lp_supply)
-  new_total == old_total + amount
-    && new_active == old_active
-    && new_lp_supply == old_lp_supply + lp_minted
+  new_total == old_total + amount && new_active == old_active && new_lp_supply == old_lp_supply + lp_minted
 }
 
 /// Verify that pool datum is updated correctly for RemoveLiquidity.
@@ -163,12 +156,9 @@ pub fn verify_remove_liquidity_datum(
   amount: Int,
   lp_burned: Int,
 ) -> Bool {
-  let expected_withdrawal = calculate_withdrawal(lp_burned, old_total, old_lp_supply)
-  expected_withdrawal == amount
-    && new_total == old_total - amount
-    && new_active == old_active
-    && new_lp_supply == old_lp_supply - lp_burned
-    && lp_burned >= 0
+  let expected_withdrawal =
+    calculate_withdrawal(lp_burned, old_total, old_lp_supply)
+  expected_withdrawal == amount && new_total == old_total - amount && new_active == old_active && new_lp_supply == old_lp_supply - lp_burned && lp_burned >= 0
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +301,8 @@ test verify_remove_liquidity_datum_correct() {
 test verify_claim_datum_rejects_excessive_payout_a_005_fix() {
   // Pool: 1000 ADA total, 500 ADA active, payout 600 ADA (> active)
   let new_total = 1_000_000_000 - 600_000_000
-  let new_active = 500_000_000 - 600_000_000  // -100M (impossible)
+  let new_active = 500_000_000 - 600_000_000
+  // -100M (impossible)
   let datum_passes =
     verify_claim_datum(
       1_000_000_000,
@@ -326,8 +317,10 @@ test verify_claim_datum_rejects_excessive_payout_a_005_fix() {
 
 test verify_claim_datum_accepts_legitimate_payout_a_005_fix() {
   // Pool: 1000 ADA total, 500 ADA active, payout 200 ADA (≤ active) — legitimate.
-  let new_total = 1_000_000_000 - 200_000_000  // 800M
-  let new_active = 500_000_000 - 200_000_000  // 300M
+  let new_total = 1_000_000_000 - 200_000_000
+  // 800M
+  let new_active = 500_000_000 - 200_000_000
+  // 300M
   verify_claim_datum(
     1_000_000_000,
     500_000_000,
@@ -338,7 +331,13 @@ test verify_claim_datum_accepts_legitimate_payout_a_005_fix() {
 }
 
 test verify_claim_datum_rejects_negative_payout_a_005_fix() {
-  verify_claim_datum(1_000_000_000, 500_000_000, 1_000_100_000, 500_100_000, -100_000) == False
+  verify_claim_datum(
+    1_000_000_000,
+    500_000_000,
+    1_000_100_000,
+    500_100_000,
+    -100_000,
+  ) == False
 }
 
 // Verify underwrite cannot be called when pool has zero liquidity

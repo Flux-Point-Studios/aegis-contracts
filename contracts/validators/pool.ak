@@ -13,7 +13,6 @@ use aegis/types.{
 use aegis/validation.{
   count_script_inputs, get_lower_bound, get_upper_bound, output_has_nft,
 }
-use cardano/address.{Script}
 // =============================================================================
 // Aegis Insurance Protocol - Pool Validator
 // Location: contracts/validators/pool.ak
@@ -34,6 +33,7 @@ use cardano/address.{Script}
 // =============================================================================
 
 use aiken/collection/list
+use cardano/address.{Script}
 use cardano/assets
 use cardano/transaction.{
   InlineDatum, Input, Output, OutputReference, Transaction, ValidityRange,
@@ -104,31 +104,34 @@ fn batch_policies_match_totals(
           // permanently unspendable. Cost-to-damage ratio ~1:1 — the attacker
           // paid `coverage + premium` for `coverage` worth of locked pool
           // capacity.
-          Script(h) -> if h == policy_script_hash {
-            when out.datum is {
-              InlineDatum(raw_pdat) -> {
-                expect pdat: PolicyDatum = raw_pdat
-                let time_ok =
-                  start_time_in_tx_range(
-                    pdat.start_time, pdat.expiry_time, validity_range,
-                  )
-                if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok {
-                  let funded =
-                    assets.lovelace_of(out.value) >= pdat.coverage_amount
-                  (
-                    cov_acc + pdat.coverage_amount,
-                    prem_acc + pdat.premium_paid,
-                    ok_acc && funded,
-                  )
-                } else {
-                  acc
+          Script(h) ->
+            if h == policy_script_hash {
+              when out.datum is {
+                InlineDatum(raw_pdat) -> {
+                  expect pdat: PolicyDatum = raw_pdat
+                  let time_ok =
+                    start_time_in_tx_range(
+                      pdat.start_time,
+                      pdat.expiry_time,
+                      validity_range,
+                    )
+                  if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok {
+                    let funded =
+                      assets.lovelace_of(out.value) >= pdat.coverage_amount
+                    (
+                      cov_acc + pdat.coverage_amount,
+                      prem_acc + pdat.premium_paid,
+                      ok_acc && funded,
+                    )
+                  } else {
+                    acc
+                  }
                 }
+                _ -> acc
               }
-              _ -> acc
+            } else {
+              acc
             }
-          } else {
-            acc
-          }
           _ -> acc
         }
       },
@@ -183,30 +186,30 @@ fn policy_output_matches_underwrite(
       0,
       fn(out, acc) {
         when out.address.payment_credential is {
-          Script(h) -> if h == policy_script_hash {
-            when out.datum is {
-              InlineDatum(raw_pdat) -> {
-                expect pdat: PolicyDatum = raw_pdat
-                let predicate =
-                  pdat.pool_script_hash == own_pool_hash
-                    && pdat.pool_nft == own_pool_nft
-                    && pdat.coverage_amount == coverage
-                    && pdat.premium_paid == premium
-                    && assets.lovelace_of(out.value) >= coverage
-                    && start_time_in_tx_range(
-                         pdat.start_time, pdat.expiry_time, validity_range,
-                       )
-                if predicate {
-                  acc + 1
-                } else {
-                  acc
+          Script(h) ->
+            if h == policy_script_hash {
+              when out.datum is {
+                InlineDatum(raw_pdat) -> {
+                  expect pdat: PolicyDatum = raw_pdat
+                  let predicate =
+                    pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && assets.lovelace_of(
+                      out.value,
+                    ) >= coverage && start_time_in_tx_range(
+                      pdat.start_time,
+                      pdat.expiry_time,
+                      validity_range,
+                    )
+                  if predicate {
+                    acc + 1
+                  } else {
+                    acc
+                  }
                 }
+                _ -> acc
               }
-              _ -> acc
+            } else {
+              acc
             }
-          } else {
-            acc
-          }
           _ -> acc
         }
       },
@@ -244,7 +247,14 @@ validator pool_validator(policy_script_hash: ByteArray) {
     // pool is a singleton (A-011), so this validator is the single point of
     // donation enforcement — there is no double-satisfaction risk because
     // there is only ever one consumed pool input per tx.
-    let Transaction { inputs, outputs, mint, treasury_donation, validity_range, .. } = self
+    let Transaction {
+      inputs,
+      outputs,
+      mint,
+      treasury_donation,
+      validity_range,
+      ..
+    } = self
 
     // Find our own input to determine the script address
     let own_input =
@@ -346,7 +356,11 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // `>=` (not `==`) is used per scope §3.3 — overshoots are tips to
         // the treasury, not an attack surface.
         let required_donation =
-          calculate_treasury_cut(premium, datum.protocol_fee_bps, treasury_share_bps)
+          calculate_treasury_cut(
+            premium,
+            datum.protocol_fee_bps,
+            treasury_share_bps,
+          )
         let donation_ok =
           when treasury_donation is {
             Some(amt) -> amt >= required_donation
@@ -395,10 +409,10 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // equal the policy's declared coverage. Both bindings prevent the
         // single-tx pool drain attack described in A-001.
         let policy_targets_this_pool =
-          policy_datum.pool_script_hash == own_pool_hash
-            && policy_datum.pool_nft == datum.pool_nft
+          policy_datum.pool_script_hash == own_pool_hash && policy_datum.pool_nft == datum.pool_nft
         let payout_matches_coverage = payout == policy_datum.coverage_amount
-        let policy_consumed = policy_targets_this_pool && payout_matches_coverage
+        let policy_consumed =
+          policy_targets_this_pool && payout_matches_coverage
 
         // 3. Verify datum update is correct
         let datum_ok =
@@ -497,8 +511,9 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 4. [FIX A-003] LP burn quantity is taken from the mint and must
         // be the canonical match for the requested withdrawal amount.
         let mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
-        let lp_burned_qty = -mint_qty   // positive number = burn count
+        let lp_burned_qty = -mint_qty
 
+        // positive number = burn count
         // 5. Verify datum update — including lp_supply decrement and the
         // exact relationship between lp_burned and amount.
         let datum_ok =
@@ -606,7 +621,11 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // builder's single-donation field; per-policy cuts would re-introduce
         // a multi-claim double-satisfaction shape and waste min-fee bytes.
         let required_donation =
-          calculate_treasury_cut(total_premium, datum.protocol_fee_bps, treasury_share_bps)
+          calculate_treasury_cut(
+            total_premium,
+            datum.protocol_fee_bps,
+            treasury_share_bps,
+          )
         let donation_ok =
           when treasury_donation is {
             Some(amt) -> amt >= required_donation
@@ -638,8 +657,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             Script(h) -> h
             _ -> #""
           }
-        let policies_consumed =
-          count_script_inputs(inputs, policy_script) >= 1
+        let policies_consumed = count_script_inputs(inputs, policy_script) >= 1
         let consumed_policies_match =
           consumed_policies_total_to(
             inputs,
@@ -666,9 +684,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 7. [FIX A-005] Non-negativity (the old new_total >= new_active check
         // was tautological because both fields decrement equally).
         let remains_non_negative =
-          new_datum.total_liquidity >= 0
-            && new_datum.active_coverage >= 0
-            && total_returned <= datum.active_coverage
+          new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0 && total_returned <= datum.active_coverage
 
         returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative
       }
@@ -730,17 +746,14 @@ validator pool_validator(policy_script_hash: ByteArray) {
 
         // 3. [Anti-A-001] Policy must point at THIS pool.
         let policy_targets_this_pool =
-          policy_datum.pool_script_hash == own_pool_hash
-            && policy_datum.pool_nft == datum.pool_nft
+          policy_datum.pool_script_hash == own_pool_hash && policy_datum.pool_nft == datum.pool_nft
 
         // 4. Compute the canonical refund (derived; not caller-controlled).
         let refund_amount = calculate_refund(policy_datum.premium_paid)
 
         // 5. Sanity bounds (defensive — guarantees no underflow).
         let bounds_ok =
-          refund_amount >= 0
-            && refund_amount <= datum.total_liquidity
-            && policy_datum.coverage_amount <= datum.active_coverage
+          refund_amount >= 0 && refund_amount <= datum.total_liquidity && policy_datum.coverage_amount <= datum.active_coverage
 
         // 6. Pool's value must DECREASE by exactly refund_amount
         // (the policy's pre-funded value is routed by policy.Cancel directly
@@ -751,8 +764,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 7. Datum: total_liquidity drops by refund, active_coverage drops by
         // the consumed policy's coverage. lp_supply unchanged.
         let datum_ok =
-          new_datum.total_liquidity == datum.total_liquidity - refund_amount
-            && new_datum.active_coverage == datum.active_coverage - policy_datum.coverage_amount
+          new_datum.total_liquidity == datum.total_liquidity - refund_amount && new_datum.active_coverage == datum.active_coverage - policy_datum.coverage_amount
 
         // 8. Immutable fields preserved (incl. lp_supply — LP supply does NOT
         // change on cancel; only Add/Remove Liquidity move it).

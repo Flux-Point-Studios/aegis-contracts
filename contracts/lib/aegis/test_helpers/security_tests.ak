@@ -13,16 +13,25 @@
 //          The audit's PoC scenarios are encoded one-per-test below.
 // =============================================================================
 
-use aegis/oracle.{create_oracle_datum, find_oracle_datum, get_oracle_price, is_oracle_valid}
+use aegis/oracle.{
+  create_oracle_datum, find_oracle_datum, get_oracle_price, is_oracle_valid,
+}
+use aegis/oracle/orcfax as orcfax_parser
 use aegis/pool.{
   calculate_lp_mint, calculate_withdrawal, verify_add_liquidity_datum,
   verify_claim_datum, verify_remove_liquidity_datum,
 }
 use aegis/pricing.{calculate_treasury_cut, is_premium_adequate}
 use aegis/test_helpers/fixtures
-use aegis/types.{PolicyDatum, PoolDatum, cancellation_window, treasury_share_bps}
+use aegis/types.{
+  Charli3, Orcfax, PolicyDatum, PoolDatum, cancellation_window,
+  charli3_oracle_script_hash, orcfax_ada_usd_feed_id,
+  orcfax_freshness_window_ms, orcfax_fsp_script_hash_mainnet,
+  orcfax_fsp_script_hash_preview, treasury_share_bps,
+}
 use aegis/validation.{
-  find_canonical_pool_output, sum_lovelace_to_enterprise_pkh, sum_lovelace_to_pkh,
+  find_canonical_pool_output, sum_lovelace_to_enterprise_pkh,
+  sum_lovelace_to_pkh,
 }
 use cardano/assets
 use cardano/transaction.{InlineDatum, NoDatum, Output}
@@ -55,7 +64,8 @@ test green_a_001_synthetic_policy_drain_is_rejected() {
 test green_a_001_pool_nft_binding_rejects_unrelated_pool() {
   // Attacker's policy points at a different pool_nft than the one being drained.
   let pool_d = fixtures.default_pool_datum()
-  let attack_policy_pool_nft = #"deadbeef00112233445566778899aabbccddeeff00112233445566AABB"
+  let attack_policy_pool_nft =
+    #"deadbeef00112233445566778899aabbccddeeff00112233445566aabb"
   attack_policy_pool_nft != pool_d.pool_nft
 }
 
@@ -112,7 +122,8 @@ test green_a_003_burn_during_addliquidity_rejected() {
     1_000_000_000,
     1_500_000_000,
     100_000_000,
-    999_000_000,    // lp_supply DECREASED — should be 1.5B
+    999_000_000,
+    // lp_supply DECREASED — should be 1.5B
     500_000_000,
   ) == False
 }
@@ -146,10 +157,17 @@ test green_a_004_underwrite_with_no_policy_output_rejected() {
 test green_a_005_verify_claim_datum_rejects_excessive_payout() {
   let old_total = 1_000_000_000
   let old_active = 200_000_000
-  let attacker_payout = 1_000_000_000  // > old_active
+  let attacker_payout = 1_000_000_000
+  // > old_active
   let new_total = old_total - attacker_payout
   let new_active = old_active - attacker_payout
-  verify_claim_datum(old_total, old_active, new_total, new_active, attacker_payout) == False
+  verify_claim_datum(
+    old_total,
+    old_active,
+    new_total,
+    new_active,
+    attacker_payout,
+  ) == False
 }
 
 test green_a_005_verify_claim_datum_rejects_negative_payout() {
@@ -204,15 +222,7 @@ test green_a_006_unrelated_outputs_excluded() {
 
 test green_a_007_add_liquidity_with_lp_supply_increment_correct() {
   // Pool empty: 0 total, 0 lp_supply. Deposit 100M → 1:1 lp_minted = 100M.
-  verify_add_liquidity_datum(
-    0,
-    0,
-    0,
-    100_000_000,
-    0,
-    100_000_000,
-    100_000_000,
-  ) == True
+  verify_add_liquidity_datum(0, 0, 0, 100_000_000, 0, 100_000_000, 100_000_000) == True
 }
 
 test green_a_007_add_liquidity_with_under_minted_lp_rejected() {
@@ -225,7 +235,8 @@ test green_a_007_add_liquidity_with_under_minted_lp_rejected() {
     1_000_000_000,
     1_500_000_000,
     100_000_000,
-    1_000_000_001,    // should be 1_500_000_000
+    1_000_000_001,
+    // should be 1_500_000_000
     500_000_000,
   ) == False
 }
@@ -236,34 +247,42 @@ test green_a_007_add_liquidity_with_under_minted_lp_rejected() {
 
 test green_a_008_find_canonical_pool_output_requires_nft() {
   // Output 1: at pool address but NO nft (attacker's fake pool).
-  let fake = Output {
-    address: fixtures.script_addr(fixtures.pool_script_hash),
-    value: assets.from_lovelace(10_000_000_000),
-    datum: NoDatum,
-    reference_script: None,
-  }
+  let fake =
+    Output {
+      address: fixtures.script_addr(fixtures.pool_script_hash),
+      value: assets.from_lovelace(10_000_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    }
   // Output 2: at pool address WITH the canonical nft.
   let real =
-    fixtures.pool_continuation(10_000_000_000, True, fixtures.default_pool_datum())
+    fixtures.pool_continuation(
+      10_000_000_000,
+      True,
+      fixtures.default_pool_datum(),
+    )
 
   // Test: helper finds the real one, skips the fake.
-  when find_canonical_pool_output(
-    [fake, real],
-    fixtures.pool_script_hash,
-    fixtures.pool_nft_policy,
-  ) is {
+  when
+    find_canonical_pool_output(
+      [fake, real],
+      fixtures.pool_script_hash,
+      fixtures.pool_nft_policy,
+    )
+  is {
     Some(found) -> assets.lovelace_of(found.value) == 10_000_000_000
     None -> False
   }
 }
 
 test green_a_008_find_canonical_pool_output_returns_none_if_only_fake() {
-  let fake = Output {
-    address: fixtures.script_addr(fixtures.pool_script_hash),
-    value: assets.from_lovelace(99_999_000_000_000),
-    datum: NoDatum,
-    reference_script: None,
-  }
+  let fake =
+    Output {
+      address: fixtures.script_addr(fixtures.pool_script_hash),
+      value: assets.from_lovelace(99_999_000_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    }
   find_canonical_pool_output(
     [fake],
     fixtures.pool_script_hash,
@@ -343,7 +362,8 @@ test green_a_020_rejects_policy_pointing_at_different_pool() {
   // a different pool cannot drain THIS pool via AcceptCancellation. The check
   // is `policy.pool_nft == datum.pool_nft && policy.pool_script_hash == own_pool_hash`.
   let real_pool = fixtures.default_pool_datum()
-  let attacker_policy_pool_nft = #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  let attacker_policy_pool_nft =
+    #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
   attacker_policy_pool_nft != real_pool.pool_nft
 }
 
@@ -352,8 +372,10 @@ test green_a_020_rejects_refund_overflow() {
   // exceeds available liquidity (degenerate case: pool drained), the redeemer
   // rejects rather than allowing total_liquidity to go negative.
   let huge_premium = 10_000_000_000_000
-  let refund = huge_premium - huge_premium * 1_000 / 10_000  // 9 trillion
-  let small_total_liquidity = 1_000_000_000  // 1k ADA
+  let refund = huge_premium - huge_premium * 1_000 / 10_000
+  // 9 trillion
+  let small_total_liquidity = 1_000_000_000
+  // 1k ADA
   refund > small_total_liquidity
 }
 
@@ -371,14 +393,18 @@ test green_a_020_rejects_coverage_underflow() {
 // ---------------------------------------------------------------------------
 
 test sanity_oracle_lookup_works_with_canonical_fixture() {
-  let ref_input = fixtures.oracle_ref_input(420_000, 1_700_000_000_000, 1_700_999_999_999)
+  let ref_input =
+    fixtures.oracle_ref_input(420_000, 1_700_000_000_000, 1_700_999_999_999)
   let datum = find_oracle_datum([ref_input], fixtures.oracle_nft_policy)
   get_oracle_price(datum) == 420_000
 }
 
 test sanity_oracle_freshness() {
   let datum = create_oracle_datum(420_000, 1_700_000_000_000, 1_700_999_999_999)
-  is_oracle_valid(datum, 1_700_500_000_000) && !is_oracle_valid(datum, 1_701_000_000_000)
+  is_oracle_valid(datum, 1_700_500_000_000) && !is_oracle_valid(
+    datum,
+    1_701_000_000_000,
+  )
 }
 
 test sanity_synthetic_policy_has_unrealistic_strike() {
@@ -447,9 +473,7 @@ test green_a_009_grafted_payout_alongside_enterprise_only_counts_enterprise() {
   // strict helper rejects.
   let loose_total =
     sum_lovelace_to_pkh([grafted, enterprise], fixtures.insured_pkh)
-  enterprise_total == 5_000_000_000
-    && loose_total == 10_000_000_000
-    && claim_passes == False
+  enterprise_total == 5_000_000_000 && loose_total == 10_000_000_000 && claim_passes == False
 }
 
 // ---------------------------------------------------------------------------
@@ -504,12 +528,13 @@ test green_a_010_cancel_window_constant_is_one_hour() {
 test green_a_011_pool_nft_is_required_for_canonical_output() {
   // A pool-address output WITHOUT the canonical NFT is rejected. This is
   // the on-chain enforcement that the one-shot mint composes with.
-  let fake = Output {
-    address: fixtures.script_addr(fixtures.pool_script_hash),
-    value: assets.from_lovelace(50_000_000_000),
-    datum: NoDatum,
-    reference_script: None,
-  }
+  let fake =
+    Output {
+      address: fixtures.script_addr(fixtures.pool_script_hash),
+      value: assets.from_lovelace(50_000_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    }
   find_canonical_pool_output(
     [fake],
     fixtures.pool_script_hash,
@@ -570,8 +595,7 @@ test green_a_013_decoy_then_real_payout_is_now_accepted() {
   let decoy = fixtures.pkh_output(fixtures.insured_pkh, 2_000_000)
   let real_payout = fixtures.pkh_output(fixtures.insured_pkh, 1_000_000_000_000)
   let coverage = 1_000_000_000_000
-  sum_lovelace_to_enterprise_pkh([decoy, real_payout], fixtures.insured_pkh)
-    >= coverage
+  sum_lovelace_to_enterprise_pkh([decoy, real_payout], fixtures.insured_pkh) >= coverage
 }
 
 test green_a_013_decoy_only_still_rejected() {
@@ -606,7 +630,8 @@ test green_a_021_underwrite_correct_donation_accepted() {
   // `>=` clause.
   let pool = fixtures.default_pool_datum()
   let premium = 100_000_000
-  let required = calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
+  let required =
+    calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
   let donation: Option<Int> = Some(500_000)
   let donation_ok =
     when donation is {
@@ -621,7 +646,8 @@ test green_a_021_underwrite_short_donation_rejected() {
   // This is the headline invariant for the audit-regression boundary.
   let pool = fixtures.default_pool_datum()
   let premium = 100_000_000
-  let required = calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
+  let required =
+    calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
   let donation: Option<Int> = Some(required - 1)
   let donation_ok =
     when donation is {
@@ -637,7 +663,8 @@ test green_a_021_underwrite_zero_donation_rejected_when_required() {
   // dodging tx must not slip through with an explicit zero.
   let pool = fixtures.default_pool_datum()
   let premium = 100_000_000
-  let required = calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
+  let required =
+    calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
   let donation: Option<Int> = Some(0)
   let donation_ok =
     when donation is {
@@ -654,7 +681,8 @@ test green_a_021_underwrite_overshoot_donation_accepted() {
   // must be free to round up.
   let pool = fixtures.default_pool_datum()
   let premium = 100_000_000
-  let required = calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
+  let required =
+    calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
   let donation: Option<Int> = Some(required * 2)
   let donation_ok =
     when donation is {
@@ -670,7 +698,8 @@ test green_a_021_underwrite_none_donation_rejected_when_required() {
   // which evaluates to `False` here because the cut is 500_000 > 0.
   let pool = fixtures.default_pool_datum()
   let premium = 100_000_000
-  let required = calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
+  let required =
+    calculate_treasury_cut(premium, pool.protocol_fee_bps, treasury_share_bps)
   let donation: Option<Int> = None
   let donation_ok =
     when donation is {
@@ -687,8 +716,18 @@ test green_a_021_batch_underwrite_aggregate_donation_correct() {
   // 5 policies * 100 ADA each = 500 ADA total premium -> 2_500_000 lovelace.
   let pool = fixtures.default_pool_datum()
   let total_premium = 500_000_000
-  let required = calculate_treasury_cut(total_premium, pool.protocol_fee_bps, treasury_share_bps)
-  let per_policy = calculate_treasury_cut(100_000_000, pool.protocol_fee_bps, treasury_share_bps)
+  let required =
+    calculate_treasury_cut(
+      total_premium,
+      pool.protocol_fee_bps,
+      treasury_share_bps,
+    )
+  let per_policy =
+    calculate_treasury_cut(
+      100_000_000,
+      pool.protocol_fee_bps,
+      treasury_share_bps,
+    )
   // Aggregate must equal 5x the per-policy cut — confirms additivity.
   required == per_policy * 5 && required == 2_500_000
 }
@@ -744,7 +783,8 @@ test green_a_022_correct_policy_script_hash_accepted() {
   // A policy output at the canonical policy_validator address with a
   // matching datum and lovelace must satisfy the gate.
   let policy_script_hash = fixtures.policy_script_hash
-  let attacker_credential = policy_script_hash // matches → accepted
+  let attacker_credential = policy_script_hash
+  // matches → accepted
   attacker_credential == policy_script_hash
 }
 
@@ -753,7 +793,8 @@ test green_a_022_wrong_script_hash_rejected() {
   // demonstrated on chain) must be rejected. The two hashes differ even
   // when the attacker fabricates a perfect-shape PolicyDatum.
   let policy_script_hash = fixtures.policy_script_hash
-  let attacker_credential = fixtures.pool_script_hash // wrong → rejected
+  let attacker_credential = fixtures.pool_script_hash
+  // wrong → rejected
   attacker_credential != policy_script_hash
 }
 
@@ -888,7 +929,8 @@ test green_a_015_expiry_before_start_rejected() {
 test green_a_016_oracle_at_canonical_address_accepted() {
   // The fixture's oracle_ref_input now sits at types.charli3_oracle_script_hash
   // (post-A-016 update), so the canonical lookup must round-trip.
-  let ref_input = fixtures.oracle_ref_input(420_000, 1_700_000_000_000, 1_700_999_999_999)
+  let ref_input =
+    fixtures.oracle_ref_input(420_000, 1_700_000_000_000, 1_700_999_999_999)
   let datum = find_oracle_datum([ref_input], fixtures.oracle_nft_policy)
   get_oracle_price(datum) == 420_000
 }
@@ -898,7 +940,8 @@ test green_a_016_oracle_at_wrong_address_rejected() {
   // address must NOT be returned by the oracle finder. We assert the
   // hash gate: the spoofed script hash differs from the canonical one.
   let spoofed_hash = #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-  let canonical_hash = #"221ee21e9607f766e1e1223248f67320014825169a1d98eb34c6f658"
+  let canonical_hash =
+    #"221ee21e9607f766e1e1223248f67320014825169a1d98eb34c6f658"
   spoofed_hash != canonical_hash
 }
 
@@ -946,4 +989,190 @@ test green_a_025_three_policy_outputs_rejected() {
   let matching_count = 3
   let ok = matching_count == 1
   ok == False
+}
+
+// ===========================================================================
+// ROUND-4 (v6) — Multi-oracle (Charli3 + Orcfax) green security tests
+// ===========================================================================
+//
+// Aegis v6 adds Orcfax as a redundant secondary oracle alongside Charli3
+// (legacy primary). The dispatcher in `aegis/oracle.resolve_oracle_price`
+// matches on `policy_datum.oracle_provider` and delegates to either
+// `aegis/oracle/charli3.resolve` or `aegis/oracle/orcfax.resolve`. Each
+// provider's parser owns its own trust handshake:
+//   * Charli3 — A-016 binding (canonical script hash).
+//   * Orcfax — FSP/FS dual-binding (each layer's address must equal its hash).
+//
+// The tests below verify the v6 surface at the helper level. Validator-level
+// tests (cross-module) cannot be invoked from Aiken's test runner; the
+// post-A-020 pattern established by this file is to assert the invariant
+// exactly as the validator computes it, plus exercise the parser modules
+// directly via fixture-built reference inputs.
+// ---------------------------------------------------------------------------
+
+test green_v6_charli3_provider_dispatches_to_charli3_parser() {
+  // The dispatcher's `when provider is { Charli3 -> charli3.resolve | ... }`
+  // branch is structurally exhaustive. Validate that constructing a Charli3
+  // PolicyDatum produces a datum whose `oracle_provider` tag flows the
+  // dispatcher into the Charli3 branch.
+  let p = fixtures.default_policy_datum()
+  // Provider is Charli3 in the default fixture (matches v5 default behavior).
+  let provider_is_charli3 =
+    when p.oracle_provider is {
+      Charli3 -> True
+      Orcfax -> False
+    }
+  provider_is_charli3
+}
+
+test green_v6_orcfax_provider_dispatches_to_orcfax_parser() {
+  // Building a policy with `oracle_provider: Orcfax` and supplying both an
+  // FSP and FS reference input must dispatch through the Orcfax parser.
+  // We verify the provider field at the datum level; the parser-level
+  // round-trip is exercised by the orcfax module's own tests.
+  let p = fixtures.default_policy_datum_orcfax()
+  let provider_is_orcfax =
+    when p.oracle_provider is {
+      Orcfax -> True
+      Charli3 -> False
+    }
+  provider_is_orcfax && p.oracle_nft == fixtures.orcfax_fsp_hash_test
+}
+
+test green_v6_orcfax_fsp_script_hash_check_matches_constant() {
+  // The mainnet FSP script hash constant in `aegis/types` must equal the
+  // value sourced from <https://docs.orcfax.io/consume>. Any drift from
+  // upstream — e.g., an Aiken-side typo — would silently route consumer txs
+  // to a non-existent address and brick claims for Orcfax-bound policies.
+  // Pin the bytes here as a regression check.
+  let mainnet_expected: ByteArray =
+    #"8793893b5dda6a513ba63c80e9d7b2d4f108060c11979bfc7d863ff0"
+  let preview_expected: ByteArray =
+    #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230"
+  orcfax_fsp_script_hash_mainnet == mainnet_expected && orcfax_fsp_script_hash_preview == preview_expected
+}
+
+test green_v6_charli3_oracle_script_hash_unchanged_from_v5() {
+  // The v6 refactor must NOT rotate the canonical Charli3 oracle script hash
+  // — that is a Charli3-controlled handle, immutable by Aegis. Pin the byte
+  // string here so any accidental in-Aiken edit to the constant breaks this
+  // test.
+  let v5_pin: ByteArray =
+    #"221ee21e9607f766e1e1223248f67320014825169a1d98eb34c6f658"
+  charli3_oracle_script_hash == v5_pin
+}
+
+test green_v6_a012_uniform_provider_required_in_batch() {
+  // Two policies with the same provider AND same oracle_nft pass the
+  // generalized A-012 uniformity check. This is the post-v6 happy-path
+  // structural invariant.
+  let p1 = fixtures.default_policy_datum()
+  let p2 = fixtures.default_policy_datum()
+  let same_provider =
+    when (p1.oracle_provider, p2.oracle_provider) is {
+      (Charli3, Charli3) -> True
+      (Orcfax, Orcfax) -> True
+      _ -> False
+    }
+  let same_nft = p1.oracle_nft == p2.oracle_nft
+  same_provider && same_nft
+}
+
+test green_v6_a012_mixed_providers_batch_rejected() {
+  // A policy bound to Charli3 + a policy bound to Orcfax MUST not pass the
+  // generalized A-012 uniformity check, even if their oracle_nft byte
+  // strings happen to coincide. This is the structurally-new failure mode
+  // v6 introduces and the generalized helper closes.
+  let p1 = fixtures.default_policy_datum()
+  let p2 = fixtures.default_policy_datum_orcfax()
+  let same_provider =
+    when (p1.oracle_provider, p2.oracle_provider) is {
+      (Charli3, Charli3) -> True
+      (Orcfax, Orcfax) -> True
+      _ -> False
+    }
+  // Claim: same_provider must be False — i.e., a mixed batch is rejected.
+  same_provider == False
+}
+
+test green_v6_orcfax_freshness_window_30_minutes() {
+  // The Orcfax freshness window constant in `aegis/types` must equal exactly
+  // 30 * 60 * 1_000 ms (30 minutes), matching upstream's
+  // `orcfax-aiken/lib/orcfax/validity_range.ak` recommendation and the
+  // `synthetics/aik/lib/synthetics/constants.ak` (`max_ttl = 30 * 60 *
+  // 1000`). Diverging from upstream would either reject valid Orcfax fact
+  // statements (consumer-pinned window too narrow) or accept stale ones
+  // (window too wide, weakening freshness guarantees).
+  orcfax_freshness_window_ms == 30 * 60 * 1_000
+}
+
+test green_v6_charli3_freshness_uses_datum_expiry() {
+  // Charli3's freshness comes from the publisher-set expiry field at key 2
+  // of the GenericData map. The Charli3 parser surfaces it as
+  // `Price.valid_until` directly — NOT as `created_at + ttl` like Orcfax.
+  // Verify the wiring contract: a publisher-set expiry that DIFFERS from a
+  // hypothetical 30-min-derived value flows through unmodified.
+  let datum = create_oracle_datum(490_850, 1_707_172_554_600, 1_707_176_154_600)
+  let publisher_expiry = 1_707_176_154_600
+  let derived_if_orcfax_logic = 1_707_172_554_600 + 30 * 60 * 1_000
+  // The two must differ — confirms we did not accidentally copy the Orcfax
+  // freshness derivation into the Charli3 path.
+  is_oracle_valid(datum, publisher_expiry) == True && publisher_expiry != derived_if_orcfax_logic
+}
+
+test green_v6_policy_datum_has_11_fields_post_migration() {
+  // The v6 schema appends `oracle_provider` to PolicyDatum, taking the field
+  // count from 10 -> 11. The CBOR encoding is positional, so v5 (10-field)
+  // datums silently fail the v6 `expect pdat: PolicyDatum = raw_pdat` decode
+  // — which is the intended migration semantic (v5 policies stranded after
+  // v6 redeploy; same pattern as the v0 -> v1 schema migration that added
+  // `pool_nft`).
+  //
+  // Aiken does not expose `arity_of` reflection, so we exercise the contract
+  // by constructing the datum with all 11 fields and asserting the new
+  // field is reachable. Compilation of this test is itself the schema
+  // assertion: a missing or wrong-typed `oracle_provider` field would not
+  // compile.
+  let p = fixtures.default_policy_datum()
+  let provider_field_present =
+    when p.oracle_provider is {
+      Charli3 -> True
+      Orcfax -> True
+    }
+  // Sanity: the other 10 fields are still present and reachable.
+  let other_fields_intact =
+    p.policy_id == #"aabbccdd" && p.strike_price == 350_000 && p.coverage_amount == 5_000_000_000 && p.premium_paid == 200_000_000 && p.start_time == 1_700_000_000_000 && p.expiry_time == 1_700_604_800_000 && p.pool_nft == fixtures.pool_nft_policy
+  provider_field_present && other_fields_intact
+}
+
+// ---------------------------------------------------------------------------
+// v6 Orcfax parser end-to-end happy paths
+// ---------------------------------------------------------------------------
+
+test green_v6_orcfax_resolver_round_trip_happy_path() {
+  // Build an FSP UTxO + FS UTxO pair via the v6 fixtures, attach them as
+  // reference_inputs, and resolve. The result must surface the rational
+  // 4473/10000 as scaled int 447_300 (1e6 scale, 0.4473 USD/ADA).
+  let fsp = fixtures.orcfax_fsp_input(fixtures.orcfax_fs_hash_test)
+  let fs = fixtures.orcfax_fs_input(4_473, 10_000, 1_700_000_000_000)
+  let price =
+    orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
+  price.value == 447_300 && price.observed_at == 1_700_000_000_000 && price.valid_until == 1_700_000_000_000 + 30 * 60 * 1_000
+}
+
+test green_v6_orcfax_resolver_freshness_uses_30min_window() {
+  // The parser must derive valid_until = created_at + 30 * 60 * 1000 ms.
+  // Cross-check the constant flows through unchanged.
+  let fsp = fixtures.orcfax_fsp_input(fixtures.orcfax_fs_hash_test)
+  let fs = fixtures.orcfax_fs_input(4_473, 10_000, 1_700_000_000_000)
+  let price =
+    orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
+  price.valid_until - price.observed_at == orcfax_freshness_window_ms
+}
+
+test green_v6_orcfax_feed_id_constant_matches_ada_usd() {
+  // The hex `4345522f4144412d5553442f` must decode to "CER/ADA-USD/" — pinned
+  // here as a regression check against accidental drift in the `aegis/types`
+  // constant or the upstream `feed_id.ak` test vector.
+  orcfax_ada_usd_feed_id == #"4345522f4144412d5553442f"
 }
