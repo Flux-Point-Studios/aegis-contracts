@@ -174,13 +174,17 @@ validator policy_validator {
         // 3. Verify oracle data is fresh.
         // For Charli3, valid_until is the publisher-set expiry from the datum.
         // For Orcfax, valid_until is `created_at + orcfax_freshness_window_ms`
-        // (30 minutes) computed inside the Orcfax parser.
+        // computed inside the Orcfax parser.
+        // [v6.0.1 fix] BOTH legs of the validity range must be inside the
+        // freshness window, otherwise an attacker could submit a tx with
+        // tx_lower fresh but tx_upper hours later, and the chain would
+        // include the tx after the price has actually staled.
         let tx_lower = get_lower_bound(validity_range)
-        let oracle_fresh = tx_lower <= price.valid_until
+        let tx_upper = get_upper_bound(validity_range)
+        let oracle_fresh = tx_lower <= price.valid_until && tx_upper <= price.valid_until
 
         // 4. Verify transaction is within the policy period
         let within_start = tx_lower >= datum.start_time
-        let tx_upper = get_upper_bound(validity_range)
         let within_expiry = tx_upper <= datum.expiry_time
 
         // 5. [FIX A-006/A-009/A-013] Verify aggregate payout to insured is
@@ -230,12 +234,15 @@ validator policy_validator {
             datum.oracle_nft,
           )
         let price_below_strike = price.value <= datum.strike_price
+        // [v6.0.1 fix] Both validity-range legs must be inside the freshness
+        // window — otherwise an attacker could spend a stale price by
+        // submitting a tx with tx_lower fresh but tx_upper much later.
         let tx_lower = get_lower_bound(validity_range)
-        let oracle_fresh = tx_lower <= price.valid_until
+        let tx_upper = get_upper_bound(validity_range)
+        let oracle_fresh = tx_lower <= price.valid_until && tx_upper <= price.valid_until
 
         // Time bounds
         let within_start = tx_lower >= datum.start_time
-        let tx_upper = get_upper_bound(validity_range)
         let within_expiry = tx_upper <= datum.expiry_time
 
         // [FIX A-006/A-009] Aggregate enterprise-output check.
@@ -343,7 +350,10 @@ validator policy_validator {
             datum.oracle_nft,
           )
         let tx_lower = get_lower_bound(validity_range)
-        let oracle_fresh = tx_lower <= price.valid_until
+        // [v6.0.1 fix] Both validity-range legs must be inside the freshness
+        // window — symmetric with Claim/BatchClaim so a Cancel can't replay
+        // a stale price by widening the validity range.
+        let oracle_fresh = tx_lower <= price.valid_until && tx_upper <= price.valid_until
         // Note: Claim uses `oracle_price <= strike_price` to trigger payout,
         // so the symmetric in-the-money guard here is `oracle_price > strike`.
         let not_in_the_money = price.value > datum.strike_price
