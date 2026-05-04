@@ -2391,8 +2391,111 @@ Underwrite via Charli3 path through the new dispatcher: tx `ff940ca1c89f5824c0ac
 - **Off-chain parity:** Python `OracleProviderCharli3` (Constr 0) / `OracleProviderOrcfax` (Constr 1) match Aiken side; `_try_parse_policy_datum` requires 11 fields; cross-provider mixing rejected client-side as well.
 - **External auditor:** notified of v5→v6 scope expansion 2026-04-30. Audit scope updated accordingly.
 - **Preprod Orcfax:** real Orcfax does not deploy to preprod. A mock FSP/FS validator pair will be deployed for the dev loop; production preview/mainnet uses the real Orcfax constants pinned above.
+- **Preview Orcfax cadence finding (2026-05-04):** Aegis was deployed on preview with `AEGIS_POOL_PV1` for the integration gate (validator hashes byte-identical to preprod v6, only on-chain UTxO refs differ). Underwrite-Orcfax confirmed `valid_contract: true` with tx `70e0d655210ee3aba0bf22e926fe06569de209740d49a18b4e4c7e1f61b13dda`, proving the v6 multi-oracle schema and dispatcher branching work end-to-end. The Claim-Orcfax green path could NOT be exercised because Orcfax's preview FS has not been updated since 2026-04-16 (17.66 days stale at the time of test, all 318 historical FS UTxOs surveyed). Both the off-chain pre-flight and the on-chain validator correctly reject stale facts — this is positive evidence that the freshness gate works, but is not a green-path Claim demonstration. **Pre-mainnet action items raised by this finding:**
+  1. Deploy a controlled Orcfax FSP/FS mock (Aegis-owned validator producing the same datum schema) so the Claim-Orcfax green path can be demonstrated on demand.
+  2. Confirm with Orcfax that the **mainnet** ADA/USD CER feed has an active publishing cadence and an expected SLA before opening Aegis mainnet to users. (This is independent of the in-progress Charli3 conversation; it's the mirror question for the secondary provider.)
 
 ---
 
-*Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30*
-*Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows. v6 multi-oracle expansion deployed 2026-04-30; no new findings opened by the expansion.*
+## v7 Self-Publish Scope Expansion (2026-05-04)
+
+**Trigger.** Following Charli3's restructuring/sale signal (Apr 30) and Orcfax's wind-down announcement (Mar 27, sunsetting Jul 31), Aegis adds a third oracle provider — `AegisSelf` — that we publish ourselves end-to-end. v6 was insurance against single-vendor risk; v7 is insurance against **all-third-party-vendor risk simultaneously**. After v7 ships, vendor failure of both Charli3 AND Orcfax cannot brick Aegis: new policies create with `oracle_provider: AegisSelf` and existing policies migrate via Cancel-and-rollover.
+
+**Architectural impact (informational; NO new findings opened).** All v6 invariants remain in force. The expansion is independently scoped at `docs/audit/V7_SELF_PUBLISH_SCOPE.md` (in the private monorepo).
+
+### What changed in v7
+
+1. **`OracleProvider` extended to a 3-arm sum type:**
+   ```aiken
+   pub type OracleProvider {
+     Charli3      // Constr 0 (existing)
+     Orcfax       // Constr 1 (existing, going dormant after Jul 31 unless funding)
+     AegisSelf    // Constr 2 (NEW v7) — Flux Point Studios self-publish
+   }
+   ```
+   The `when` exhaustivity check IS the curated whitelist; adding a fourth in v8 (e.g., Pyth Lazer once GA on Cardano) requires another redeploy.
+
+2. **New parser module `aegis/oracle/aegis_self.ak`** (~140 lines).
+   - Reuses Charli3's `OracleDatum` / `PriceData` types — we publish in Charli3's CBOR format deliberately so the parser delegates to existing accessors.
+   - Trust handshake (TWO layers, both required):
+     - UTxO must carry a token under a per-network publisher NFT policy id (`AEGIS_PRICE_FEED_V1`).
+     - UTxO's payment credential must equal the compile-time pinned `aegis_self_publisher_vkh` (Aegis's dedicated publisher wallet's VKH). A forged UTxO at a different credential — even one carrying a moved/stolen NFT — is rejected.
+
+3. **Dispatcher in `aegis/oracle.ak`** gains the third arm:
+   ```aiken
+   AegisSelf -> aegis_self.resolve(reference_inputs, oracle_nft)
+   ```
+   Validators (`policy.ak`, `pool.ak`) still call the same `resolve_oracle_price` entrypoint — no per-validator change beyond the cascading hash rotation.
+
+4. **A-012 generalized** to support AegisSelf: `BatchClaim` / `BatchUnderwrite` uniformity now matches `(Charli3, Charli3) | (Orcfax, Orcfax) | (AegisSelf, AegisSelf)` rather than rejecting AegisSelf-bound batches.
+
+5. **`orcfax_freshness_window_ms` widened from 30 min → 70 min** based on empirical mainnet observation (2026-05-04 Kupo survey: 53 ADA-USD publishes over 39h, mean gap 45 min, p95 51 min, max 55 min). Orcfax's configured cadence is a 1-hour heartbeat per `cer-feeds/feeds/mainnet/cer-feeds.json`. v6's 30-min window false-rejected ~95% of legitimate fresh-but-late readings.
+
+6. **New compile-time constant**: `aegis_self_publisher_vkh` = `6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152` (BIP-44 derivation produces the same VKH on testnet and mainnet — only network header byte differs in the bech32, so one constant covers all networks unless we later separate the mainnet wallet).
+
+7. **221 / 0 tests passing** in `aiken check`. New green-path tests: `dispatcher_aegis_self_branch_compiles`, `policy_datum_aegis_self_variant_constructs`, `aegis_self_publisher_vkh_is_28_bytes`, `orcfax_freshness_window_widened_for_v7`, `green_v7_orcfax_freshness_window_70_minutes`, `green_v7_orcfax_resolver_freshness_uses_70min_window`, `reuses_charli3_datum_shape`, `trust_handshake_requires_publisher_vkh`.
+
+### Off-chain (v7 Phase 3)
+
+- `api/oracles/aegis_self.py` — new resolver mirroring `oracles/charli3.py`. Pins publisher VKH credential, queries publisher's bech32 address, picks the freshest UTxO carrying the network's `AEGIS_PRICE_FEED_V1` NFT.
+- `api/oracles/dispatcher.py` — `PROVIDER_AEGIS_SELF = "aegis_self"` constant + dispatch arm + `parse_provider_label` aliases (`aegis_self`, `aegisself`, `aegis-self`, `self`).
+- `api/policies.py` — `OracleProviderAegisSelf(pyc.PlutusData) { CONSTR_ID = 2 }`. CBOR encodes as Tag 123 (verified live: `d87b80`). `_resolve_oracle_nft_bytes` returns the per-network publisher NFT policy id (`AEGIS_SELF_PUBLISHER_NFT_PREPROD`, `_PREVIEW`, `_MAINNET`).
+- `api/chain.py` — new constants for publisher VKH, per-network NFT policy ids, and asset name. `ORCFAX_FRESHNESS_MS` widened to 70 min to match Aiken side.
+- `offchain/scripts/smoke_underwrite.py` — `--oracle-provider aegis_self` choice added.
+
+### Publisher service (v7 Phase 1)
+
+`D:/aegis/publisher/` — autonomous price-feed publisher. 6 modules totaling ~700 LOC plus an NSSM service installer for Windows + a Raspberry Pi runbook (local-only). Key properties:
+
+- **Separate wallet**: dedicated mnemonic at `D:/wallet/publisher_mnemonic.txt`, derives a different VKH from operator. If publisher key is compromised, attacker can publish bad prices but cannot drain pool, claim policies, or rotate validators.
+- **4 data sources**: Binance, Coinbase, Kraken, Bitfinex. Median aggregation. **3-of-4 quorum minimum** — fail-closed if fewer respond. Tolerates Binance's HTTP-451 geo-blocking we observed on the dev host.
+- **Cadence**: 20-minute heartbeat ceiling OR 0.25% deviation threshold, whichever fires first. Empirically yields ~72-100 publishes/day at calm markets.
+- **Datum**: Charli3-compatible (`Tag 121 → Tag 123 → {0:price_scaled, 1:created_ms, 2:expiry_ms}`). 70-min validity window on each publish (matches widened freshness gate).
+- **Persistent state**: atomic JSON write to `state.json`. Survives restarts; reconstructs canonical UTxO from chain on cold start.
+- **Health endpoint**: `http://127.0.0.1:9101/health` returns 200 if last successful publish < 22 min ago, 503 otherwise.
+- **Discord webhook**: alerts on first-publish-landed (info), quorum failure (error), staleness > 22 min (error).
+
+### v7 deployment artifacts (live on preprod)
+
+| Artifact | v6 | v7 |
+|---|---|---|
+| `policy_validator_hash` | `0a05ff62e413f298c535ff2c26883b8fd9a31acbeb7d49451a4e0193` | `47b904e1278d8d0ec217bbb1e34e2898b6a6d7e6dec2001855ae032f` |
+| `policy_validator_address` | `addr_test1wq9qtlmzusfl9xx9xhljcf5g8w8angc6e04h6j29rf8qryc5c6swd` | `addr_test1wprmjp8py7xc6rkzz7amrc6w9zvtdfkhum0vyqqc2khqxtcl7jrm8` |
+| `pool_validator_hash` | `5902fbe6bd1aefd0124341ce4dcc00b7bc6ea05e1b1112fb92d34a6d` | `b47eb92206008ae5e4238c72be76c3125ed701d506774f9d3120cccd` |
+| `pool_validator_address` | `addr_test1wpvs97lxh5dwl5qjgdquunwvqzmmcm4qtcd3zyhmjtf55mgxmrqpv` | `addr_test1wz68awfzqcqg4e0yywx890nkcvf9a4cp65r8wnuaxysvengts2x32` |
+| `lp_token_policy_hash` | `119709323f283fdbe569a817a8183c771b6d6f4d1b4d1561ba6906ea` | `1549570c23955e706b04c2d623077c9c6b316f5d50ca4e0d73b9b0e4` |
+| `pool_nft` | `AEGIS_POOL_V7` (`6569cc54…`) | `AEGIS_POOL_V8` (`ae58963b92fef2bf2f4dc551d6081707d89b29c38244ae2fbcaa7398`) |
+| `policy_validator` ref UTxO | `4a95631a…dda10#0` | `62e0032dc914165e00fe3d337cc88e29dd28ecace86ced29cbf62ff9f7b10a2a#0` |
+| `pool_validator` ref UTxO | `a06757914f…cd175#0` | `cce676a0097983d8947dd387018cb41a44b15fcbd3b7ebb99113161c3a6e6c17#0` |
+| `lp_token_policy` ref UTxO | `1a9faaba15…6f28#0` | `5eb4190d9c9d594bb67e20e3f162257c4e4e62e2bf43f6419ccd0dfb0c6f84f1#0` |
+| Pool init UTxO | `c6b5ea05…b54c#0` | `e92113f9f383ff6580a8d44510e58bb24dddbefa300cee871e91562eb604ec47#0` |
+| Aegis-self publisher VKH | n/a | `6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152` |
+| AEGIS_PRICE_FEED_V1 NFT (preprod) | n/a | `d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f` |
+| `orcfax_freshness_window_ms` | `1_800_000` (30 min) | `4_200_000` (70 min) |
+
+### v7 green-path proof on chain
+
+AegisSelf-bound Underwrite via the new dispatcher third arm:
+- tx `981eb8b13dbcbbbfec30493a0cb53577c843fee4a766f83412d34a4cf97d33f1`
+- 10 ADA coverage, 2 ADA premium, 0.01 ADA Conway treasury donation in body field 22
+- `oracle_provider: AegisSelf (Constr 2)` in PolicyDatum
+- `valid_contract: true`, block 4673489, fee 1.15 ADA
+
+See `GREEN_PATH_PROOFS.md` §1 ("Latest live deploy — v7-self-publish") for the full deploy chain (mint NFT, publish 3 refs, init pool, add liquidity, Underwrite). Publisher service is also running autonomously: most recent canonical feed UTxO at `cf3c2329…#0` with fresh ADA/USD price ($0.2500 at smoke-test time).
+
+### Mainnet readiness — v7 status
+
+- All v6 closed findings remain closed. v7 is additive (third dispatcher arm + freshness window widening) and does not weaken any prior invariant.
+- Test coverage: 221 / 0 in `aiken check`.
+- Off-chain parity: Python `OracleProviderAegisSelf` (Constr 2 = CBOR Tag 123) round-trips through `_try_parse_policy_datum`; cross-provider mixing rejected client-side.
+- Publisher infrastructure: live on preprod, NSSM-supervised on a Windows host today; Raspberry Pi 4 deploy runbook drafted for production hardening (UPS, dedicated user, paper mnemonic backup, healthchecks.io monitoring).
+- External auditor: notification of v6→v7 delta scope pending; will reference this section + the v7 proof tx.
+- **Open risks** documented in `V7_SELF_PUBLISH_SCOPE.md`:
+  - Single-instance publisher = single point of failure. Mitigated by NSSM auto-restart + UPS + cold-spare hardware. HA pair documented for v8.
+  - Hot-wallet mnemonic on disk for the publisher. Acceptable for fees-only role; HSM-backed signer is a documented v8+ upgrade path.
+  - Aegis would notice publisher staleness via Discord within 22 min; AegisSelf-bound policies become unclaimable while the publisher is down (but the freshness gate is functioning correctly — preventing fraud, not enabling it).
+
+---
+
+*Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30; v7 addendum 2026-05-04*
+*Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows. v6 multi-oracle expansion deployed 2026-04-30; v7 self-publish expansion deployed 2026-05-04. No new findings opened by either expansion.*

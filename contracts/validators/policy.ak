@@ -1,7 +1,7 @@
 use aegis/oracle.{resolve_oracle_price}
 use aegis/pricing.{calculate_refund}
 use aegis/types.{
-  BatchClaim, BatchExpire, Cancel, Charli3, Claim, Expire, Orcfax,
+  AegisSelf, BatchClaim, BatchExpire, Cancel, Charli3, Claim, Expire, Orcfax,
   OracleProvider, PolicyDatum, PolicyRedeemer, cancellation_window,
 }
 use aegis/validation.{
@@ -85,6 +85,7 @@ fn batch_oracles_uniform(
                       when (sent_provider, this_provider) is {
                         (Charli3, Charli3) -> True
                         (Orcfax, Orcfax) -> True
+                        (AegisSelf, AegisSelf) -> True
                         _ -> False
                       }
                     (

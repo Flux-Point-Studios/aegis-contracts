@@ -303,12 +303,14 @@ test rational_to_scaled_high_precision_orcfax_example() {
   scaled == 447_300
 }
 
-test orcfax_freshness_window_is_30_minutes() {
-  aegis_types.orcfax_freshness_window_ms == 30 * 60 * 1_000
+test orcfax_freshness_window_is_70_minutes() {
+  // [v7] Widened from 30 min to 70 min — see types.ak::orcfax_freshness_window_ms
+  // doc comment for the 1h-heartbeat empirical justification.
+  aegis_types.orcfax_freshness_window_ms == 70 * 60 * 1_000
 }
 
 test orcfax_valid_until_derivation_matches_window() {
   let created_at: Int = 1_700_000_000_000
   let valid_until = created_at + aegis_types.orcfax_freshness_window_ms
-  valid_until == created_at + 30 * 60 * 1_000
+  valid_until == created_at + 70 * 60 * 1_000
 }
