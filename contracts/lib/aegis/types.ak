@@ -24,13 +24,16 @@ pub type ScriptHash =
 // Oracle Provider Tag (Aegis v6)
 // ---------------------------------------------------------------------------
 
-/// [v6] Oracle provider tag. Aegis v6 supports both Charli3 (legacy primary)
-/// and Orcfax (redundant secondary). Sum-type semantics give us compile-time
+/// [v7] Oracle provider tag. Aegis v7 supports three providers — Charli3
+/// (mainnet primary), Orcfax (redundant secondary; provider winding down
+/// 2026-07-31), and AegisSelf (Aegis-published feed; vendor-survival-
+/// independent fallback). Sum-type semantics give us compile-time
 /// exhaustivity — adding a new provider in the future requires a redeploy
 /// that visibly rotates the validator hash, which IS the curated whitelist.
 ///
-/// CBOR encoding: `Charli3 = constr_0([])`, `Orcfax = constr_1([])`. Minimal
-/// on-chain bytes (1 byte for the constr index + empty list of fields).
+/// CBOR encoding: `Charli3 = constr_0([])`, `Orcfax = constr_1([])`,
+/// `AegisSelf = constr_2([])`. Minimal on-chain bytes (1 byte for the
+/// constr index + empty list of fields).
 ///
 /// Why a sum type and not a free-form `oracle_script_hash: ByteArray`:
 ///   * A free-form ByteArray would require a second runtime check ("is this
@@ -39,15 +42,15 @@ pub type ScriptHash =
 ///     registry UTxO (large new audit surface). A sum-type variant *is* the
 ///     whitelist, enforced by Aiken's exhaustivity check on `when` branches.
 ///   * Type-safe parser dispatch. The validator's
-///     `when datum.oracle_provider is { Charli3 -> ... | Orcfax -> ... }`
-///     branches each call a provider-specific resolver-and-parser without
-///     casting Data through unsafe holes.
+///     `when datum.oracle_provider is { Charli3 -> ... | Orcfax -> ... |
+///     AegisSelf -> ... }` branches each call a provider-specific resolver-
+///     and-parser without casting Data through unsafe holes.
 ///
-/// Trade-off: adding a third provider in v7 (e.g., Wingriders Time-Weighted
-/// Pool oracle, a CIP-0073 standard feed, or an in-house FEAR index) requires
-/// another datum-schema rotation. Frequency of new providers we'd actually
-/// trust enough to onboard is bounded; each onboarding deserves its own audit
-/// pass anyway. A datum rotation per onboarding is the right cadence.
+/// Trade-off: adding a fourth provider in v8 (e.g., Pyth Lazer once GA on
+/// Cardano) requires another datum-schema rotation. Frequency of new
+/// providers we'd actually trust enough to onboard is bounded; each onboarding
+/// deserves its own audit pass anyway. A datum rotation per onboarding is
+/// the right cadence.
 pub type OracleProvider {
   /// Charli3 ODV (Oracle Data Verification). Single canonical UTxO at a
   /// Charli3-controlled validator address, identified by an oracle NFT
@@ -62,6 +65,14 @@ pub type OracleProvider {
   /// policies, the `oracle_nft` field below carries the FSP script hash
   /// (NOT the NFT policy id) — see `aegis/oracle/orcfax` for the parser.
   Orcfax
+  /// [v7 NEW] Aegis-self. We publish ADA/USD ourselves at a UTxO under a
+  /// one-shot-minted NFT (AEGIS_PRICE_FEED_V1) at the publisher wallet's
+  /// payment credential. Same Charli3-compatible CBOR datum format as
+  /// `Charli3` so we reuse the parser; the trust handshake pins both NFT
+  /// policy id (`oracle_nft` field) AND publisher VKH (compile-time
+  /// constant `aegis_self_publisher_vkh`). Vendor-survival-independent —
+  /// keeps Aegis claimable even if Charli3 dissolves and Orcfax sunsets.
+  AegisSelf
 }
 
 // ---------------------------------------------------------------------------
@@ -335,15 +346,48 @@ pub const orcfax_fs_asset_name: ByteArray = #""
 /// `lib/orcfax/tokens.ak`: `fsp_vali = #"000de140" <> fsp_label = ""`.
 pub const orcfax_fsp_asset_name: ByteArray = #"000de140"
 
-/// [v6] Orcfax recommended freshness window in POSIX milliseconds (30 min).
+/// [v7] Orcfax freshness window in POSIX milliseconds (70 min).
 ///
 /// Orcfax's `FsDat<Rational>` carries NO `expiry` field — the only timestamp
 /// is `created_at`. Freshness is the consumer's responsibility, enforced via
 /// `lb - created_at < max_freshness_ms` AND `ub - lb < max_freshness_ms` to
-/// pin both sides of the validity window. This matches Orcfax's recommended
-/// pattern in `lib/orcfax/validity_range.ak` and `synthetics/aik/lib/
-/// synthetics/constants.ak` (`max_ttl = 30 * 60 * 1000`).
-pub const orcfax_freshness_window_ms: Int = 30 * 60 * 1_000
+/// pin both sides of the validity window.
+///
+/// **v6 used 30 min; v7 widened to 70 min** based on empirical mainnet
+/// observation (2026-05-04 via Kupo, 53 ADA-USD publishes over 39h):
+/// mean gap 45 min, p95 51 min, max 55 min. Configured Orcfax cadence is a
+/// 1h heartbeat (`cer-feeds/feeds/mainnet/cer-feeds.json`: `interval: 3600,
+/// deviation: 1`). v6's 30-min window would false-reject ~95% of legitimate
+/// fresh-but-late readings; 70 min gives a 15-min buffer beyond worst-case
+/// observed and absorbs ledger lower-bound padding.
+pub const orcfax_freshness_window_ms: Int = 70 * 60 * 1_000
+
+// ---------------------------------------------------------------------------
+// Aegis-self Publisher Constants (Aegis v7)
+// ---------------------------------------------------------------------------
+
+/// [v7] Aegis-self publisher payment-key-hash (= the VKH that signs all
+/// publish txs). Derived from the publisher mnemonic at
+/// `D:/wallet/publisher_mnemonic.txt` via path `m/1852'/1815'/0'/0/0`.
+///
+/// The `aegis/oracle/aegis_self.ak` parser pins this VKH so a forged UTxO
+/// at a different credential — even one carrying an AEGIS_PRICE_FEED_V1
+/// NFT moved by a key compromise — is rejected by the validator. Combined
+/// with the per-network NFT policy id (passed via `PolicyDatum.oracle_nft`
+/// at policy-creation time), this is a two-layer trust handshake.
+///
+/// **Network coverage**: BIP-44 derivation uses the same VKH on testnet
+/// (preprod, preview) AND mainnet — only the network header byte in the
+/// bech32 address differs. So this single constant is correct across all
+/// three networks. If we later separate the mainnet wallet for production
+/// hygiene (different mnemonic), this constant becomes per-network.
+///
+/// Typed as `ByteArray` rather than the `VerificationKeyHash` alias because
+/// `Hash<Blake2b_224, VerificationKey>` is an opaque type from `aiken/crypto`
+/// and can't be initialized from a literal — same reason
+/// `charli3_oracle_script_hash` above is `ByteArray`, not `ScriptHash`.
+pub const aegis_self_publisher_vkh: ByteArray =
+  #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -382,4 +426,42 @@ test pool_datum_construction() {
 
 test constants_are_reasonable() {
   min_premium == 2_000_000 && max_coverage_ratio == 50 && cancellation_window == 3_600_000 && cancellation_fee_bps == 1_000
+}
+
+test orcfax_freshness_window_widened_for_v7() {
+  // v7 widened from v6's 30 min to 70 min — must be ≥ Orcfax's empirical
+  // worst-case gap (max 55 min observed on mainnet) plus ledger lb padding.
+  orcfax_freshness_window_ms == 4_200_000 && orcfax_freshness_window_ms > 65 * 60 * 1_000
+}
+
+test aegis_self_publisher_vkh_is_28_bytes() {
+  // VKH must be exactly 28 bytes (Blake2b-224). Sanity-check the constant.
+  let len_ok =
+    aegis_self_publisher_vkh ==
+      #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
+  len_ok
+}
+
+test policy_datum_aegis_self_variant_constructs() {
+  let datum =
+    PolicyDatum {
+      policy_id: #"aabb",
+      insured: #"0011223344556677889900112233445566778899001122334455667788",
+      strike_price: 1_000_000,
+      coverage_amount: 10_000_000_000,
+      premium_paid: 100_000_000,
+      start_time: 1_700_000_000_000,
+      expiry_time: 1_700_604_800_000,
+      // For AegisSelf, oracle_nft carries the publisher NFT policy id.
+      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+      pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
+      pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
+      oracle_provider: AegisSelf,
+    }
+  let is_aegis_self =
+    when datum.oracle_provider is {
+      AegisSelf -> True
+      _ -> False
+    }
+  datum.strike_price == 1_000_000 && is_aegis_self
 }
