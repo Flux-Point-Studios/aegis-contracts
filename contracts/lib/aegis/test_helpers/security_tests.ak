@@ -1072,6 +1072,7 @@ test green_v6_a012_uniform_provider_required_in_batch() {
     when (p1.oracle_provider, p2.oracle_provider) is {
       (Charli3, Charli3) -> True
       (Orcfax, Orcfax) -> True
+      (AegisSelf, AegisSelf) -> True
       _ -> False
     }
   let same_nft = p1.oracle_nft == p2.oracle_nft
@@ -1089,10 +1090,39 @@ test green_v6_a012_mixed_providers_batch_rejected() {
     when (p1.oracle_provider, p2.oracle_provider) is {
       (Charli3, Charli3) -> True
       (Orcfax, Orcfax) -> True
+      (AegisSelf, AegisSelf) -> True
       _ -> False
     }
   // Claim: same_provider must be False — i.e., a mixed batch is rejected.
   same_provider == False
+}
+
+test green_v7_a012_aegis_self_uniform_batch_accepted() {
+  // [v7] Two AegisSelf-bound policies with the same publisher NFT in
+  // oracle_nft must pass the A-012 uniformity check. Mirrors the
+  // (Charli3, Charli3) and (Orcfax, Orcfax) positive cases above so the
+  // test suite covers all three same-pair branches the validator accepts.
+  let p1 =
+    PolicyDatum {
+      ..fixtures.default_policy_datum(),
+      oracle_provider: AegisSelf,
+      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+    }
+  let p2 =
+    PolicyDatum {
+      ..fixtures.default_policy_datum(),
+      oracle_provider: AegisSelf,
+      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+    }
+  let same_provider =
+    when (p1.oracle_provider, p2.oracle_provider) is {
+      (Charli3, Charli3) -> True
+      (Orcfax, Orcfax) -> True
+      (AegisSelf, AegisSelf) -> True
+      _ -> False
+    }
+  let same_nft = p1.oracle_nft == p2.oracle_nft
+  same_provider && same_nft
 }
 
 test green_v7_orcfax_freshness_window_70_minutes() {

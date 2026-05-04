@@ -7,6 +7,7 @@
 // =============================================================================
 
 use aiken/crypto.{Blake2b_224, Hash, Script, VerificationKey}
+use aiken/primitive/bytearray
 
 // ---------------------------------------------------------------------------
 // Type Aliases
@@ -435,11 +436,16 @@ test orcfax_freshness_window_widened_for_v7() {
 }
 
 test aegis_self_publisher_vkh_is_28_bytes() {
-  // VKH must be exactly 28 bytes (Blake2b-224). Sanity-check the constant.
-  let len_ok =
+  // VKH must be exactly 28 bytes (Blake2b-224). The length assertion is
+  // load-bearing: a wrong-length constant would silently never match any
+  // payment_credential at validation time (fail-closed), so this guards
+  // against a typo that would brick all AegisSelf claims. The equality
+  // pin doubles as a regression check on the canonical value.
+  let len_ok = bytearray.length(aegis_self_publisher_vkh) == 28
+  let value_ok =
     aegis_self_publisher_vkh ==
       #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
-  len_ok
+  len_ok && value_ok
 }
 
 test policy_datum_aegis_self_variant_constructs() {
