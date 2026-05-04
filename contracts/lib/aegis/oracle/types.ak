@@ -30,8 +30,11 @@
 /// **Freshness.** `valid_until` is the POSIX millisecond beyond which the
 /// reading is stale. For Charli3 this is the publisher-set `expiry` field of
 /// the oracle datum. For Orcfax (which has no on-chain expiry) the parser
-/// computes `valid_until = created_at + orcfax_freshness_window_ms`. The
-/// validator's freshness check is the provider-uniform `tx_lower <= valid_until`.
+/// computes `valid_until = created_at + orcfax_freshness_window_ms` (70 min
+/// in v7, widened from 30 min in v6 based on empirical mainnet observation).
+/// The validator's freshness check pins BOTH legs of the validity range:
+/// `tx_lower <= valid_until && tx_upper <= valid_until` (added in v6.0.1
+/// after independent review flagged the upper-bound bypass).
 ///
 /// **Why a struct and not a tuple.** Field names self-document the parser's
 /// contract; tuples would force every consumer to remember the position

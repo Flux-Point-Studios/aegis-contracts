@@ -13,7 +13,9 @@
 //                                       A-016 trust handshake.
 //            * `aegis/oracle/orcfax`  — Orcfax FsDat<Rational> parser; owns the
 //                                       FSP -> FS pointer indirection and the
-//                                       30-minute consumer-side freshness window.
+//                                       70-minute consumer-side freshness window
+//                                       (widened from 30 min in v7 — see
+//                                       types.ak::orcfax_freshness_window_ms).
 //            * `aegis/oracle`         — this file. Dispatcher + v5 backwards-
 //                                       compat re-exports so existing tests
 //                                       (security_tests.ak, fixtures.ak) and
