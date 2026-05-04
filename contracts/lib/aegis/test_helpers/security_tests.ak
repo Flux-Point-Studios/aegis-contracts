@@ -24,7 +24,7 @@ use aegis/pool.{
 use aegis/pricing.{calculate_treasury_cut, is_premium_adequate}
 use aegis/test_helpers/fixtures
 use aegis/types.{
-  Charli3, Orcfax, PolicyDatum, PoolDatum, cancellation_window,
+  AegisSelf, Charli3, Orcfax, PolicyDatum, PoolDatum, cancellation_window,
   charli3_oracle_script_hash, orcfax_ada_usd_feed_id,
   orcfax_freshness_window_ms, orcfax_fsp_script_hash_mainnet,
   orcfax_fsp_script_hash_preview, treasury_share_bps,
@@ -1020,7 +1020,7 @@ test green_v6_charli3_provider_dispatches_to_charli3_parser() {
   let provider_is_charli3 =
     when p.oracle_provider is {
       Charli3 -> True
-      Orcfax -> False
+      _ -> False
     }
   provider_is_charli3
 }
@@ -1034,7 +1034,7 @@ test green_v6_orcfax_provider_dispatches_to_orcfax_parser() {
   let provider_is_orcfax =
     when p.oracle_provider is {
       Orcfax -> True
-      Charli3 -> False
+      _ -> False
     }
   provider_is_orcfax && p.oracle_nft == fixtures.orcfax_fsp_hash_test
 }
@@ -1095,15 +1095,15 @@ test green_v6_a012_mixed_providers_batch_rejected() {
   same_provider == False
 }
 
-test green_v6_orcfax_freshness_window_30_minutes() {
-  // The Orcfax freshness window constant in `aegis/types` must equal exactly
-  // 30 * 60 * 1_000 ms (30 minutes), matching upstream's
-  // `orcfax-aiken/lib/orcfax/validity_range.ak` recommendation and the
-  // `synthetics/aik/lib/synthetics/constants.ak` (`max_ttl = 30 * 60 *
-  // 1000`). Diverging from upstream would either reject valid Orcfax fact
-  // statements (consumer-pinned window too narrow) or accept stale ones
-  // (window too wide, weakening freshness guarantees).
-  orcfax_freshness_window_ms == 30 * 60 * 1_000
+test green_v7_orcfax_freshness_window_70_minutes() {
+  // [v7 change] Widened from v6's 30 min to 70 min based on empirical mainnet
+  // observation (2026-05-04 via Kupo, 53 ADA-USD publishes over 39h: mean gap
+  // 45 min, p95 51 min, max 55 min). Orcfax's configured cadence is a 1h
+  // heartbeat (`cer-feeds/feeds/mainnet/cer-feeds.json`: `interval: 3600,
+  // deviation: 1`). v6's 30-min window false-rejected ~95% of legitimate
+  // fresh-but-late readings; 70 min gives 15-min buffer beyond worst-case
+  // observed and absorbs ledger lower-bound padding.
+  orcfax_freshness_window_ms == 70 * 60 * 1_000
 }
 
 test green_v6_charli3_freshness_uses_datum_expiry() {
@@ -1138,6 +1138,7 @@ test green_v6_policy_datum_has_11_fields_post_migration() {
     when p.oracle_provider is {
       Charli3 -> True
       Orcfax -> True
+      AegisSelf -> True
     }
   // Sanity: the other 10 fields are still present and reachable.
   let other_fields_intact =
@@ -1157,11 +1158,11 @@ test green_v6_orcfax_resolver_round_trip_happy_path() {
   let fs = fixtures.orcfax_fs_input(4_473, 10_000, 1_700_000_000_000)
   let price =
     orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
-  price.value == 447_300 && price.observed_at == 1_700_000_000_000 && price.valid_until == 1_700_000_000_000 + 30 * 60 * 1_000
+  price.value == 447_300 && price.observed_at == 1_700_000_000_000 && price.valid_until == 1_700_000_000_000 + 70 * 60 * 1_000
 }
 
-test green_v6_orcfax_resolver_freshness_uses_30min_window() {
-  // The parser must derive valid_until = created_at + 30 * 60 * 1000 ms.
+test green_v7_orcfax_resolver_freshness_uses_70min_window() {
+  // [v7] The parser must derive valid_until = created_at + 70 * 60 * 1000 ms.
   // Cross-check the constant flows through unchanged.
   let fsp = fixtures.orcfax_fsp_input(fixtures.orcfax_fs_hash_test)
   let fs = fixtures.orcfax_fs_input(4_473, 10_000, 1_700_000_000_000)

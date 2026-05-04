@@ -33,10 +33,11 @@
 //              hash) or a separate registry UTxO (large new audit surface).
 // =============================================================================
 
+use aegis/oracle/aegis_self
 use aegis/oracle/charli3
 use aegis/oracle/orcfax
 use aegis/oracle/types as oracle_types
-use aegis/types.{Charli3, OracleProvider, Orcfax}
+use aegis/types.{AegisSelf, Charli3, OracleProvider, Orcfax}
 use cardano/transaction.{Input}
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,7 @@ pub fn resolve_oracle_price(
   when provider is {
     Charli3 -> charli3.resolve(reference_inputs, oracle_nft)
     Orcfax -> orcfax.resolve(reference_inputs, oracle_nft)
+    AegisSelf -> aegis_self.resolve(reference_inputs, oracle_nft)
   }
 }
 
@@ -127,14 +129,15 @@ pub fn create_oracle_datum(
 // ---------------------------------------------------------------------------
 
 test dispatcher_charli3_branch_compiles() {
-  // Sanity: the `when provider is { Charli3 -> ... | Orcfax -> ... }` shape
-  // exhaustively matches the OracleProvider sum type. Compilation of this
-  // file IS the assertion; this test pins the property as a regression check
-  // against accidentally adding a non-exhaustive `_` branch to the dispatch.
+  // Sanity: the `when provider is { Charli3 -> ... | Orcfax -> ... | AegisSelf -> ... }`
+  // shape exhaustively matches the OracleProvider sum type. Compilation of
+  // this file IS the assertion; this test pins the property as a regression
+  // check against accidentally adding a non-exhaustive `_` branch to dispatch.
   let provider: OracleProvider = Charli3
   when provider is {
     Charli3 -> True
     Orcfax -> False
+    AegisSelf -> False
   }
 }
 
@@ -143,6 +146,16 @@ test dispatcher_orcfax_branch_compiles() {
   when provider is {
     Charli3 -> False
     Orcfax -> True
+    AegisSelf -> False
+  }
+}
+
+test dispatcher_aegis_self_branch_compiles() {
+  let provider: OracleProvider = AegisSelf
+  when provider is {
+    Charli3 -> False
+    Orcfax -> False
+    AegisSelf -> True
   }
 }
 
