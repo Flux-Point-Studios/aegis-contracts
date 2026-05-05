@@ -1,3 +1,4 @@
+use aegis/oracle.{canonical_oracle_nft}
 use aegis/pool.{
   can_underwrite, can_withdraw, verify_add_liquidity_datum, verify_claim_datum,
   verify_remove_liquidity_datum, verify_underwrite_datum,
@@ -115,7 +116,14 @@ fn batch_policies_match_totals(
                       pdat.expiry_time,
                       validity_range,
                     )
-                  if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok {
+                  // [v6.0.2 / A-026, A-027] `pdat.oracle_nft` must equal
+                  // the network's canonical handle for the declared
+                  // provider, so a non-canonical handle can never enter
+                  // a `PolicyDatum`. Defense-in-depth alongside the
+                  // per-parser `expect oracle_nft == canonical` checks.
+                  let oracle_pinned =
+                    pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)
+                  if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned {
                     let funded =
                       assets.lovelace_of(out.value) >= pdat.coverage_amount
                     (
@@ -191,8 +199,13 @@ fn policy_output_matches_underwrite(
               when out.datum is {
                 InlineDatum(raw_pdat) -> {
                   expect pdat: PolicyDatum = raw_pdat
+                  // [v6.0.2 / A-026, A-027] Bind `oracle_nft` to the
+                  // network-canonical handle for the declared provider.
+                  // See `policy_output_matches_underwrite` doc above.
+                  let oracle_pinned =
+                    pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)
                   let predicate =
-                    pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && assets.lovelace_of(
+                    pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && oracle_pinned && assets.lovelace_of(
                       out.value,
                     ) >= coverage && start_time_in_tx_range(
                       pdat.start_time,
@@ -373,7 +386,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
       // -----------------------------------------------------------------------
       // PROCESS CLAIM: Deduct payout from pool
       // -----------------------------------------------------------------------
-      ProcessClaim { payout, policy_script } -> {
+      ProcessClaim { payout } -> {
         expect Some(cont_output) = pool_output
 
         // 1. Parse the new pool datum
@@ -388,6 +401,13 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // the requested payout. Without these checks, anyone can submit ANY
         // policy UTxO (including a self-constructed synthetic policy) and
         // request an arbitrarily large payout.
+        //
+        // [v6.0.2 / L-006 fix] Resolve the policy script credential via
+        // the validator's parameterized `policy_script_hash` rather than a
+        // redeemer-supplied field. Pre-fix, an attacker could submit
+        // `ProcessClaim { policy_script: <attacker_hash> }` referencing a
+        // policy UTxO at their own permissive script and drain the pool
+        // up to `active_coverage` in a single tx for ~3 ADA cost.
         let own_pool_hash =
           when self_input.output.address.payment_credential is {
             Script(h) -> h
@@ -398,7 +418,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             inputs,
             fn(i) {
               when i.output.address.payment_credential is {
-                Script(h) -> h == policy_script
+                Script(h) -> h == policy_script_hash
                 _ -> False
               }
             },
@@ -638,7 +658,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
       // -----------------------------------------------------------------------
       // BATCH EXPIRE PROCESS: Return expired policy funds to pool
       // -----------------------------------------------------------------------
-      BatchExpireProcess { total_returned, policy_script } -> {
+      BatchExpireProcess { total_returned } -> {
         expect Some(cont_output) = pool_output
 
         // 1. Parse the new pool datum
@@ -648,20 +668,25 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 2. Verify total_returned is positive
         let returned_positive = total_returned > 0
 
-        // 3. [FIX A-001] Verify the consumed policies (a) come from the named
-        // policy_script, (b) bind to THIS pool, and (c) their lovelace sum
-        // equals total_returned. The previous check only required at least
-        // one policy was consumed.
+        // 3. [FIX A-001] Verify the consumed policies (a) come from the
+        // canonical policy_validator (parameterized hash), (b) bind to
+        // THIS pool, and (c) their lovelace sum equals total_returned.
+        //
+        // [v6.0.2 / L-006 fix] The policy script credential is now sourced
+        // from the validator's `policy_script_hash` parameter, not a
+        // redeemer-supplied field. Pre-fix, an attacker could substitute
+        // their own permissive script.
         let own_pool_hash =
           when self_input.output.address.payment_credential is {
             Script(h) -> h
             _ -> #""
           }
-        let policies_consumed = count_script_inputs(inputs, policy_script) >= 1
+        let policies_consumed =
+          count_script_inputs(inputs, policy_script_hash) >= 1
         let consumed_policies_match =
           consumed_policies_total_to(
             inputs,
-            policy_script,
+            policy_script_hash,
             own_pool_hash,
             datum.pool_nft,
             total_returned,
@@ -718,14 +743,19 @@ validator pool_validator(policy_script_hash: ByteArray) {
       //     Underwrite time as part of net_premium; on cancel we only return
       //     the 90% refund, so the 10% retention is implicit).
       // -----------------------------------------------------------------------
-      AcceptCancellation { policy_script } -> {
+      AcceptCancellation -> {
         expect Some(cont_output) = pool_output
 
         // 1. Parse the new pool datum
         expect InlineDatum(raw_new_datum) = cont_output.datum
         expect new_datum: PoolDatum = raw_new_datum
 
-        // 2. Locate the consumed Cancel-redeemed policy and parse its datum
+        // 2. Locate the consumed Cancel-redeemed policy and parse its datum.
+        //
+        // [v6.0.2 / L-006 fix] Resolve the policy script credential via
+        // the validator's `policy_script_hash` parameter rather than a
+        // redeemer field. Same root cause as the ProcessClaim and
+        // BatchExpireProcess fixes.
         let own_pool_hash =
           when self_input.output.address.payment_credential is {
             Script(h) -> h
@@ -736,7 +766,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             inputs,
             fn(i) {
               when i.output.address.payment_credential is {
-                Script(h) -> h == policy_script
+                Script(h) -> h == policy_script_hash
                 _ -> False
               }
             },

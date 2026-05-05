@@ -39,7 +39,10 @@ use aegis/oracle/aegis_self
 use aegis/oracle/charli3
 use aegis/oracle/orcfax
 use aegis/oracle/types as oracle_types
-use aegis/types.{AegisSelf, Charli3, OracleProvider, Orcfax}
+use aegis/types.{
+  AegisSelf, Charli3, OracleProvider, Orcfax, aegis_self_nft_policy,
+  charli3_ada_usd_nft_policy, orcfax_fsp_script_hash,
+}
 use cardano/transaction.{Input}
 
 // ---------------------------------------------------------------------------
@@ -75,6 +78,26 @@ pub fn resolve_oracle_price(
     Charli3 -> charli3.resolve(reference_inputs, oracle_nft)
     Orcfax -> orcfax.resolve(reference_inputs, oracle_nft)
     AegisSelf -> aegis_self.resolve(reference_inputs, oracle_nft)
+  }
+}
+
+/// [v6.0.2 / A-026 / A-027 fix] Per-provider canonical oracle handle.
+///
+/// Returns the network-pinned NFT policy id (Charli3, AegisSelf) or FSP
+/// script hash (Orcfax) for the supplied provider. Used by the pool
+/// validator's `Underwrite` and `BatchUnderwrite` paths to assert
+/// `pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)` at
+/// policy-creation time — defense in depth so a non-canonical handle can
+/// never enter a `PolicyDatum` in the first place. The per-parser
+/// `expect oracle_nft == canonical` checks (in
+/// `aegis/oracle/{charli3,orcfax,aegis_self}.ak`) are the redundant second
+/// layer that catches any path which would bypass Underwrite (e.g., a
+/// hand-crafted policy UTxO not created via the pool validator).
+pub fn canonical_oracle_nft(provider: OracleProvider) -> ByteArray {
+  when provider is {
+    Charli3 -> charli3_ada_usd_nft_policy
+    Orcfax -> orcfax_fsp_script_hash
+    AegisSelf -> aegis_self_nft_policy
   }
 }
 
