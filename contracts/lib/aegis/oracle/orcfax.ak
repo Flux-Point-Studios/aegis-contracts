@@ -191,6 +191,15 @@ pub fn resolve_with_feed(
   fsp_hash: ByteArray,
   feed_id_prefix: ByteArray,
 ) -> Price {
+  // [v6.0.2 / A-027 fix] Pin `fsp_hash` to the canonical Orcfax FSP
+  // script hash for the active network. Pre-fix, the FSP script
+  // credential was pinned to the same caller-supplied value, letting an
+  // attacker deploy a permissive FSP+FS pair under their own hash and
+  // reference them. The pre-existing `orcfax_fsp_script_hash_preview`
+  // and `_mainnet` constants were unused for binding; this asserts the
+  // active-network constant.
+  expect fsp_hash == aegis_types.orcfax_fsp_script_hash
+
   // 1. FSP discovery.
   expect Some(fsp_input) = find_fsp_input(reference_inputs, fsp_hash)
   expect InlineDatum(fsp_idat) = fsp_input.output.datum

@@ -180,9 +180,15 @@ validator policy_validator {
         // freshness window, otherwise an attacker could submit a tx with
         // tx_lower fresh but tx_upper hours later, and the chain would
         // include the tx after the price has actually staled.
+        // [v6.0.2 / L-003 fix] Also require `tx_lower >= price.observed_at`
+        // — closes the surface where a tx is built fresh, withheld, and
+        // replayed after a publisher correction; without this, the only
+        // anchor was `valid_until` (a publisher-controlled future time),
+        // not the time the reading was actually committed on-chain.
         let tx_lower = get_lower_bound(validity_range)
         let tx_upper = get_upper_bound(validity_range)
-        let oracle_fresh = tx_lower <= price.valid_until && tx_upper <= price.valid_until
+        let oracle_fresh =
+          tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
 
         // 4. Verify transaction is within the policy period
         let within_start = tx_lower >= datum.start_time
@@ -238,9 +244,12 @@ validator policy_validator {
         // [v6.0.1 fix] Both validity-range legs must be inside the freshness
         // window — otherwise an attacker could spend a stale price by
         // submitting a tx with tx_lower fresh but tx_upper much later.
+        // [v6.0.2 / L-003 fix] Also require `tx_lower >= price.observed_at`
+        // to close tx-withhold-and-replay-after-correction.
         let tx_lower = get_lower_bound(validity_range)
         let tx_upper = get_upper_bound(validity_range)
-        let oracle_fresh = tx_lower <= price.valid_until && tx_upper <= price.valid_until
+        let oracle_fresh =
+          tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
 
         // Time bounds
         let within_start = tx_lower >= datum.start_time
@@ -354,7 +363,11 @@ validator policy_validator {
         // [v6.0.1 fix] Both validity-range legs must be inside the freshness
         // window — symmetric with Claim/BatchClaim so a Cancel can't replay
         // a stale price by widening the validity range.
-        let oracle_fresh = tx_lower <= price.valid_until && tx_upper <= price.valid_until
+        // [v6.0.2 / L-003 fix] Also require `tx_lower >= price.observed_at`
+        // — symmetric with Claim/BatchClaim, closes the same withhold-
+        // and-replay surface for Cancel.
+        let oracle_fresh =
+          tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
         // Note: Claim uses `oracle_price <= strike_price` to trigger payout,
         // so the symmetric in-the-money guard here is `oracle_price > strike`.
         let not_in_the_money = price.value > datum.strike_price

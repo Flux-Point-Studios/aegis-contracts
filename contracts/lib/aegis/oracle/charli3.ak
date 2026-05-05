@@ -126,6 +126,13 @@ pub fn find_oracle_datum(
   reference_inputs: List<Input>,
   oracle_nft_policy: ByteArray,
 ) -> OracleDatum {
+  // [v6.0.2 / A-026-class fix] Pin `oracle_nft_policy` to the canonical
+  // Charli3 ADA/USD NFT. Pre-fix, this argument was caller-controlled
+  // (sourced from `PolicyDatum.oracle_nft`); an attacker could output a
+  // fake-NFT UTxO at the canonical Charli3 address (anyone can output
+  // to any address) and reference it. The address pin alone (A-016) was
+  // insufficient; this NFT-policy pin closes the second leg.
+  expect oracle_nft_policy == aegis_types.charli3_ada_usd_nft_policy
   when find_oracle_output(reference_inputs, oracle_nft_policy) is {
     Some(output) ->
       when output.datum is {
