@@ -26,7 +26,7 @@ Operator-only paths (deploy, NFT mint, ref-script publish, init-pool) DO sign se
 
 - **Pool UTxO**: `query_utxos_at_address(POOL_SCRIPT_ADDRESS)`. Filtered by canonical pool NFT presence to identify the singleton.
 - **Policy UTxOs**: `query_utxos_at_address(POLICY_SCRIPT_ADDRESS)`. Each parsed for its inline `PolicyDatum`.
-- **Charli3 oracle UTxO**: `query_utxos_at_address(ORACLE_ADDRESS)` filtered by oracle NFT. Used as a `reference_inputs` entry in claim txs.
+- **Multi-oracle reference UTxO**: per the policy's `oracle_provider` (Charli3 / Orcfax / AegisSelf), the backend resolves the canonical reference-input UTxO and includes it in claim/cancel txs. For Charli3: `query_utxos_at_address(CHARLI3_ORACLE_ADDRESS)` filtered by `charli3_ada_usd_nft_policy`. For Orcfax: query the FSP UTxO at the per-network `orcfax_fsp_script_hash`, follow its pointer to the FS UTxO. For AegisSelf: query the publisher wallet's address, filter by `AEGIS_PRICE_FEED_V1` token, pick the freshest UTxO. The validator dispatcher (`aegis/oracle.resolve_oracle_price`) re-validates the trust handshake on chain regardless of how the backend selected the input.
 - **User wallet UTxOs**: standard Cardano wallet queries via Blockfrost.
 
 ## What the backend writes (validator-mediated)
@@ -37,7 +37,7 @@ For every fee-bearing or stateful operation, the backend constructs a multi-vali
 2. For underwrite: appends a **policy output** at the policy_validator address with a hand-built `PolicyDatum`.
 3. For claim/cancel/expire: also consumes the **policy UTxO** as a script input with the appropriate policy redeemer.
 4. References the deployed validator scripts via CIP-33 `reference_inputs` (the validators are NOT inlined per-tx).
-5. References the **Charli3 oracle UTxO** via `reference_inputs` (read-only).
+5. References the **provider-specific oracle UTxO(s)** via `reference_inputs` (read-only). Charli3 = single oracle UTxO; Orcfax = FSP + FS UTxO pair (FSP carries the pointer, FS carries the price datum); AegisSelf = single publisher UTxO. The validator dispatches on the policy's bound `oracle_provider`.
 6. Sets `tx.treasury_donation` (CDDL key 22) to the calculated cut for fee-bearing flows.
 7. Sets validity-range bounds (`validity_start = current_slot - 200`, `ttl = current_slot + 600`) so on-chain time invariants like A-015 hold.
 
@@ -49,9 +49,9 @@ The validator code in this repo is what makes ANY of these operations safe — t
 |---|---|---|
 | `api/policies.py::create_policy` | pool.Underwrite | Builds a single-policy underwrite. Sets treasury_donation. |
 | `api/policies.py::batch_underwrite` | pool.BatchUnderwrite | Multi-policy single-tx underwrite. Validator's `batch_policies_match_totals` enforces sum invariants. |
-| `api/policies.py::claim_policy` | policy.Claim + pool.ProcessClaim | Co-spends one policy and the pool. Includes oracle ref input. |
-| `api/policies.py::cancel_policy` | policy.Cancel + pool.AcceptCancellation | Same co-spend; oracle ref input used by policy.Cancel for the in-the-money guard. |
-| `api/policies.py::batch_claim_chained` | policy.BatchClaim + pool.ProcessClaim | Aggregates multiple claims; validator A-012 enforces uniform oracle. |
+| `api/policies.py::claim_policy` | policy.Claim + pool.ProcessClaim | Co-spends one policy and the pool. Includes provider-specific oracle ref input(s). **[v6.0.2 / L-006]** `pool.ProcessClaim` redeemer no longer carries `policy_script` — backend constructor updated. |
+| `api/policies.py::cancel_policy` | policy.Cancel + pool.AcceptCancellation | Same co-spend; oracle ref input used by policy.Cancel for the in-the-money guard. **[v6.0.2 / L-006]** `pool.AcceptCancellation` redeemer no longer carries `policy_script`. |
+| `api/policies.py::batch_claim_chained` | policy.BatchClaim + pool.ProcessClaim | Aggregates multiple claims; validator A-012 enforces uniform `(oracle_provider, oracle_nft)` (generalized in v6 to span all providers, including AegisSelf). |
 | `api/pool.py::add_liquidity` | pool.AddLiquidity + lp_token.MintLP | Mints aLP tokens proportional to deposit. |
 | `api/pool.py::remove_liquidity` | pool.RemoveLiquidity + lp_token.BurnLP | Burns aLP, withdraws ADA. |
 | `api/pool.py::init_pool` | (no script consumption) | Creates the bootstrap pool UTxO at the script address with the NFT. Operator-only. |
@@ -73,7 +73,7 @@ The validators do NOT trust the backend. Specifically:
 | Coverage + premium are positive | A-024 fix — explicit `> 0` guards |
 | Coverage / premium ratio doesn't slip past 50× | A-014 fix — multiplication form |
 | Policy `start_time` lies in tx validity range | A-015 fix — `start_time_in_tx_range` helper |
-| Oracle reference input is at canonical Charli3 script address AND carries Charli3 NFT | A-016 fix — `find_oracle_output` script-hash binding |
+| Oracle reference input passes the per-provider trust handshake (canonical NFT pin AND credential pin) | A-016 (Charli3 script-hash binding) + Round-6 NFT-pin extension; A-026 (AegisSelf two-layer); A-027 (Orcfax FSP script hash); enforced by `oracle/{charli3,orcfax,aegis_self}.ak` parsers + Underwrite-time `pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)` |
 | Treasury donation matches the protocol-fee-derived cut | A-021 (donation feature) — `donation_ok` clauses on three pool branches |
 | Payouts go to enterprise addresses (no stake credential) | A-009 — `sum_lovelace_to_enterprise_pkh` |
 | Single canonical pool exists | A-011 — one-shot NFT mint policy |
@@ -100,7 +100,7 @@ These run with the operator's signing key (loaded from a path set via the `AEGIS
 ## What's NOT enforced on-chain (auditor watch list)
 
 - **Premium pricing model**: the actuarial calculation (base rate × duration multiplier × utilization factor) lives in `api/policies.py`. The validator only enforces `is_premium_adequate` (premium >= min, ratio acceptable). A backend bug could quote a too-low premium that the validator still accepts. Risk surface: backend.
-- **Oracle price reading from datum**: the `oracle.ak::get_oracle_price` helper extracts the price from the Charli3 datum. We trust Charli3's datum schema. If Charli3 changes their schema, our parser breaks. Mitigation: pin Charli3's oracle script hash (A-016) so a Charli3 redeploy forces an Aegis redeploy.
+- **Oracle price reading from datum**: the per-provider parsers under `oracle/` extract the price from each provider's datum format. We trust each provider's datum schema for the policies that bind to them. If a provider changes their schema, our parser breaks for THAT provider only — policies bound to the other two providers continue working. Mitigation: pin every provider's canonical handle by validator hash (A-016 + Round-6 NFT pin for Charli3; A-027 for Orcfax FSP script hash; A-026 for the AegisSelf publisher VKH and NFT policy id) so a provider-side redeploy forces an Aegis redeploy and surfaces the change in the chain log.
 - **CIP-30 wallet correctness**: the user trusts their wallet to display the tx body honestly. Out of scope for on-chain audit.
 - **Time accuracy**: the validator uses `validity_range` POSIX bounds, which derive from slot numbers via the ledger's slot→time mapping. Off-chain code converts between slots and POSIX manually. A miscalibration there would create policies whose start_time doesn't match wall-clock. Risk surface: backend.
 
