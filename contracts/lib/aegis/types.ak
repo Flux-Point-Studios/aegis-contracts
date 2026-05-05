@@ -189,12 +189,15 @@ pub type PoolRedeemer {
     /// Premium collected in lovelace
     premium: Int,
   }
-  /// Process a claim payout from the pool
+  /// Process a claim payout from the pool. [v6.0.2 / L-006 fix] The
+  /// `policy_script` redeemer field has been removed — the validator now
+  /// resolves the policy script credential via the pool_validator's
+  /// compile-time `policy_script_hash` parameter, closing the surface
+  /// where an attacker-deployed permissive script could be supplied via
+  /// the redeemer to drain the pool through fake `PolicyDatum` UTxOs.
   ProcessClaim {
     /// Amount to pay out in lovelace
     payout: Int,
-    /// Script hash of the policy validator (to verify policy consumption)
-    policy_script: ScriptHash,
   }
   /// Deposit ADA into the liquidity pool
   AddLiquidity {
@@ -213,23 +216,23 @@ pub type PoolRedeemer {
     /// Total premium collected across all policies
     total_premium: Int,
   }
-  /// Process batch-expire: return expired policy funds to pool
+  /// Process batch-expire: return expired policy funds to pool. [v6.0.2 /
+  /// L-006 fix] `policy_script` removed; validator uses the parameterized
+  /// `policy_script_hash`.
   BatchExpireProcess {
     /// Total lovelace being returned from expired policies
     total_returned: Int,
-    /// Script hash of the policy validator
-    policy_script: ScriptHash,
   }
-  /// [FIX A-020] Process a cancellation. Consumes a Cancel-redeemed policy
-  /// at `policy_script`, sends the canonical refund (90% of premium) to the
-  /// insured, decrements `active_coverage` by the consumed policy's coverage,
-  /// and retains the 10% cancellation fee in the pool. The refund magnitude
-  /// is derived on-chain from the consumed policy's `premium_paid` (NOT a
-  /// caller-controlled amount), so an over-refund cannot drain the pool.
-  AcceptCancellation {
-    /// Script hash of the policy validator (to locate the consumed policy)
-    policy_script: ScriptHash,
-  }
+  /// [FIX A-020] Process a cancellation. Consumes a Cancel-redeemed policy,
+  /// sends the canonical refund (90% of premium) to the insured, decrements
+  /// `active_coverage` by the consumed policy's coverage, and retains the
+  /// 10% cancellation fee in the pool. The refund magnitude is derived
+  /// on-chain from the consumed policy's `premium_paid` (NOT a caller-
+  /// controlled amount), so an over-refund cannot drain the pool.
+  ///
+  /// [v6.0.2 / L-006 fix] `policy_script` removed; validator uses the
+  /// parameterized `policy_script_hash`.
+  AcceptCancellation
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +293,22 @@ pub const treasury_share_bps: Int = 2_500
 /// Address: addr_test1wq3pacs7jcrlwehpuy3ryj8kwvsqzjp9z6dpmx8txnr0vkq6vqeuu
 pub const charli3_oracle_script_hash: ByteArray =
   #"221ee21e9607f766e1e1223248f67320014825169a1d98eb34c6f658"
+
+/// [v6.0.2 / A-026-class fix] Charli3 ADA/USD oracle NFT policy id.
+///
+/// Pinned at compile time alongside `charli3_oracle_script_hash` so the
+/// trust handshake is BOTH legs of the address+NFT pair, not just the
+/// address. Pre-fix, the `oracle_nft` field of `PolicyDatum` was caller-
+/// controlled — an attacker could output a fake-NFT UTxO at the canonical
+/// Charli3 address (anyone can output to any address, only spending is
+/// gated) and have the parser read attacker-controlled price data.
+///
+/// Preprod value (live ODV oracle for ADA/USD); rotate on mainnet build.
+/// On-chain validators are rebuilt per-network so this constant is
+/// network-specific in practice; the visible validator-hash rotation is
+/// the governance signal that the binding has changed.
+pub const charli3_ada_usd_nft_policy: ByteArray =
+  #"886dcb2363e160c944e63cf544ce6f6265b22ef7c4e2478dd975078e"
 
 // ---------------------------------------------------------------------------
 // Orcfax Feed Source Pointer (FSP) Hashes (Aegis v6)
@@ -363,6 +382,23 @@ pub const orcfax_fsp_asset_name: ByteArray = #"000de140"
 /// observed and absorbs ledger lower-bound padding.
 pub const orcfax_freshness_window_ms: Int = 70 * 60 * 1_000
 
+/// [v6.0.2 / A-027 fix] Active-network Orcfax FSP script hash.
+///
+/// Set per build target. Pre-fix, the Orcfax parser took the FSP hash as a
+/// caller-supplied argument (sourced from `PolicyDatum.oracle_nft`) and
+/// pinned the FSP UTxO's script credential to the SAME caller-supplied
+/// value — letting an attacker deploy a permissive FSP+FS pair under their
+/// own hash and reference them. The post-fix parser asserts the supplied
+/// `fsp_hash` equals THIS pinned constant before any UTxO lookup runs.
+///
+/// Currently set to the preview value (Aegis-on-preview is the only
+/// deployment that consumes Orcfax — preprod has no Orcfax, mainnet not
+/// yet shipped). Promoting to mainnet flips this to
+/// `orcfax_fsp_script_hash_mainnet` and rotates the validator hash, which
+/// IS the visible trust signal.
+pub const orcfax_fsp_script_hash: ByteArray =
+  #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230"
+
 // ---------------------------------------------------------------------------
 // Aegis-self Publisher Constants (Aegis v7)
 // ---------------------------------------------------------------------------
@@ -389,6 +425,32 @@ pub const orcfax_freshness_window_ms: Int = 70 * 60 * 1_000
 /// `charli3_oracle_script_hash` above is `ByteArray`, not `ScriptHash`.
 pub const aegis_self_publisher_vkh: ByteArray =
   #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
+
+/// [v6.0.2 / A-026 fix] AegisSelf canonical publisher NFT policy id.
+///
+/// One-shot-minted per network (current preprod value below). The parser
+/// now rejects any `oracle_nft` that does not equal this constant, closing
+/// the surface where an attacker mints a fake NFT under their own permissive
+/// policy and outputs it at the publisher VKH address (which anyone can do
+/// — Cardano addresses accept inbound outputs from any sender; only spending
+/// is gated by the payment credential).
+///
+/// **Why the original two-layer handshake was insufficient.** The header
+/// of `aegis/oracle/aegis_self.ak` claimed the trust handshake "requires
+/// the attacker to BOTH steal the publisher key AND mint under our
+/// parameterized one-shot policy." That argument was wrong: the parser
+/// only checked that the UTxO contained a token under the *caller-supplied*
+/// `oracle_nft` policy id, not that the policy id was canonical. An
+/// attacker minting under a fresh permissive policy and referencing the
+/// resulting UTxO bypassed both legs.
+///
+/// **Per-network rotation.** The publisher NFT is a one-shot minted via
+/// the `pool_nft.ak` validator parameterized over an init UTxO consumed
+/// at mint time; a fresh mint per network produces a different policy id.
+/// Update this constant per build target. Current value: preprod
+/// `AEGIS_PRICE_FEED_V1`.
+pub const aegis_self_nft_policy: ByteArray =
+  #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f"
 
 // ---------------------------------------------------------------------------
 // Tests

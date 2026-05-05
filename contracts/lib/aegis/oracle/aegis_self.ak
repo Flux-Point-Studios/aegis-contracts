@@ -72,6 +72,15 @@ pub fn find_feed_datum(
   reference_inputs: List<Input>,
   oracle_nft: ByteArray,
 ) -> OracleDatum {
+  // [v6.0.2 / A-026 fix] Pin `oracle_nft` to the canonical AegisSelf
+  // publisher NFT. The pre-fix file-header comment claimed the trust
+  // handshake "requires the attacker to BOTH steal the publisher key AND
+  // mint under our parameterized one-shot policy" — that argument was
+  // wrong because `oracle_nft` was caller-controlled per policy. With
+  // this pin in place, an attacker forging a fake NFT under their own
+  // permissive policy is rejected before the payment-credential check
+  // even runs.
+  expect oracle_nft == aegis_types.aegis_self_nft_policy
   when find_feed_output(reference_inputs, oracle_nft) is {
     Some(output) ->
       when output.datum is {

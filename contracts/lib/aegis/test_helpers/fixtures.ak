@@ -32,8 +32,14 @@ pub const pool_script_hash: ScriptHash =
 pub const lp_token_policy_id: ByteArray =
   #"0402df9c420213421d894b00ee5b23391cb36dc3c2a436b48229c10a"
 
+/// [v6.0.2 / A-026-class fix] The canonical Charli3 ADA/USD NFT policy id
+/// (matches `types.charli3_ada_usd_nft_policy`). Pre-fix, this fixture
+/// used an arbitrary 28-byte placeholder; the parser pin now requires the
+/// canonical value, so the fixture must round-trip with the real handle.
+/// Use `oracle_nft_policy_alt` (declared below) when a test needs a
+/// deliberately *non*-canonical NFT (e.g., spoofing checks).
 pub const oracle_nft_policy: ByteArray =
-  #"a665bb42594646eaaed8ed59ada592fb8300775df916a4a5406ffa96"
+  #"886dcb2363e160c944e63cf544ce6f6265b22ef7c4e2478dd975078e"
 
 pub const pool_nft_policy: ByteArray =
   #"deadbeef00112233445566778899aabbccddeeff00112233445566"
