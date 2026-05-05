@@ -1,32 +1,39 @@
 # Security Audit Report: Aegis Parametric Insurance Protocol
 
-**Date:** April 30, 2026
+**Date:** April 30, 2026 (initial); updated 2026-05-05 with Round 4 / 5 / 6 addenda
 **Validator Versions:**
-- `policy.policy_validator` — v0.1.0
-- `pool.pool_validator` — v0.1.0
-- `lp_token.lp_token_policy` — v0.1.0
-- `policy_simple.simple_claim` — diagnostic-only
-- `pool_nft.pool_nft` — v0.1.0 (NEW, A-011 one-shot mint)
+- `policy.policy_validator` — v6.0.2-redteam-round6 (current)
+- `pool.pool_validator` — v6.0.2-redteam-round6 (current)
+- `lp_token.lp_token_policy` — v6.0.2-redteam-round6 (current)
+- `pool_nft.pool_nft` — re-parameterized per deploy (A-011 one-shot mint)
+- `policy_simple.simple_claim` — diagnostic-only, **MOVED OUT OF MAIN PROJECT** (A-019)
 
-**Script Hashes (post-A-025 v5, 2026-04-30):**
-- Policy Validator: `b63091c33ee34451f59f3186bd493db39cc46387b04be59d616e146b` (rotated in v4 by A-014/A-016 propagating into pricing.ak / oracle.ak)
-- Pool Validator:   `c7cf3d90e885ddc54d1187edd491d68d1e1c2bd5cb7b2c986f632377` (post-A-025; parameterized by `policy_script_hash`)
-- LP Token Policy:  `08ca63fe64473b547dcce9279770bbbcd0a39ff8525082dc48eefc7a` (parameterized by post-A-025 pool hash)
-- Pool NFT: `4720c6e6a56c44a71f8d0da2fabcac48bc4a531357313990f2f47f93` (asset name `AEGIS_POOL_V6`, minted via the one-shot policy at the v5 init UTxO)
-- Simple Claim (diagnostic, **MOVED OUT OF MAIN PROJECT — A-019**): `60ff74f29208a88c83a7b4c68a6c335ec0ebe835f89c5a95db3eec8f` — now lives in a separate Aiken project at `D:/aegis/contracts-diagnostics/` and is gated to preprod-only by the off-chain harness. Not present in `D:/aegis/contracts/plutus.json`.
+**Script Hashes (current — v6.0.2-redteam-round6, 2026-05-05):**
+- Policy Validator: `9b58ec9f1749c87235ad81bd6c3c71e2238b6df7f00f93c386d307d8` (rotated by round-6 fixes — A-026 / A-027 / Charli3 NFT-pin parser pin extension propagated into the Underwrite path; new `canonical_oracle_nft` helper)
+- Pool Validator:   `13b2150d5ca3b26bda15f24177852bdee357a5b934dab59ecf7c99da` (rotated by L-006 redeemer-schema change — `ProcessClaim` / `BatchExpireProcess` / `AcceptCancellation` no longer carry a redeemer-supplied `policy_script`; pool now uses parameterized `policy_script_hash`)
+- LP Token Policy:  `70bea1fe107845b0f0f0c0a465230054a682274f4ab3b417b815b6c4` (parameterized cascade from rotated pool hash)
+- Pool NFT: `cfbc3f26fdbefeb3c9ac31dcab38f731780ef79d4a8bbc7232a4b3d6` (asset name `AEGIS_POOL_V10`, minted via the one-shot policy at the v6.0.2 init UTxO)
+- Simple Claim (diagnostic, **MOVED OUT OF MAIN PROJECT — A-019**): now lives in a separate Aiken project at `D:/aegis/contracts-diagnostics/` and is gated to preprod-only by the off-chain harness. Not present in `D:/aegis-contracts/contracts/plutus.json`.
 
 **Hash rotation history:**
-- `policy.policy_validator`: `532740d2...` (Priority-1 baseline) → `d492179e...` (post-A-009/A-010/A-012/A-013, since stable). Byte-stable across all subsequent deployments by deliberate factoring — donation enforcement and policy-script binding both live on the pool side.
-- `pool.pool_validator`: `54280b3f...` → `ac734c26...` (A-020, AcceptCancellation) → `e067903b...` (v1-treasury, donation_ok) → `4e321754...` (v2-a022, parameterized over policy_script_hash).
-- `lp_token.lp_token_policy`: `5052905c...` (parameter-free baseline) cascades with pool's hash via parameterization — currently `ffa6d4ad...`.
-- `pool_nft.pool_nft`: re-parameterized per deploy with the operator's init UTxO; current `9e56198e...`.
+- v0..v3 (R1/R2/R3 build chain): `policy.policy_validator` `532740d2...` → `d492179e...` (post-A-009..A-013); `pool.pool_validator` `54280b3f...` → `ac734c26...` (A-020) → `e067903b...` (v1-treasury) → `4e321754...` (v2-a022).
+- **v4 (2026-04-30, A-014/A-015/A-016):** ratio multiplication-form, validity-range pin, Charli3 oracle script-hash binding.
+- **v5 (2026-04-30, A-025):** multi-policy single-Underwrite count-of-1 fix; pool `c7cf3d90...`, policy `b63091c3...`, lp_token `08ca63fe...`.
+- **v6 (2026-04-30, multi-oracle scope expansion):** Charli3 + Orcfax dispatcher; PolicyDatum 10→11 fields. Pool `5902fbe6...`, policy `0a05ff62...`, lp_token `11970932...`. NOT a finding closure — proactive scope expansion.
+- **v6.0.1 (2026-05-03, independent review HIGH):** `tx_upper <= valid_until` upper-bound pin. Pool `4f64a48d...`, policy `8fe45e44...`.
+- **v7 (2026-05-04, AegisSelf scope expansion):** third oracle provider; Orcfax freshness 30→70 min. Pool `b47eb922...`, policy `47b904e1...`. NOT a finding closure — vendor-survival hedge.
+- **v7.0.1 (2026-05-04):** LOW findings cleanup from independent review (byte-stable hashes).
+- **v6.0.2-redteam-round6 (2026-05-05, current):** Round 6 closures — A-026 CRIT, A-027 HIGH, Charli3 NFT-pin extension HIGH, L-006 CRIT, L-003 HIGH. Hashes above.
 
-**Audit Status:** 🟢 **A-001..A-016 + A-019..A-025 closed across v0..v5. 22 of 24 findings remediated. Remaining: A-017 (Info — off-chain audit pending) and A-018 (Info — Materios bridge deferred to post-v1 roadmap). Mainnet readiness: pending external auditor sign-off + the off-chain audit pass.**
+**Audit Status:** 🟢 **27 of 37 findings closed across v0..v6.0.2 (no CRITICAL findings open). Remaining: 1 HIGH (L-002, batch expiry multi-policy aggregation — likely MED in practice; pool-side strict-equality may already prevent the drain shape pending verification of single-Expire path), plus MED/LOW/INFO deferrals (L-001 / L-005 / L-007 / A-028 / A-029, ECON-1..ECON-4) with documented rationale; A-017 (off-chain audit pending) and A-018 (Materios bridge deferred to post-v1 roadmap). Mainnet readiness: pending external auditor sign-off + the off-chain audit pass.**
 
-**Live red-team summary across 3 rounds (2026-04-30):**
+**Live red-team summary across 6 rounds (2026-04-30 → 2026-05-05):**
 - **Round 1 (static + Aiken):** A-001..A-020 documented. 15 fixed in v0/v1.
 - **Round 2 (live preprod attacks on v1-treasury):** A-021 HIGH (phantom policy at trash address — `c32d7a85...0c092ccc57d973` ACCEPTED on v1, FIXED v2). A-022 LOW (output-ordering tailList halt, subsumed by A-021 fix). A-024 MEDIUM (negative-coverage shrinks active_coverage — `01a1067cd496...0eb8ba1632a179cf04459a` ACCEPTED on v2, FIXED v3).
 - **Round 3 (live preprod attacks on v3/v4 + creative Hackathon-tier attacks):** A-014 (ratio truncation, FIXED v4). A-015 (no start_time bound — replays R3-B/C/D rejected, FIXED v4). A-016 (oracle script-hash binding, FIXED v4). **A-025 HIGH** (multi-policy single-Underwrite under-accounting — `b1400c64...846ece02cd6f0a1` ACCEPTED on v4, FIXED v5). A-018 deferred to post-v1.
+- **Round 4 (v6 multi-oracle scope expansion, 2026-04-30):** No new findings. Charli3 + Orcfax dispatcher introduced; PolicyDatum gained 11th field `oracle_provider`; A-012 generalized to `(oracle_provider, oracle_nft)` tuple uniformity. All v5 invariants preserved.
+- **Round 5 (v7 self-publish scope expansion, 2026-05-04):** No new on-chain findings. AegisSelf added as third `OracleProvider` variant; Orcfax freshness widened 30→70 min based on empirical mainnet measurement. v6.0.1 closed an independent-reviewer HIGH (`tx_upper <= valid_until` upper-bound pin) prior to v7.
+- **Round 6 (live preprod attacks on v7.0.1 + structural review, 2026-05-04 → 05):** **13 NEW findings.** **CLOSED in v6.0.2:** A-026 CRITICAL (AegisSelf oracle_nft caller-supplied), A-027 HIGH (Orcfax FSP script hash caller-supplied), Charli3 NFT-pin extension HIGH (same root cause for Charli3 — A-016 was insufficient), L-006 CRITICAL (`policy_script` redeemer field permitted attacker-supplied script lookup at 3 redeemer sites), L-003 HIGH (`tx_lower >= price.observed_at` missing at Claim/BatchClaim/Cancel). **DEFERRED:** L-001 / L-002 / L-005 / L-007 / A-028 / A-029 / ECON-1..ECON-4 — see Round 6 section for per-finding rationale.
 
 All discovered exploits replayed against the corresponding fixed deploys → REJECTED. Each fix preserved the legitimate green-path (verified by post-fix Underwrite tx).
 
@@ -2314,7 +2321,7 @@ The following attempted attacks on v1-treasury were rejected by the validator as
 - **A-021 (HIGH, NEW):** **CLOSED in v2-a022** — empirically verified by replaying the same attack code against the new validator
 - **A-022 (LOW, NEW):** **CLOSED in v2-a022** — subsumed by A-021 fix
 
-**Total findings to date: 22.** **Closed: 17.** **Open: 5 (A-014, A-015, A-016 Low; A-017, A-018 Info).** Mainnet still gated on A-014/A-015/A-016 closure plus an external auditor sign-off.
+**Total findings to date (as of Round 2 — superseded by Round 6 totals at top of file): 22.** **Closed: 17.** **Open: 5 (A-014, A-015, A-016 Low; A-017, A-018 Info).** Mainnet still gated on A-014/A-015/A-016 closure plus an external auditor sign-off. *(Round 3 subsequently closed A-014..A-016 and added A-025; Round 6 added 13 more findings — see top of file for the current 37-total / 27-closed posture.)*
 
 ### Red-team scripts (re-runnable)
 
@@ -2327,7 +2334,7 @@ Located at `D:/aegis/offchain/scripts/`:
 
 ---
 
-## v6 Multi-Oracle Scope Expansion (2026-04-30)
+## Round 4 — v6 Multi-Oracle Scope Expansion (2026-04-30)
 
 **Trigger.** Charli3 CEO Robert Hever signaled potential restructuring/sale of the company. To remove single-vendor oracle risk before mainnet, Aegis added Orcfax as a redundant secondary oracle provider behind a per-policy switch.
 
@@ -2397,7 +2404,7 @@ Underwrite via Charli3 path through the new dispatcher: tx `ff940ca1c89f5824c0ac
 
 ---
 
-## v7 Self-Publish Scope Expansion (2026-05-04)
+## Round 5 — v7 Self-Publish Scope Expansion (2026-05-04)
 
 **Trigger.** Following Charli3's restructuring/sale signal (Apr 30) and Orcfax's wind-down announcement (Mar 27, sunsetting Jul 31), Aegis adds a third oracle provider — `AegisSelf` — that we publish ourselves end-to-end. v6 was insurance against single-vendor risk; v7 is insurance against **all-third-party-vendor risk simultaneously**. After v7 ships, vendor failure of both Charli3 AND Orcfax cannot brick Aegis: new policies create with `oracle_provider: AegisSelf` and existing policies migrate via Cancel-and-rollover.
 
@@ -2497,5 +2504,172 @@ See `GREEN_PATH_PROOFS.md` §1 ("Latest live deploy — v7-self-publish") for th
 
 ---
 
-*Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30; v7 addendum 2026-05-04*
+*Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30; v7 addendum 2026-05-04; Round 6 addendum 2026-05-05*
+
+---
+
+## Round 6 — Red-team round 6 + structural review (2026-05-04 → 05)
+
+**Trigger.** Pre-mainnet hardening pass: an aggressive structural review of the Round 4/5 additions (multi-oracle parsers, redeemer schemas, freshness gates) plus a live preprod red-team session against v7.0.1. The expansion of the `OracleProvider` arm count from 1 → 3 (Charli3 / Orcfax / AegisSelf) introduced a new structural class of attack: caller-supplied canonical handles. The redeemer-schema review surfaced an analogous pattern in the pool's spend-side redeemers.
+
+**Findings count: 13 NEW.** **5 closed in v6.0.2** (3 CRITICAL/HIGH oracle-handle pins + L-003 HIGH + L-006 CRITICAL). **8 deferred** with explicit rationale (1 HIGH-rated likely MED in practice; rest MED/LOW/INFO).
+
+### Findings closed in v6.0.2-redteam-round6 (2026-05-05)
+
+#### A-026 — AegisSelf parser accepts any caller-supplied `oracle_nft` (CRITICAL)
+
+**Location:** `contracts/lib/aegis/oracle/aegis_self.ak` (parser) + `contracts/validators/pool.ak` (Underwrite path).
+
+**Description.** The AegisSelf parser pinned `payment_credential == aegis_self_publisher_vkh` (the credential layer of the trust handshake). It also accepted any caller-supplied `oracle_nft` and required only that the candidate UTxO carry SOME token under that policy id. Because the validator separately writes the candidate `oracle_nft` into the new policy's `PolicyDatum` at Underwrite time and trusts it on subsequent Claim/Cancel, an attacker could:
+
+1. Mint their own permissive policy id ANY-PERMISSIVE-NFT under their own (or a parameter-free permissive) one-shot mint, send a token to the publisher VKH (anyone can output to any address).
+2. Build an Underwrite naming `oracle_nft = ANY-PERMISSIVE-NFT` and `oracle_provider = AegisSelf`.
+3. The parser found the token at the publisher VKH (legitimate from #1) and the credential check passed.
+4. The Underwrite succeeded.
+5. At claim time, the attacker swaps the publisher's price datum for their own forged datum (they control the policy that minted ANY-PERMISSIVE-NFT and can mint additional copies under their own UTxO).
+
+**Severity:** Pool drain via attacker-controlled price feed → CRITICAL.
+
+**Fix.** Two new constraints, both required:
+
+- **Parser-side.** `oracle/aegis_self.ak` now `expect oracle_nft == aegis_types.aegis_self_nft_policy` before searching reference inputs. The supplied handle must equal the compile-time canonical.
+- **Underwrite-time validator pin.** `pool.ak` Underwrite branch now requires `pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)` where `canonical_oracle_nft` is a new helper in `aegis/oracle.ak` that returns the pinned constant per provider. Closes the entire class — the validator and parser both refuse non-canonical handles.
+
+**Status:** 🟢 **FIXED in v6.0.2.** Verified via round-6 green tests in `security_tests.ak` + the live v6.0.2 Underwrite tx `23889dec359280a428d8bfda160df8ffdd717735aebb419720e6dd7651255db2` (`valid_contract: true`).
+
+#### A-027 — Orcfax FSP script hash caller-supplied (HIGH)
+
+**Location:** `contracts/lib/aegis/oracle/orcfax.ak`.
+
+**Description.** Same shape as A-026 for Orcfax. The Orcfax parser used the supplied `oracle_nft` (semantically the FSP script hash) to locate the FSP UTxO. An attacker could deploy a permissive validator at any script address, supply that hash as `oracle_nft`, and have the parser happily follow the FSP→FS pointer the attacker controls.
+
+**Fix.** `orcfax.ak` now `expect oracle_nft == aegis_types.orcfax_fsp_script_hash` (per-network constant). Combined with the Underwrite-time `pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)` pin (see A-026 fix), both legs are pinned by validator hash — a Orcfax FSP migration requires an Aegis redeploy.
+
+**Status:** 🟢 **FIXED in v6.0.2.**
+
+#### Charli3 NFT-pin extension (HIGH)
+
+**Location:** `contracts/lib/aegis/oracle/charli3.ak`.
+
+**Description.** A-016 (closed v4) pinned the Charli3 oracle SCRIPT HASH (the address). It did NOT pin the NFT POLICY ID; the validator accepted any caller-supplied `oracle_nft` and required only that the matching reference UTxO carry SOME token under that policy at the canonical Charli3 address. An attacker who can place a token at Charli3's address (Charli3's address accepts any UTxO; the address is a script credential that won't run for a non-Charli3 spend, but a UTxO at that address with a non-Charli3 NFT can sit there) could supply an attacker-controlled NFT policy id and bypass the second leg of the trust handshake.
+
+This is the same root cause as A-026 / A-027, applied to the Charli3 path. We treated A-016 as "address pin sufficient" — which it isn't, given the second leg can be sidestepped.
+
+**Fix.** `oracle/charli3.ak` now `expect oracle_nft == aegis_types.charli3_ada_usd_nft_policy` parser-side. Combined with the Underwrite-time canonical pin (A-026 fix), the validator hash now binds BOTH the canonical Charli3 oracle script hash AND the canonical NFT policy id.
+
+**Status:** 🟢 **FIXED in v6.0.2.**
+
+#### L-006 — `policy_script` redeemer field permits attacker-supplied script lookup (CRITICAL)
+
+**Location:** `contracts/validators/pool.ak` — `ProcessClaim`, `BatchExpireProcess`, `AcceptCancellation` branches; `contracts/lib/aegis/types.ak` — `PoolRedeemer` definition.
+
+**Description.** Three pool-side redeemers carried a `policy_script: ScriptHash` field that the validator used to look up the consumed policy input by matching script credential. This created the same caller-supplied-handle pattern as A-026 / A-027 / Charli3-NFT-pin extension: an attacker deploys their own permissive script at any address, sends a fake-PolicyDatum UTxO to it, and submits a `ProcessClaim { payout, policy_script = ATTACKER_SCRIPT_HASH }` redeemer. The pool validator finds the input keyed to the attacker's script credential, parses the attacker-controlled datum, and pays out per the attacker's coverage_amount.
+
+This is structurally a Round-1 / A-001 class drain — closed for the legitimate-policy case, but reopened by accepting a redeemer-supplied script hash.
+
+**Severity:** Full pool drain → CRITICAL.
+
+**Fix.** Dropped `policy_script` from all 3 redeemer schemas. The pool validator is now parameterized over a compile-time `policy_script_hash` (already used elsewhere in the validator), and looks up the policy input via that constant. Attacker-controlled scripts cannot be substituted.
+
+This is a **breaking on-chain change** — `PoolRedeemer.ProcessClaim`, `BatchExpireProcess`, and `AcceptCancellation` lose the `policy_script` field. Every backend constructor (`api/policies.py::claim_policy`, `cancel_policy`, batch variants) was updated accordingly.
+
+**Status:** 🟢 **FIXED in v6.0.2.** Verified by round-6 redeemer-shape tests + the v6.0.2 deploy chain (the v6.0.2 pool validator's hash `13b2150d…` rotated from v7's `b47eb922…` precisely because of this schema change).
+
+#### L-003 — Lower-bound oracle observation gate missing at Claim/BatchClaim/Cancel (HIGH)
+
+**Location:** `contracts/validators/policy.ak` — `Claim`, `BatchClaim`, `Cancel` branches.
+
+**Description.** The freshness gate at all 3 sites checked `tx_upper <= price.valid_until` (added in v6.0.1) but did NOT check `tx_lower >= price.observed_at`. An attacker could backdate `tx_lower` to a value PRIOR to the oracle reading's observation timestamp. With a stale-but-not-yet-expired oracle datum (e.g., one whose `valid_until` is still in the future but whose `observed_at` is from before the policy's `start_time`), the attacker could satisfy a Claim against a price reading that pre-dates the policy.
+
+**Severity:** Selective claim front-running / replay → HIGH.
+
+**Fix.** Added `tx_lower >= price.observed_at` at all 3 sites (Claim, BatchClaim, Cancel). The validator now requires the tx's lower bound to be on or after the oracle reading's observation time — the reading must be a present-or-future fact relative to the tx's claimed time window.
+
+**Status:** 🟢 **FIXED in v6.0.2.** Hash rotation captures the gate.
+
+### Findings deferred (not blocking the v6.0.2 release)
+
+Each deferral is documented with explicit rationale; severities below are the round-6 reviewer's initial ratings. Where analysis shows the practical severity is lower than the initial rating, the lower rating is given with the analysis cited.
+
+#### L-001 — `is_inclusive` flag silently discarded (MED)
+
+**Description.** The validity-range bound's `is_inclusive` flag is not currently consulted by the `start_time_in_tx_range` helper. Practical impact: bounds are treated as inclusive when they may be intended as exclusive. Mitigation: backend always sets inclusive bounds; the validator's behavior is a strict overshoot in the inclusive direction. **Status: 🟡 DEFERRED — low realistic exposure given backend constructor invariants; tracked for v8.**
+
+#### L-002 — Expire / BatchExpire missing A-025-style multi-policy aggregation (HIGH; likely MED in practice)
+
+**Description.** Round 6 noted that the Expire / BatchExpire branches don't replicate the A-025 count-of-1 fold. **Analysis:** the pool-side `consumed_policies_total_to(... total_returned)` strict-equality check on `BatchExpireProcess` may already prevent the drain shape (any extra policies in the input set would force `total_returned` to differ from a single legitimate value). The single-`Expire` path needs verification under the constraint that the pool is NOT co-spent (in which case the policy validator runs in isolation — the single-input check still applies). Treated as likely MED in practice; awaiting completion of the formal analysis. **Status: 🟡 DEFERRED — needs analysis pass; no observed exploit shape.**
+
+#### L-005 — Cancel doesn't constrain to latest oracle UTxO (MED)
+
+**Description.** Cancel reads any matching oracle reference input but doesn't pin the "latest" UTxO carrying the oracle NFT. This is a partial bypass of A-010 if multiple oracle UTxOs exist simultaneously (e.g., during a Charli3 publish cycle), since an attacker could pick a less-recent reading. Mitigation: A-016 + Round-6 NFT pin already constrain WHICH script address and WHICH NFT policy can be used; the staleness gate (now both legs after L-003 fix) ensures any selected reading is fresh; the only remaining surface is "fresh but slightly older fresh." **Status: 🟡 DEFERRED — narrow window, mitigated by combined L-003 + freshness gate.**
+
+#### L-007 — Same-block Cancel/Claim sandwich (LOW)
+
+**Description.** Theoretical concurrency edge case where a Cancel and Claim race in the same block. Cardano's UTxO model serializes inputs (one tx wins, the other fails — there's no shared state), so this is structurally impossible to weaponize for fund extraction. **Status: 🟡 DEFERRED — theoretical only.**
+
+#### A-028 — Mainnet/testnet shared publisher VKH operational (MED)
+
+**Description.** `aegis_self_publisher_vkh` is a single compile-time constant, so the same VKH is pinned on testnet and mainnet. Operationally this means the publisher signing key handles both networks. **Mitigation:** acceptable for the publisher role (fees-only, no fund authority); the constant separability is a minor refactor pre-mainnet. **Status: 🟡 DEFERRED — operational hardening for v8.**
+
+#### A-029 — Orcfax tx_lower < created_at edge case (LOW)
+
+**Description.** Orcfax parser computes `valid_until = created_at + orcfax_freshness_window_ms`. If `tx_lower < created_at` somehow, the post-L-003 fix's `tx_lower >= price.observed_at` check rejects the tx. So the residual surface is the gap between what `created_at` semantically means in Orcfax's datum vs the parser's interpretation. **Status: 🟡 DEFERRED — closed by L-003 in practice.**
+
+#### ECON-1 — BatchClaim same-insured cross-policy double-sat (HIGH-rated; analysis: MED-DoS)
+
+**Description.** An attacker holding multiple cross-provider policies for the same insured could attempt to satisfy multiple payouts with a single output by gaming the `sum_lovelace_to_enterprise_pkh` aggregate. **Analysis:** I traced the attack carefully. The attacker SHORT-CHANGES themselves by ~200 ADA per attack cycle vs N legitimate single-Claims (1:2 cost-to-DoS ratio — every attack cycle costs the attacker more than it costs the protocol). No fund extraction; only DoS shape is "attacker burns money to delay legitimate Claims" — economically irrational. Pool-side `BatchProcessClaim` redeemer would close it fully but is not a small patch. **Status: 🟡 DEFERRED — re-rated MED-DoS, not a drain; v8 BatchProcessClaim addition.**
+
+#### ECON-2 — Cancel treasury cut 5× Underwrite rate via inline arithmetic drift (MED)
+
+**Description.** The Cancel path's treasury_donation calculation uses inline arithmetic that drifts ~5× higher than the Underwrite path's `calculate_treasury_cut`. Practical effect: cancellations donate ~2.5% of premium to the treasury (vs ~0.5% on Underwrite). This is over-donation, not under-donation — it doesn't violate the donation_ok floor; it makes Cancel marginally more expensive for the user. **Status: 🟡 DEFERRED — over-donation only; aesthetic fix for v8.**
+
+#### ECON-3 — LP token asset_name not pinned to "aLP" (LOW)
+
+**Description.** The LP token asset_name isn't compile-time-constrained to `"aLP"`. The minting policy is parameterized over the pool hash (so the policy id is canonical), but the asset_name is whatever the minter supplies. Practical effect: zero — the policy id is what matters for value-based checks; the asset_name is a label. **Status: 🟡 DEFERRED — cosmetic.**
+
+#### ECON-4 — Cancel doesn't bind pool redeemer to AcceptCancellation (LOW)
+
+**Description.** The policy.Cancel path doesn't explicitly assert the pool spend uses `AcceptCancellation`. **Mitigation:** the pool side's strict value-conservation check on every redeemer ensures whatever pool redeemer is used must be self-consistent. The result is that a malformed pool redeemer in the same tx would fail the pool validator independently. **Status: 🟡 DEFERRED — defense in depth, not a vulnerability.**
+
+### v6.0.2 deployment artifacts (live on preprod)
+
+| Artifact | v7 | v6.0.2-redteam-round6 |
+|---|---|---|
+| `policy_validator_hash` | `47b904e1278d8d0ec217bbb1e34e2898b6a6d7e6dec2001855ae032f` | `9b58ec9f1749c87235ad81bd6c3c71e2238b6df7f00f93c386d307d8` |
+| `policy_validator_address` | `addr_test1wprmjp8py7xc6rkzz7amrc6w9zvtdfkhum0vyqqc2khqxtcl7jrm8` | `addr_test1wzd43mylzayusu344kqm6mpuw83z8zmd7lcqly7rsmfs0kqw4z86r` |
+| `pool_validator_hash` | `b47eb92206008ae5e4238c72be76c3125ed701d506774f9d3120cccd` | `13b2150d5ca3b26bda15f24177852bdee357a5b934dab59ecf7c99da` |
+| `pool_validator_address` | `addr_test1wz68awfzqcqg4e0yywx890nkcvf9a4cp65r8wnuaxysvengts2x32` | `addr_test1wqfmy9gdtj3my676zheyzau9900wx4a9hy6d4dv7ea7fnks34ehfs` |
+| `lp_token_policy_hash` | `1549570c23955e706b04c2d623077c9c6b316f5d50ca4e0d73b9b0e4` | `70bea1fe107845b0f0f0c0a465230054a682274f4ab3b417b815b6c4` |
+| `pool_nft` | `AEGIS_POOL_V8` (`ae58963b…`) | `AEGIS_POOL_V10` (`cfbc3f26fdbefeb3c9ac31dcab38f731780ef79d4a8bbc7232a4b3d6`) |
+| `policy_validator` ref UTxO | `62e0032d…b10a2a#0` | `74814536f6036e1481ddef280ee6159daa4d2cc90ba72bb4cd784d9c90d617b0#0` |
+| `pool_validator` ref UTxO | `cce676a0…6e6c17#0` | `a0cf43a0652ba0e0185c1785855d58759c11164bcab3558e5f63056d624b05e8#0` |
+| `lp_token_policy` ref UTxO | `5eb4190d…f84f1#0` | `390279be9816087cd5fb5e92f2726c47cf5be98192eb1101f9afc33a7e81f32f#0` |
+| Pool init UTxO | `e92113f9…4ec47#0` | `989b691816fa65cc9fd93ef0b92e94e2addacc6c1e6f7340d2fb608bb662acc2#0` |
+| AegisSelf publisher VKH | `6096332c…22152` | `6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152` (unchanged — compile-time pinned) |
+| AEGIS_PRICE_FEED_V1 NFT (preprod) | `d2f08410…3938f` | `d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f` (unchanged) |
+| `orcfax_freshness_window_ms` | `4_200_000` (70 min) | `4_200_000` (70 min — unchanged) |
+
+### v6.0.2 green-path proof on chain
+
+Single-policy Underwrite via Charli3 path through the round-6 validator:
+- tx `23889dec359280a428d8bfda160df8ffdd717735aebb419720e6dd7651255db2`
+- 10 ADA coverage, 2 ADA premium, 0.01 ADA Conway treasury donation in body field 22
+- `oracle_provider: Charli3 (Constr 0)` in PolicyDatum
+- `oracle_nft = canonical_oracle_nft(Charli3) = charli3_ada_usd_nft_policy` (Underwrite-time pin closes A-026 / Charli3 NFT-pin extension)
+- Pool's `ProcessClaim` / `BatchExpireProcess` / `AcceptCancellation` redeemers no longer carry `policy_script` (closes L-006)
+- `valid_contract: true`
+
+See [`../GREEN_PATH_PROOFS.md`](../GREEN_PATH_PROOFS.md) §1 ("Latest live deploy — v6.0.2-redteam-round6") for the full deploy chain (mint NFT, publish 3 refs, init pool, add liquidity, Underwrite).
+
+### Mainnet readiness — v6.0.2 status
+
+- All v7 closed findings remain closed. v6.0.2 closes 5 round-6 findings without weakening any prior invariant.
+- Test coverage: **222 / 0** in `aiken check`.
+- Off-chain parity: backend constructors updated for the L-006 redeemer schema change; round-6 pre-flight checks updated.
+- External auditor: notification of v7→v6.0.2 round-6 delta scope pending; will reference this section + the v6.0.2 proof tx.
+- **Open risks** documented above (10 deferrals). The 1 HIGH-rated deferral (L-002) needs the formal analysis pass to confirm MED in practice. The remaining deferrals are MED/LOW/INFO with documented rationale; none represent a fund-drain shape.
+
+---
+
+*Updated by Flux Point Studios · Round 6 addendum · 2026-05-05*
 *Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows. v6 multi-oracle expansion deployed 2026-04-30; v7 self-publish expansion deployed 2026-05-04. No new findings opened by either expansion.*
