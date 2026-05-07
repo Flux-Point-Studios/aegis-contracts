@@ -1,0 +1,60 @@
+name: deploy-gates
+
+# v3.1 deploy-gate guards (Δ39 / VR-009 + Δ40 / VR-012).
+#
+# Runs the static-constant checks defined in
+# `scripts/check_deploy_constants.py` against `contracts/lib/aegis/types.ak`.
+# This workflow is the CI gate that blocks tagging or merging to `main`
+# when:
+#
+#   * `auth_witness_nft_policy_id` is still the all-zero placeholder, or
+#   * the CIP-19 enterprise-address header constants have drifted from
+#     their pinned values (`#"60"` testnet, `#"61"` mainnet).
+#
+# We run the script on every push and every PR so a placeholder-still-
+# in-place commit never reaches `main` silently. We additionally run on
+# tag-push events with a leading `v` (e.g. `v8.0.0-relay-presigned-auth`)
+# so a pre-tag operator who pushes the tag without first updating the
+# constants gets a fail-fast signal before any artefact is produced.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-deploy-constants:
+    name: Aiken deploy-gate constants
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run script self-test
+        # Exercise the in-memory positive/negative suite first so that a
+        # silently-broken guard cannot give a false PASS on the actual
+        # types.ak. The self-test exits 0 only when every case behaves
+        # as expected.
+        run: |
+          python scripts/check_deploy_constants.py --self-test
+
+      - name: Check deploy constants in lib/aegis/types.ak
+        # Default invocation against the in-tree types.ak. Exits 1 if:
+        #   - auth_witness_nft_policy_id is the 28-byte all-zero placeholder
+        #   - enterprise_addr_header_mainnet != #"61"
+        #   - enterprise_addr_header_testnet != #"60"
+        #   - enterprise_addr_header (active build) is neither #"60" nor #"61"
+        # See script docstring for the per-check rationale.
+        run: |
+          python scripts/check_deploy_constants.py

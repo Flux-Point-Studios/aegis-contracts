@@ -99,7 +99,11 @@ fn find_fsp_input(
     reference_inputs,
     fn(i) {
       let qty =
-        assets.quantity_of(i.output.value, fsp_hash, aegis_types.orcfax_fsp_asset_name)
+        assets.quantity_of(
+          i.output.value,
+          fsp_hash,
+          aegis_types.orcfax_fsp_asset_name,
+        )
       let at_canonical_fsp =
         when i.output.address.payment_credential is {
           Script(h) -> h == fsp_hash
@@ -127,7 +131,11 @@ fn find_fs_input(
     reference_inputs,
     fn(i) {
       let qty =
-        assets.quantity_of(i.output.value, fs_hash, aegis_types.orcfax_fs_asset_name)
+        assets.quantity_of(
+          i.output.value,
+          fs_hash,
+          aegis_types.orcfax_fs_asset_name,
+        )
       let at_canonical_fs =
         when i.output.address.payment_credential is {
           Script(h) -> h == fs_hash
@@ -221,7 +229,8 @@ pub fn resolve_with_feed(
     fs_dat.statement.body.num * 1_000_000 / fs_dat.statement.body.denom
 
   // 6. Compute consumer-side freshness window (Orcfax has no on-chain expiry).
-  let valid_until = fs_dat.statement.created_at + aegis_types.orcfax_freshness_window_ms
+  let valid_until =
+    fs_dat.statement.created_at + aegis_types.orcfax_freshness_window_ms
 
   Price { value: scaled, observed_at: fs_dat.statement.created_at, valid_until }
 }
@@ -232,7 +241,11 @@ pub fn resolve_with_feed(
 /// would invoke `resolve_with_feed` directly with the appropriate prefix
 /// and a corresponding `oracle_nft` (FSP hash) per policy datum.
 pub fn resolve(reference_inputs: List<Input>, fsp_hash: ByteArray) -> Price {
-  resolve_with_feed(reference_inputs, fsp_hash, aegis_types.orcfax_ada_usd_feed_id)
+  resolve_with_feed(
+    reference_inputs,
+    fsp_hash,
+    aegis_types.orcfax_ada_usd_feed_id,
+  )
 }
 
 // ---------------------------------------------------------------------------

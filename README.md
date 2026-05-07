@@ -113,6 +113,31 @@ This is **v5** — the post-A-025 build. See [`deploy/deploy-state.preprod.json`
 
 ---
 
+## Deploy gates (v8 / v3.1)
+
+Two static-constant checks are enforced as a CI pre-tag gate (Δ39 / VR-009 + Δ40 / VR-012). They live in
+[`scripts/check_deploy_constants.py`](scripts/check_deploy_constants.py) and run automatically on every push, PR, and `v*` tag via
+[`.github/workflows/deploy-gates.yml`](.github/workflows/deploy-gates.yml).
+
+```bash
+# Self-test (in-memory positive/negative cases — sanity check the guard itself):
+python scripts/check_deploy_constants.py --self-test
+
+# Run against the in-tree contracts/lib/aegis/types.ak:
+python scripts/check_deploy_constants.py
+```
+
+The script exits 0 only when:
+
+- `auth_witness_nft_policy_id` is NOT the 28-byte all-zero placeholder. Phase-4 mint deploy must replace this constant with the actual minted policy id before tagging mainnet, otherwise `ClaimWithAuth` and `RotateAuth` silently match no witness UTxOs.
+- `enterprise_addr_header_mainnet == #"61"` (CIP-19 type-6 mainnet header).
+- `enterprise_addr_header_testnet == #"60"` (CIP-19 type-6 testnet header).
+- `enterprise_addr_header` (the active-build constant) equals one of the two pinned values above. Network coupling (mainnet build pins `#"61"`) is the deploy runbook's responsibility — the script catches drift / typos.
+
+A drift in any of these would not be caught by `aiken check` (the compile passes; the bug only surfaces on chain at the first relay-presigned-auth tx). The CI gate fails fast at the build step instead.
+
+---
+
 ## License
 
 Apache-2.0. See [`LICENSE`](LICENSE).

@@ -9,7 +9,7 @@ use aegis/pricing.{
 use aegis/types.{
   AcceptCancellation, AddLiquidity, BatchExpireProcess, BatchUnderwrite,
   PolicyDatum, PoolDatum, PoolRedeemer, ProcessClaim, RemoveLiquidity,
-  Underwrite, treasury_share_bps,
+  Underwrite, derive_policy_id, derive_policy_id_batch, treasury_share_bps,
 }
 use aegis/validation.{
   count_script_inputs, get_lower_bound, get_upper_bound, output_has_nft,
@@ -89,13 +89,23 @@ fn batch_policies_match_totals(
   validity_range: ValidityRange,
   total_coverage: Int,
   total_premium: Int,
+  underwrite_anchor: OutputReference,
 ) -> Bool {
-  let triple =
+  // [Δ21 / V-003] Per-output anchor: each policy output in the batch must
+  // have its `policy_id` derived via `derive_policy_id_batch(...,
+  // underwrite_anchor, batch_index)` where `batch_index` is the 0-based
+  // index of the policy output within the batch. The fold tracks the
+  // running batch_index and increments it ONLY for outputs that match the
+  // policy_validator address (so non-policy outputs — e.g., the pool
+  // continuation — do not consume an anchor index). Off-chain builders
+  // mirror the same construction so each batch entry has a unique,
+  // collision-resistant policy_id.
+  let quad =
     list.foldl(
       outputs,
-      (0, 0, True),
+      (0, 0, True, 0),
       fn(out, acc) {
-        let (cov_acc, prem_acc, ok_acc) = acc
+        let (cov_acc, prem_acc, ok_acc, batch_idx) = acc
         when out.address.payment_credential is {
           // [FIX A-021] Script credential MUST match the parameterized
           // policy_validator hash. The previous wildcard `Script(_)` allowed
@@ -122,17 +132,40 @@ fn batch_policies_match_totals(
                   // a `PolicyDatum`. Defense-in-depth alongside the
                   // per-parser `expect oracle_nft == canonical` checks.
                   let oracle_pinned =
-                    pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)
-                  if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned {
+                    pdat.oracle_nft == canonical_oracle_nft(
+                      pdat.oracle_provider,
+                    )
+                  // [Δ21 / V-003 / H-3] Per-output policy_id binding: the
+                  // datum's policy_id must equal the canonical batch
+                  // derivation, anchored on the consumed pool UTxO's
+                  // OutputReference plus the per-output batch_index.
+                  let policy_id_ok =
+                    pdat.policy_id == derive_policy_id_batch(
+                      pdat.insured,
+                      pdat.strike_price,
+                      pdat.coverage_amount,
+                      pdat.start_time,
+                      pdat.expiry_time,
+                      pdat.pool_nft,
+                      underwrite_anchor,
+                      batch_idx,
+                    )
+                  if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned && policy_id_ok {
                     let funded =
                       assets.lovelace_of(out.value) >= pdat.coverage_amount
                     (
                       cov_acc + pdat.coverage_amount,
                       prem_acc + pdat.premium_paid,
                       ok_acc && funded,
+                      batch_idx + 1,
                     )
                   } else {
-                    acc
+                    // Output is at the policy address but does not bind
+                    // to this pool / fails another check — strictly
+                    // reject by setting ok_acc to False so the totals
+                    // cannot match. The batch_idx still advances so a
+                    // subsequent legitimate output gets a fresh anchor.
+                    (cov_acc, prem_acc, False, batch_idx + 1)
                   }
                 }
                 _ -> acc
@@ -144,7 +177,7 @@ fn batch_policies_match_totals(
         }
       },
     )
-  let (cov_sum, prem_sum, funded_ok) = triple
+  let (cov_sum, prem_sum, funded_ok, _) = quad
   cov_sum == total_coverage && prem_sum == total_premium && funded_ok
 }
 
@@ -177,6 +210,7 @@ fn policy_output_matches_underwrite(
   validity_range: ValidityRange,
   coverage: Int,
   premium: Int,
+  underwrite_anchor: OutputReference,
 ) -> Bool {
   // [FIX A-025] Count matching policy outputs and require EXACTLY 1.
   // The previous `list.any` short-circuited at the first match — an
@@ -203,9 +237,28 @@ fn policy_output_matches_underwrite(
                   // network-canonical handle for the declared provider.
                   // See `policy_output_matches_underwrite` doc above.
                   let oracle_pinned =
-                    pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)
+                    pdat.oracle_nft == canonical_oracle_nft(
+                      pdat.oracle_provider,
+                    )
+                  // [v8 / Δ3 / H-3] policy_id must equal the canonical
+                  // derivation that includes the consumed pool UTxO's
+                  // OutputReference. Off-chain builders compute the same
+                  // value via `aegis/types.derive_policy_id`. Without this
+                  // binding, two policies with identical (insured, terms,
+                  // pool_nft) collide on policy_id — a precondition for
+                  // the witness-asset-name forgery attack class.
+                  let policy_id_ok =
+                    pdat.policy_id == derive_policy_id(
+                      pdat.insured,
+                      pdat.strike_price,
+                      pdat.coverage_amount,
+                      pdat.start_time,
+                      pdat.expiry_time,
+                      pdat.pool_nft,
+                      underwrite_anchor,
+                    )
                   let predicate =
-                    pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && oracle_pinned && assets.lovelace_of(
+                    pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && oracle_pinned && policy_id_ok && assets.lovelace_of(
                       out.value,
                     ) >= coverage && start_time_in_tx_range(
                       pdat.start_time,
@@ -360,6 +413,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             validity_range,
             coverage,
             premium,
+            own_ref,
           )
 
         // 9. [FIX A-021] The Conway-era treasury_donation must be at least the
@@ -633,6 +687,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             validity_range,
             total_coverage,
             total_premium,
+            own_ref,
           )
 
         // 9. [FIX A-021] Aggregate treasury cut = floor(total_premium *

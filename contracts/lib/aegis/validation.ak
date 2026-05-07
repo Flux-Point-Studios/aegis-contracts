@@ -10,7 +10,7 @@ use aegis/types.{ScriptHash, VerificationKeyHash}
 
 use aiken/collection/list
 use aiken/interval.{Finite}
-use cardano/address.{Address, Credential, Script, VerificationKey}
+use cardano/address.{Address, Script, VerificationKey}
 use cardano/assets
 use cardano/transaction.{Input, NoDatum, Output, OutputReference, ValidityRange}
 
@@ -99,7 +99,6 @@ pub fn find_output_to_address(
 /// (or, where stake-credential restrictions don't apply, `sum_lovelace_to_pkh`).
 /// If a future caller genuinely needs "find the first output to a PKH", they
 /// should write a purpose-specific helper rather than re-introducing this one.
-
 /// [FIX A-006 / A-013] Sum the lovelace across ALL outputs going to a given
 /// payment key hash. This is the safe primitive for verifying that an insured
 /// (or refund recipient) has been paid AT LEAST a required amount: callers
@@ -178,10 +177,7 @@ pub fn sum_lovelace_to_enterprise_pkh(
 /// Count the number of inputs from a specific script hash.
 /// Used to prevent double satisfaction attacks by ensuring only
 /// one input from a given script is consumed per transaction.
-pub fn count_script_inputs(
-  inputs: List<Input>,
-  script_hash: ScriptHash,
-) -> Int {
+pub fn count_script_inputs(inputs: List<Input>, script_hash: ScriptHash) -> Int {
   list.foldl(
     inputs,
     0,
@@ -282,8 +278,7 @@ test count_script_inputs_empty_list() {
 
 test count_script_inputs_single_match() {
   // Verifies counting a single script input correctly
-  let script_hash =
-    #"aabb00112233445566778899aabb00112233445566778899aabb0011"
+  let script_hash = #"aabb00112233445566778899aabb00112233445566778899aabb0011"
   let fake_input =
     Input {
       output_reference: OutputReference {
@@ -306,8 +301,7 @@ test count_script_inputs_single_match() {
 test count_script_inputs_multiple_same_script() {
   // Two inputs from the same script should be counted as 2
   // This is the scenario the double-satisfaction fix prevents
-  let script_hash =
-    #"aabb00112233445566778899aabb00112233445566778899aabb0011"
+  let script_hash = #"aabb00112233445566778899aabb00112233445566778899aabb0011"
   let make_input =
     fn(idx) {
       Input {
@@ -331,10 +325,8 @@ test count_script_inputs_multiple_same_script() {
 
 test count_script_inputs_different_scripts_not_counted() {
   // Inputs from different scripts should not be counted
-  let target_hash =
-    #"aabb00112233445566778899aabb00112233445566778899aabb0011"
-  let other_hash =
-    #"ccdd00112233445566778899ccdd00112233445566778899ccdd0011"
+  let target_hash = #"aabb00112233445566778899aabb00112233445566778899aabb0011"
+  let other_hash = #"ccdd00112233445566778899ccdd00112233445566778899ccdd0011"
   let other_input =
     Input {
       output_reference: OutputReference {
@@ -356,8 +348,7 @@ test count_script_inputs_different_scripts_not_counted() {
 
 test count_script_inputs_pubkey_inputs_not_counted() {
   // Inputs from pubkey addresses should not be counted
-  let target_hash =
-    #"aabb00112233445566778899aabb00112233445566778899aabb0011"
+  let target_hash = #"aabb00112233445566778899aabb00112233445566778899aabb0011"
   let pkh_input =
     Input {
       output_reference: OutputReference {

@@ -114,10 +114,7 @@ pub fn find_feed_datum(
 /// (key 2) — typically `created_at + 4_200_000ms` (70 min). Surface that
 /// directly as `Price.valid_until` so the validator's
 /// `tx_lower <= valid_until` check is identical for all three providers.
-pub fn resolve(
-  reference_inputs: List<Input>,
-  oracle_nft: ByteArray,
-) -> Price {
+pub fn resolve(reference_inputs: List<Input>, oracle_nft: ByteArray) -> Price {
   let datum = find_feed_datum(reference_inputs, oracle_nft)
   Price {
     value: get_oracle_price(datum),
@@ -143,6 +140,5 @@ test trust_handshake_requires_publisher_vkh() {
   // The publisher VKH must equal the constant; if the constant ever rotates
   // (e.g., separate mainnet mnemonic in v7+) the trust binding is the place
   // to update it.
-  aegis_types.aegis_self_publisher_vkh ==
-    #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
+  aegis_types.aegis_self_publisher_vkh == #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
 }

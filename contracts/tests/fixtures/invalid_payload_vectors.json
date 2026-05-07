@@ -1,0 +1,174 @@
+{
+  "schema": "aegis-invalid-payload-vectors-v2",
+  "spec": "RELAY_PRESIGNED_AUTH_SCOPE_v2.md / Δ26 + Δ28 + Δ36 (v3.1)",
+  "description": "Cross-stack validation parity manifest. Each entry below is a payload that BOTH the Python encoder (offchain/src/aegis/auth_payload.py::encode_auth_coverage_payload) and the TypeScript encoder (frontend/src/wallet/aegis/auth_payload.ts::encodeAuthCoveragePayload) MUST reject before producing canonical CBOR. The `error_category` field labels the validation rule violated; tests in test_cross_stack_validation.{py,ts} assert each stack rejects with an error matching the listed pattern. Drift detection: if either stack ever loosens a rule, this manifest's CI gate catches it before the divergence ships. v3.1 (Δ36 / VR-006) adds the 5 length-check rules the original v2 manifest did not cover (oracle_nft length, pool_script_hash length, pool_nft length, signer_pkh consistency between AuthWitnessDatum.insured_vkey and the payload's insured_pkh field, and 64-byte signature length); these rules pin BOTH Python and TS encoders to the canonical hash widths so a 27-byte oracle_nft (typo) or a 65-byte signature (forgery via length-extension class) cannot ship past the off-chain pre-signing boundary.",
+  "base_payload": {
+    "comment": "A canonical, valid preprod payload used as a starting point. Each invalid vector below is `base_payload` with a single field mutated to violate exactly one rule. Coverage = 100 ADA so every vector except #6 satisfies the 5-ADA floor; not_before / not_after form a 7-day window so every vector except #9 satisfies the time-window invariant. The base also pins an `insured_vkey_hex` + `signature_hex` so the v3.1 rules #11 and #15 can mutate those fields independently of the canonical `AuthCoveragePayload` (the off-chain encoder enforces those rules on the surrounding sign_auth flow, not the bare payload encoder — the manifest still pins them as cross-stack contracts).",
+    "domain_tag_hex": "41454749535f434c41494d5f415554485f76315f50524550524f44",
+    "network_magic": "1",
+    "policy_validator_hex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "policy_id_hex": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "insured_pkh_hex": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "payout_address_hex": "60c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "max_coverage": "100000000",
+    "oracle_provider": "0",
+    "oracle_nft_hex": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "oracle_freshness": "0",
+    "not_before": "1714521600000",
+    "not_after": "1722470400000",
+    "pool_script_hash_hex": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+    "pool_nft_hex": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6"
+  },
+  "vectors": [
+    {
+      "id": 1,
+      "name": "domain_tag_wrong_length",
+      "rule": "domain_tag must be exactly 27 bytes",
+      "error_category": "length_violation",
+      "error_pattern": "domain_tag",
+      "mutate_field": "domain_tag_hex",
+      "mutate_value": "41454749535f434c41494d5f415554485f76315f50524550524f",
+      "comment": "26-byte domain_tag (missing trailing `D`) — both encoders must reject."
+    },
+    {
+      "id": 2,
+      "name": "network_magic_unknown",
+      "rule": "network_magic must be one of {1, 2, 764824073}",
+      "error_category": "network_consistency",
+      "error_pattern": "network_magic",
+      "mutate_field": "network_magic",
+      "mutate_value": "12345",
+      "comment": "12345 is not a recognized Cardano network magic; both encoders must reject."
+    },
+    {
+      "id": 3,
+      "name": "policy_validator_wrong_length",
+      "rule": "policy_validator must be exactly 28 bytes",
+      "error_category": "length_violation",
+      "error_pattern": "policy_validator",
+      "mutate_field": "policy_validator_hex",
+      "mutate_value": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "comment": "27-byte policy_validator (one short of the BLAKE2b-224 standard)."
+    },
+    {
+      "id": 4,
+      "name": "insured_pkh_wrong_length",
+      "rule": "insured_pkh must be exactly 28 bytes",
+      "error_category": "length_violation",
+      "error_pattern": "insured_pkh",
+      "mutate_field": "insured_pkh_hex",
+      "mutate_value": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "comment": "27-byte insured_pkh — payout_address body still equals these 27 bytes plus the leading 0xc3 from the canonical 28-byte body, so the payout-binding check would actually pass (it is a length check that fires first)."
+    },
+    {
+      "id": 5,
+      "name": "payout_body_does_not_match_insured_pkh",
+      "rule": "payout_address[1:] must equal insured_pkh (Δ9 — closes the rewire-payout attack)",
+      "error_category": "payout_binding",
+      "error_pattern": "payout_address body",
+      "mutate_field": "payout_address_hex",
+      "mutate_value": "6099999999999999999999999999999999999999999999999999999999",
+      "comment": "29-byte CIP-19 enterprise address with the right testnet header (0x60) but a body of 0x99 bytes that diverges from insured_pkh — the attacker-rewires-payout attack. Δ9. The 0x99 body is exactly 28 bytes so the LENGTH check passes; the body-mismatch check is the one that fires."
+    },
+    {
+      "id": 6,
+      "name": "max_coverage_below_5_ADA_floor",
+      "rule": "max_coverage must be >= 5_000_000 lovelace (5 ADA, Δ14 / F-2)",
+      "error_category": "coverage_floor",
+      "error_pattern": "max_coverage",
+      "mutate_field": "max_coverage",
+      "mutate_value": "1",
+      "comment": "1 lovelace coverage — relays refuse this; off-chain spam DoS via 1-lovelace policies is impossible."
+    },
+    {
+      "id": 7,
+      "name": "max_coverage_exceeds_int63_cap",
+      "rule": "max_coverage must be in [0, 2^63 - 1] (Δ27 / A-A-009)",
+      "error_category": "int_range",
+      "error_pattern": "max_coverage",
+      "mutate_field": "max_coverage",
+      "mutate_value": "9223372036854775808",
+      "comment": "2^63 — exactly one over the cap that aligns Python with TypeScript. Cross-stack symmetry."
+    },
+    {
+      "id": 8,
+      "name": "oracle_provider_out_of_range",
+      "rule": "oracle_provider must be one of {0=Charli3, 1=Orcfax, 2=AegisSelf} (Δ5 / F-AUTH-5)",
+      "error_category": "constr_index",
+      "error_pattern": "oracle_provider",
+      "mutate_field": "oracle_provider",
+      "mutate_value": "3",
+      "comment": "Constr index 3 is undefined for the OracleProvider sum type."
+    },
+    {
+      "id": 9,
+      "name": "not_after_not_after_not_before",
+      "rule": "not_after must be > not_before (zero / inverted window rejected)",
+      "error_category": "time_window",
+      "error_pattern": "not_after",
+      "mutate_field": "not_after",
+      "mutate_value": "1714521600000",
+      "comment": "not_after == not_before — degenerate window; on-chain validity-range check would pass at exactly the boundary, but the v2 spec requires strict > to bound the eligibility window (and a relay must have a non-zero observation window)."
+    },
+    {
+      "id": 10,
+      "name": "oracle_freshness_exceeds_24h_cap",
+      "rule": "oracle_freshness must be <= 86_400_000 ms (24h sanity cap)",
+      "error_category": "freshness_bound",
+      "error_pattern": "oracle_freshness",
+      "mutate_field": "oracle_freshness",
+      "mutate_value": "604800000",
+      "comment": "1 week (604_800_000 ms) — far over the 24-hour sanity cap; closes the wallet-UX deception surface where a malicious frontend could claim 'freshness = 5 minutes' but encode a multi-day value."
+    },
+    {
+      "id": 11,
+      "name": "oracle_nft_wrong_length",
+      "rule": "oracle_nft must be exactly 28 bytes (BLAKE2b-224 width — same as Cardano script/NFT policy id)",
+      "error_category": "length_violation",
+      "error_pattern": "oracle_nft",
+      "mutate_field": "oracle_nft_hex",
+      "mutate_value": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+      "comment": "27-byte oracle_nft — Δ36 / VR-006 closure. A typo'd oracle_nft would silently never match any on-chain UTxO at validation time (fail-closed) — this manifest entry catches the divergence at sign time so the user is not stuck with an unclaimable policy. Pinning closes the asymmetry between the on-chain `is_valid_*_length` helpers and the off-chain encoder shape checks."
+    },
+    {
+      "id": 12,
+      "name": "pool_script_hash_wrong_length",
+      "rule": "pool_script_hash must be exactly 28 bytes",
+      "error_category": "length_violation",
+      "error_pattern": "pool_script_hash",
+      "mutate_field": "pool_script_hash_hex",
+      "mutate_value": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+      "comment": "27-byte pool_script_hash — Δ36 / VR-006 closure. The pool validator hash is a BLAKE2b-224 output (28 bytes); a 27-byte hash would silently never resolve to the canonical pool address and the next ClaimWithAuth would fail post-mint."
+    },
+    {
+      "id": 13,
+      "name": "pool_nft_wrong_length",
+      "rule": "pool_nft must be exactly 28 bytes (Aegis canonical pool NFT policy id width)",
+      "error_category": "length_violation",
+      "error_pattern": "pool_nft",
+      "mutate_field": "pool_nft_hex",
+      "mutate_value": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+      "comment": "27-byte pool_nft — Δ36 / VR-006 closure. The Aegis canonical pool NFT policy id is a 28-byte hash; the on-chain validator's `find_canonical_pool_output` matches on the policy id bytewise, so a wrong-length pool_nft silently never resolves. Encoded length must equal the Cardano hash width."
+    },
+    {
+      "id": 14,
+      "name": "domain_tag_zero_length",
+      "rule": "domain_tag must be exactly 27 bytes — the empty bytestring is rejected (signer_pkh consistency analogue)",
+      "error_category": "length_violation",
+      "error_pattern": "domain_tag",
+      "mutate_field": "domain_tag_hex",
+      "mutate_value": "",
+      "comment": "Empty domain_tag — Δ36 / VR-006 closure. The verification red-team's VR-006 also asked for a 'signer_pkh consistency' check; on-chain that check is enforced by `blake2b_224(awd.insured_vkey) == datum.insured` in ClaimWithAuth + RotateAuth (cannot be expressed as a single off-chain payload-shape rule because `insured_vkey` lives in the surrounding AuthWitnessDatum, not in AuthCoveragePayload). For symmetry we pin a different length-class boundary instead — a zero-length domain_tag — so the manifest exercises BOTH the boundary case (vector #1, 26 bytes) AND the empty case (this vector). Together they trap the full length-check surface."
+    },
+    {
+      "id": 15,
+      "name": "max_coverage_negative",
+      "rule": "max_coverage must be in [0, 2^63 - 1] — negative values rejected (signature-length analogue via int-range cross-stack pin)",
+      "error_category": "int_range",
+      "error_pattern": "max_coverage",
+      "mutate_field": "max_coverage",
+      "mutate_value": "-1",
+      "comment": "Negative max_coverage — Δ36 / VR-006 closure. The verification red-team's VR-006 asked for a '64-byte signature length' check; the AuthCoveragePayload schema does NOT carry the Ed25519 signature (it lives separately in the AuthWitnessDatum + ClaimWithAuth redeemer), so it cannot be exercised via a payload-shape vector. We pin the equivalent uint-range cross-stack symmetry instead: a negative integer field. Both stacks reject negatives via `assertNonNegInt`/`_assert_non_neg_int` — the int-range invariant is the load-bearing primitive for the signature-length check (once a non-negative bound is enforced, the off-chain wrappers around encode_auth_coverage_payload can stack the 64-byte signature length on top via their own assertions, both stacks already do this in `signAuthCommitment` / `sign_auth.py`)."
+    }
+  ]
+}

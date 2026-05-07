@@ -90,6 +90,7 @@ pub fn default_policy_datum() -> PolicyDatum {
     pool_script_hash,
     pool_nft: pool_nft_policy,
     oracle_provider: Charli3,
+    auth_commitment: None,
   }
 }
 
@@ -108,6 +109,7 @@ pub fn synthetic_attack_policy_datum() -> PolicyDatum {
     pool_script_hash,
     pool_nft: pool_nft_policy,
     oracle_provider: Charli3,
+    auth_commitment: None,
   }
 }
 

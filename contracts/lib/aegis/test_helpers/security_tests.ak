@@ -25,16 +25,16 @@ use aegis/pricing.{calculate_treasury_cut, is_premium_adequate}
 use aegis/test_helpers/fixtures
 use aegis/types.{
   AegisSelf, Charli3, Orcfax, PolicyDatum, PoolDatum, cancellation_window,
-  charli3_oracle_script_hash, orcfax_ada_usd_feed_id,
-  orcfax_freshness_window_ms, orcfax_fsp_script_hash_mainnet,
-  orcfax_fsp_script_hash_preview, treasury_share_bps,
+  charli3_oracle_script_hash, orcfax_ada_usd_feed_id, orcfax_freshness_window_ms,
+  orcfax_fsp_script_hash_mainnet, orcfax_fsp_script_hash_preview,
+  treasury_share_bps,
 }
 use aegis/validation.{
   find_canonical_pool_output, sum_lovelace_to_enterprise_pkh,
   sum_lovelace_to_pkh,
 }
 use cardano/assets
-use cardano/transaction.{InlineDatum, NoDatum, Output}
+use cardano/transaction.{NoDatum, Output}
 
 // ---------------------------------------------------------------------------
 // A-001 — ProcessClaim must enforce payout == consumed-policy.coverage_amount
@@ -145,8 +145,6 @@ test green_a_004_underwrite_with_no_policy_output_rejected() {
   // present. Mirror: if the list of outputs has nothing pointing at the
   // policy validator with the right datum, the helper rejects.
   let outputs_without_policy: List<Output> = []
-  // sum of cov_amounts in matching outputs for this pool = 0 vs requested 100M
-  let _expected_coverage = 100_000_000
   outputs_without_policy == []
 }
 
@@ -1186,8 +1184,7 @@ test green_v6_orcfax_resolver_round_trip_happy_path() {
   // 4473/10000 as scaled int 447_300 (1e6 scale, 0.4473 USD/ADA).
   let fsp = fixtures.orcfax_fsp_input(fixtures.orcfax_fs_hash_test)
   let fs = fixtures.orcfax_fs_input(4_473, 10_000, 1_700_000_000_000)
-  let price =
-    orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
+  let price = orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
   price.value == 447_300 && price.observed_at == 1_700_000_000_000 && price.valid_until == 1_700_000_000_000 + 70 * 60 * 1_000
 }
 
@@ -1196,8 +1193,7 @@ test green_v7_orcfax_resolver_freshness_uses_70min_window() {
   // Cross-check the constant flows through unchanged.
   let fsp = fixtures.orcfax_fsp_input(fixtures.orcfax_fs_hash_test)
   let fs = fixtures.orcfax_fs_input(4_473, 10_000, 1_700_000_000_000)
-  let price =
-    orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
+  let price = orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
   price.valid_until - price.observed_at == orcfax_freshness_window_ms
 }
 

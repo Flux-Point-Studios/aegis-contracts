@@ -111,7 +111,8 @@ test pool_nft_logic_init_utxo_not_consumed_rejected() {
   let init_utxo_consumed = False
   let named_qty = 1
   let total_under_policy = 1
-  let one_shot_mint = init_utxo_consumed && named_qty == 1 && total_under_policy == 1
+  let one_shot_mint =
+    init_utxo_consumed && named_qty == 1 && total_under_policy == 1
   one_shot_mint == False
 }
 
@@ -120,7 +121,8 @@ test pool_nft_logic_more_than_one_token_minted_rejected() {
   let init_utxo_consumed = True
   let named_qty = 2
   let total_under_policy = 2
-  let one_shot_mint = init_utxo_consumed && named_qty == 1 && total_under_policy == 1
+  let one_shot_mint =
+    init_utxo_consumed && named_qty == 1 && total_under_policy == 1
   one_shot_mint == False
 }
 
@@ -130,7 +132,8 @@ test pool_nft_logic_extra_asset_name_under_policy_rejected() {
   let init_utxo_consumed = True
   let named_qty = 1
   let total_under_policy = 2
-  let one_shot_mint = init_utxo_consumed && named_qty == 1 && total_under_policy == 1
+  let one_shot_mint =
+    init_utxo_consumed && named_qty == 1 && total_under_policy == 1
   one_shot_mint == False
 }
 
@@ -146,7 +149,8 @@ test pool_nft_logic_zero_mint_rejected() {
   let init_utxo_consumed = True
   let named_qty = 0
   let total_under_policy = 0
-  let one_shot_mint = init_utxo_consumed && named_qty == 1 && total_under_policy == 1
+  let one_shot_mint =
+    init_utxo_consumed && named_qty == 1 && total_under_policy == 1
   let burn_path = total_under_policy < 0
   ( one_shot_mint || burn_path ) == False
 }

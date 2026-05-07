@@ -2497,5 +2497,189 @@ See `GREEN_PATH_PROOFS.md` §1 ("Latest live deploy — v7-self-publish") for th
 
 ---
 
-*Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30; v7 addendum 2026-05-04*
-*Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows. v6 multi-oracle expansion deployed 2026-04-30; v7 self-publish expansion deployed 2026-05-04. No new findings opened by either expansion.*
+## v8 — Relay-Presigned Authorization (2026-05-06)
+
+**Trigger.** v7 closed the all-third-party-vendor risk surface but left a UX gap: a user who closed their browser between policy creation and the strike event could not auto-claim. The auto-claim wallet's seed was sealed via Shamir 2-of-3 + WebAuthn PRF and required the browser context to reconstruct, so a relay could not file a claim on the user's behalf without holding live access to that seed (which the design explicitly forbade). v8 closes the gap with a pre-signed claim authorization scheme: at policy creation the user's Aegis wallet signs a 14-field `AuthCoveragePayload` (network-pinned domain tag, policy_validator hash, policy_id, insured PKH, payout enterprise address, max coverage, oracle provider, oracle NFT, oracle freshness, time bounds, pool binding) over a BLAKE2b-256 commit. The commit is stored in a new 12th `PolicyDatum.auth_commitment` field. A separate witness UTxO at a new `auth_witness_validator` script address holds the canonical-CBOR payload bytes, the insured's vkey, and the Ed25519 signature, gated by a one-shot `auth_witness_nft` mint policy. A keyless relay can then file `ClaimWithAuth` referencing the witness, and the validator re-decodes the payload, re-asserts all 14 fields, and verifies the Ed25519 sig — funds flow only to the insured's CIP-30 main wallet enterprise address. Manual `Claim` (CIP-30 fallback) continues to work for any policy.
+
+The scope and design are spec'd in `docs/audit/RELAY_PRESIGNED_AUTH_SCOPE_v2.md` (now at v3.3 — see "Design audit trail" below). All v6 + v7 invariants remain in force; v8 is additive (new redeemer variants + new validators + new datum field).
+
+### v8 architectural impact
+
+**Validator hash rotations** (compared to v7-self-publish on preprod):
+
+| Validator | v7 hash | v8 hash (placeholder consts; final values rotate at Phase 4) |
+|---|---|---|
+| `policy.policy_validator.spend` | `47b904e1278d8d0ec217bbb1e34e2898b6a6d7e6dec2001855ae032f` | `95604c241b1782034cc9a84630b2c4131a92ccbc80deca6c90b4fa85` (rotates again post Phase-4 step 4) |
+| `pool.pool_validator.spend` | `b47eb92206008ae5e4238c72be76c3125ed701d506774f9d3120cccd` | `3282f461ec6266aa2c00cc6840b1416b47c64484fd80e9853df9c0db` (cascades from `policy_script_hash` parameter) |
+| `lp_token.lp_token_policy.mint` | `1549570c23955e706b04c2d623077c9c6b316f5d50ca4e0d73b9b0e4` | `5052905c3748192210411b32425de847530a5c03320936106c22e036` (cascades from pool) |
+| `auth_witness.auth_witness_validator.spend` | n/a | `7b95b1e0e02e1812bd282facbc6ebbdae8876b9e0be5b17d8dd98695` (NEW — v8 only) |
+| `auth_witness_nft.auth_witness_nft.mint` | n/a | `9ad6e585ab2712b7a7eea22805ef2ff8b121bb792f4e72073e1939d7` (NEW — v8 only; final policy id post-applying init_utxo_ref) |
+| `pool_nft.pool_nft.mint` | unchanged | unchanged at `0d5a325f3f74d60021633ddd209f4b9e9888a86f45bde1261927f61f` |
+
+**New validators added in v8 (2)**:
+
+1. **`auth_witness.auth_witness_validator`** — locks the auth witness UTxO at a script address. Witness UTxOs are reference-only for `ClaimWithAuth`; can be normal-spent only via the burn-only path (Δ19 / V-002 split: `BurnViaConsume` + operator-only `SweepBurn`) OR the rotation respend path (Δ32 / VR-002, v3.1: NFT moves with the UTxO via a respend at the same script with the same asset_name, no mint policy invocation).
+2. **`auth_witness_nft.auth_witness_nft`** — minting policy for the witness NFT. Parameterized over `(init_utxo_ref, network_tag, operator_pkh)` (3-tuple post-Δ41 / v3.2; was 4-tuple). Three redeemers: `MintWitness` (Underwrite-creation), `BurnViaConsume` (atomic burn alongside policy termination), `SweepBurn` (operator-only orphan cleanup with payload-bound `not_after` per Δ31 / VR-001).
+
+### v8 design audit trail (v3.0 → v3.3)
+
+The on-chain side of v8 went through three rounds of red-team + four design-iteration deltas before the architecture stabilized:
+
+1. **v2 design** (2026-05-06 morning) — initial spec at `docs/audit/RELAY_PRESIGNED_AUTH_SCOPE.md`. 14-field `AuthCoveragePayload`, witness UTxO at `auth_witness_validator`, atomic mint at Underwrite, `RotateAuth` redeemer for auth invalidation.
+2. **3-angle Phase-3 red-team** (2026-05-06 morning, parallel) — 2 CRITICAL + 4 HIGH on-chain findings: V-001 (mint one-shot bug bricks feature after first user), V-002 (BurnWitness inverted check enables grief-ROI), V-003 (BatchUnderwrite policy_id collision), V-005 (no integration tests), V-007 / A-A-002 (only 3 of 14 payload fields bound), A-A-003 (canonical CBOR bypass).
+3. **v3 fixes — Δ18-Δ25** (2026-05-06) — closes all 6 findings + 4 MED/LOW. New module `lib/aegis/test_helpers/v8_integration_tests.ak` with 53 mid-sized integration tests building full Transaction contexts. Mint policy parameterized over `(init_utxo_ref, network_tag, operator_pkh, policy_validator_hash)` (4-tuple).
+4. **Verification re-attack** (2026-05-06 afternoon) — 13 findings: VR-001 / VR-002 (HIGH), VR-003..VR-006 (MED), VR-008 + VR-007/009/012 (LOW). Critical: VR-002 — RotateAuth's mint-based design left 2 witness UTxOs sharing one asset name on chain, bricking ClaimWithAuth's Δ7 count gate until policy expiry.
+5. **v3.1 fixes — Δ31-Δ40** (2026-05-06) — closes VR-001..VR-008 (Aiken on-chain) and VR-007/009/012 (frontend + CI deploy gates). RotateAuth restructured to Option A (respend at `auth_witness_validator`, no mint policy invocation, NFT moves with the UTxO). 18 RotateAuth integration tests (vs 5 in v3).
+6. **v3.2 first-order cycle break — Δ41** (2026-05-06) — discovered during Phase 4 deploy preparation. The `auth_witness_nft` mint policy was parameterized over `policy_validator_hash` AND `policy_validator` referenced `auth_witness_nft_policy_id` — mutual fixed-point, deploy-blocked. Δ41 dropped `policy_validator_hash` from the mint policy's parameter set (3-tuple now) AND switched `policy_validator`'s witness identification from NFT-token-policy-id to `Script(auth_witness_validator_hash)` script-credential equality. New compile-time constant `auth_witness_validator_hash` in `lib/aegis/types.ak`. CI deploy gate at `scripts/check_deploy_constants.py` extended to enforce both auth-related constants are non-placeholder before mainnet tag.
+7. **v3.3 second-order cycle break — Δ42** (2026-05-06 — THIS DELTA) — discovered after Δ41 was merged. v3.2's "linear" deploy ordering was empirically a fixed-point: `validators/auth_witness_nft.ak` still imported `auth_witness_validator_hash` for its Underwrite-path destination check, so the mint policy's compiled bytecode (and base hash) rotated whenever that constant was updated in step 4. The pinned policy id from step 2 became stale; refreshing it would re-rotate `auth_witness_validator`'s hash and bring the loop back. Δ42 closes the second-order cycle by removing all `auth_witness_validator_hash` references from `auth_witness_nft.ak`. The Underwrite-path destination pin is replaced by a per-tx VALUE-based check: EXACTLY ONE tx output (anywhere) carries the canonical NFT AND matching `AuthWitnessDatum`. `BurnViaConsume` and `SweepBurn` lose their negative script-credential filters (no longer needed — typed-decode failure on `AuthWitnessDatum` returns False structurally). The truly-linear 5-step deploy ordering is documented in §6 / §12.4 of `RELAY_PRESIGNED_AUTH_SCOPE_v2.md`.
+
+### Δ42 security tradeoff
+
+Δ42 weakens leg 1 of the three-leg trust chain (mint policy's destination check). The argument for why funds are not at risk:
+
+* **Pre-Δ42 (v3.2) leg 1**: mint policy enforced "witness output at `Script(auth_witness_validator_hash)` AND matching `AuthWitnessDatum`". An attacker who routed the witness output to their own script address failed mint.
+* **Post-Δ42 (v3.3) leg 1**: mint policy enforces only "EXACTLY ONE tx output (anywhere) carries the canonical `(own_policy_id, asset_name)` pair AND matching `AuthWitnessDatum`". An attacker who routes the witness output to their own script address PASSES mint.
+
+The replacement security is in legs 2 + 3 (UNCHANGED in v3.3):
+
+* **Leg 2 — `auth_witness_validator`**: self-checks `own_value` carries a token under the canonical `auth_witness_nft_policy_id` AND enforces burn-or-respend semantics on the spend path (Δ32). Once a UTxO sits at the canonical script address, the NFT can leave only via burn or via a respend that preserves the asset_name with a fresh datum.
+* **Leg 3 — `policy_validator`**: accepts witness UTxOs ONLY at `Script(auth_witness_validator_hash)` (Δ41). An orphan witness at the attacker's script address is REJECTED at ClaimWithAuth + RotateAuth time — the orphan never becomes a witness for any policy. The attacker has wasted ~3.5 ADA min-UTxO on an unreachable witness; no funds at risk for any user.
+
+The end-to-end binding strength is preserved: a witness can only ever be referenced under ClaimWithAuth/RotateAuth if it sits at `auth_witness_validator_hash` AND carries the canonical NFT. Δ42 simply moves where that binding is ENFORCED (from mint-time destination check to consume-time script-credential filter), not whether it's enforced.
+
+The new test `it_mint_witness_at_arbitrary_script_succeeds_but_orphan_unreachable_via_claim` pins the v3.3 invariant: it asserts BOTH halves of the property (orphan mint succeeds at the mint policy AND orphan unreachable via policy_validator's witness collection).
+
+### Findings closed (cumulative, v3.0 → v3.3)
+
+* **2 CRITICAL** (V-001, V-002) — closed in v3.0 (Δ18, Δ19).
+* **4 HIGH** (V-003, V-005, V-007 / A-A-002, A-A-003) — closed in v3.0 (Δ20, Δ21, Δ22, Δ23).
+* **2 HIGH (verification)** (VR-001, VR-002) — closed in v3.1 (Δ31, Δ32).
+* **4 MED (verification)** (VR-003, VR-004, VR-005, VR-006) — closed in v3.1 (Δ33, Δ34, Δ35, Δ36).
+* **3 LOW (verification)** (VR-007, VR-008, VR-009/012) — closed in v3.1 (Δ38, Δ37, Δ39+Δ40).
+* **2 deploy-blockers** (first-order cycle, second-order cycle) — closed in v3.2 (Δ41) and v3.3 (Δ42 — this delta).
+
+The full traceability with closing code paths and proving tests is in §11 of `RELAY_PRESIGNED_AUTH_SCOPE_v2.md`.
+
+### v8 build outputs (v3.3, post-Δ42)
+
+- `aiken check`: 387 baseline (v3.2) + 1 new (Δ42 invariant pin) = **388 / 388 green**.
+- `aiken fmt --check`: clean.
+- `aiken build`: blueprint regenerated. Δ42 cycle break empirically verified — building twice (once with `auth_witness_validator_hash = #"00…00"` placeholder, once with `= #"01…01"` test value) produces IDENTICAL `auth_witness_nft.mint` base hash `9ad6e585ab2712b7a7eea22805ef2ff8b121bb792f4e72073e1939d7`. The mint policy's base hash is now INDEPENDENT of `auth_witness_validator_hash`; the deploy ordering is truly linear with no base-hash rotation post step 2.
+- TV-1..TV-5 cross-stack CBOR commit hashes: byte-identical to v3.1 / v3.2. TV-1 commit pinned at `091c23daf3b3bab1bb7508ae312d48198f121fff1e7a6caeddd49f52aeb80885` — verified green.
+
+### v8 mainnet readiness
+
+- v3.3 Phase 4 deploy is now UNBLOCKED: linear ordering with no fixed-point, deploy-gate Python script enforces both compile-time-pinned constants are non-placeholder before mainnet tag.
+- All v6 + v7 closed findings remain closed.
+- All v3 + v3.1 + v3.2 + v3.3 deltas absorbed; full re-attack re-confirmed in §12.4 of the spec.
+- External auditor: notification of v7→v8 delta scope pending; will reference this section + the v3.3 spec + the v8 green-path proof tx (post-deploy).
+- Tag target: `v8.0.0-relay-presigned-auth-rc1` after Phase 4 deploy completes (preprod first, then mainnet after a soak window).
+- Spec authority: `docs/audit/RELAY_PRESIGNED_AUTH_SCOPE_v2.md` (now at v3.3).
+
+### v8 Phase 4 preprod deploy — off-chain SDK migration (2026-05-06)
+
+The Phase 4 preprod deploy is split across (a) on-chain ref-script
+publish + pool init (Aiken side, completed 2026-05-06), (b) off-chain SDK
+migration to the v8 12-field `PolicyDatum` schema (this section), and
+(c) end-to-end smoke validating both halves agree byte-for-byte.
+
+Off-chain migration completed at:
+
+- **Underwrite green-path proof tx**: `0130bc8e597106d60763fbc5515b556df24968577effa6c35d90d227bcb7032b`
+- **Cardanoscan**: <https://preprod.cardanoscan.io/transaction/0130bc8e597106d60763fbc5515b556df24968577effa6c35d90d227bcb7032b>
+- **Premium**: 2,000,000 lovelace; **Treasury donation** (Conway field 22): 10,000 lovelace = `floor(2_000_000 * 200 / 10_000 * 2_500 / 10_000)` (matches the on-chain `calculate_treasury_cut` invariant byte-for-byte).
+- **Pool UTxO consumed**: `82503eed8e54ff7d640a3c5e2cdb6812cfeb90aa83914504a86216618d0e55d8#0` (the AddLiquidity continuation from Phase 4(a)).
+- **Policy_id**: `9c05281ce8d3897dcb3b833d3ab86db84ce06e0c9075f2f6140c025d` — derived per `derive_policy_id(insured, strike, coverage, start, expiry, pool_nft, underwrite_anchor)` (the v8 7-arg form anchored on the consumed pool UTxO ref + pool_nft).
+
+**What changed off-chain**:
+
+- `D:\aegis\api\policies.py` — the `PolicyDatum` dataclass migrated from 11 fields (v6) to 12 fields (v8) with the new `auth_commitment: Option<ByteArray>` field. `_generate_policy_id` was rewritten to mirror Aiken's `derive_policy_id` byte-for-byte (122-byte preimage including consumed pool UTxO ref + pool_nft). `_try_parse_policy_datum` now expects 12 fields; legacy v5/v6 datums are silently skipped (returning `None`) so stranded UTxOs do not surface in the UI as fake-claimable rows. `_decode_oracle_provider_field` extended to recognize `OracleProviderAegisSelf` (Constr 2 / CBOR tag 123).
+- `D:\aegis\api\tests\test_policy_datum_v6.py` — locked the v8 12-field schema, including round-trip tests for `auth_commitment=None` (Plutus `Constr 1 []`) and `auth_commitment=Some(32 bytes)` (Plutus `Constr 0 [bytes]`). 33 tests pass. Legacy v5/v6 datum drop tests verify silent rejection.
+- `D:\aegis\api\tests\test_build_endpoints.py` — Orcfax build assertion updated from `len(fields) == 11` to `len(fields) == 12` and asserts the 12th `auth_commitment` field encodes as Plutus `Constr 1 []` for the standard CIP-30 path.
+
+**What did NOT change off-chain**:
+
+- `D:\aegis\offchain\src\aegis\types.py` — the legacy 10-field `PolicyDatum` was left in place (per the migration plan). The new 12-field `PolicyDatumV8` is used by `D:\aegis\offchain\src\aegis\tx_builder_auth.py` for the relay-presigned-auth path. Phase 1 unit tests under `D:\aegis\offchain\tests\` continue to use the legacy fixture and pass green (341 tests).
+- `D:\aegis\bot\chain_reader.py` — read-only; reads the bot-monitored chain state. Out of the smoke critical path; can be migrated in a follow-up patch when v6 stranded UTxOs are fully swept.
+
+**Test posture**:
+
+- `pytest D:\aegis\api\tests\` — **144 passed, 1 unrelated pre-existing failure** in `test_orcfax_resolver.py::test_stale_fs_is_rejected` (the v7 freshness window widened from 30 min to 70 min; the test still encodes the old 30-min expectation; not in scope for this migration).
+- `pytest D:\aegis\offchain\tests\` — **341 passed**.
+- `pytest D:\aegis\tests\` — **clean**.
+
+The deploy is now ready for `v8.0.0-relay-presigned-auth-rc1` tag once the operator confirms a soak window and runs the auth-witness mint + relay-driven `ClaimWithAuth` smoke on the same preprod state.
+
+### v8 Phase 4 preprod relay-auth on-chain smoke (2026-05-06)
+
+The headline v8 feature — Underwrite-with-auth → ClaimWithAuth → RotateAuth — was exercised end-to-end against the live preprod chain after the SDK migration above. All three transactions broadcast cleanly under their respective validator branches with no retries or workarounds. The smoke driver lives at `D:\aegis\offchain\scripts\smoke_v8_relay_auth.py` (957 LOC, 0 TODOs/FIXMEs; reuses the existing `tx_builder_auth.py` BuildResult layer + `auth_payload.py` canonical CBOR encoder) and is reproducible via `python -m offchain.scripts.smoke_v8_relay_auth --phase all`.
+
+#### Underwrite-with-auth — atomic mint + witness output (Δ1 / §1.7)
+
+- **tx hash**: `d197dd48c4e7111ad3c452b051c1e1472beefda9eda1a2c5310555c3cb2a93c5`
+- **Cardanoscan**: <https://preprod.cardanoscan.io/transaction/d197dd48c4e7111ad3c452b051c1e1472beefda9eda1a2c5310555c3cb2a93c5>
+- **policy_id**: `7ab2fbd3462ae7b773d82951bfc27000f1900572413624a79cdbb8e3` — derived per `derive_policy_id(...)` anchored on the consumed pool UTxO `0130bc8e…#1`. Off-chain Python `derive_policy_id` produces the same 28 bytes the pool validator's Underwrite branch independently re-derives via `policy_output_matches_underwrite`.
+- **auth_commitment**: `9540326ead2194fcb07c8b5ffc17fc5d3fe0904fbf186dcc13e1352d181668c8` = `blake2b_256(canonical_cbor(AuthCoveragePayload))` over the 274-byte 14-field payload. The Aegis-wallet Ed25519 sig over the commit is `65f106d3…ab5bc0e` (operator skey for the smoke; in production this is the user's Aegis-wallet seed).
+- **What this proves**:
+  - Atomic Underwrite + auth_witness_nft mint (qty=+1, asset_name=`blake2b_224(policy_id)` = `0ab7a4fe…07ffd2`) — the on-chain mint validator's §1.5 "EXACTLY ONE tx output carries `(own_policy_id, asset_name)`" check passed (Δ42 v3.3 verified).
+  - The mint validator's Δ34 canonical-CBOR re-encode-and-compare check passed: the 274-byte `payload_cbor` round-trips through `cbor.serialise(decoded)` byte-equal.
+  - The mint validator's Underwrite-path `policy_provider_bound` check passed: the policy output's 12-field datum carries `auth_commitment = Some(commit)` AND `oracle_provider` matching the payload's tag (AegisSelf=2).
+  - Witness UTxO created at `auth_witness_validator` (`addr_test1wpwyqjyf7tf94da0nlzj74xq3z75y7f5wskw48998n0u7jclmvnvs`) carrying the canonical NFT + a 4-field `AuthWitnessDatum {policy_id, insured_vkey, payload_cbor, signature}`.
+  - Pool's Underwrite branch accepts the new 12-field PolicyDatum (active_coverage went 10→20 ADA, total_liquidity grew by net premium, treasury donation 10,000 lovelace via Conway body field 22).
+
+#### ClaimWithAuth — relay-side payout (§1.3)
+
+- **tx hash**: `5a13cb1c60b8ad54ac35e9d834297eae42d535c8c08f67fbb7c8f3941da4e103`
+- **Cardanoscan**: <https://preprod.cardanoscan.io/transaction/5a13cb1c60b8ad54ac35e9d834297eae42d535c8c08f67fbb7c8f3941da4e103>
+- **Trigger**: AegisSelf ADA/USD oracle at $0.265 (below the $0.35 strike — in the money). Charli3 was bypassed because its preprod feed has been stale since 2026-04-18 (≈22 days); the smoke automatically dispatches via `oracles.resolve_oracle(provider=AegisSelf)`. The validator's `oracle_fresh` check (`tx_lower >= price.observed_at && tx_lower <= price.valid_until`) passed against the AegisSelf-published `valid_until` of 1778122473359.
+- **Spend pattern**: policy UTxO consumed under `ClaimWithAuth { sig: 65f106d3… }`; pool UTxO consumed under `ProcessClaim { payout: 10_000_000 }`; **witness UTxO REFERENCED** (NOT spent — per the policy validator's `collect_witnesses(reference_inputs, datum.policy_id)` lookup at §1.3 step 3); oracle UTxO referenced.
+- **Payout**: 10 ADA → enterprise(insured_pkh) `addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr`. The validator's `enterprise_addr_of(datum.insured) == payload.payout_address` check (Δ9) passed against the operator's testnet header-byte 0x60 enterprise variant.
+- **What this proves**:
+  - `expect Some(commit) = datum.auth_commitment` + `is_valid_commit_length` (Δ12).
+  - `collect_witnesses(reference_inputs, ...)` count==1 + script-credential filter on `Script(auth_witness_validator_hash)` (Δ7 + Δ41).
+  - `commit_from_cbor(awd.payload_cbor) == commit` (Δ12 payload-binding).
+  - `blake2b_224(awd.insured_vkey) == datum.insured` (C-2 vkey-binding).
+  - `verify_ed25519_signature(awd.insured_vkey, commit, sig)` (headline check).
+  - `awd.signature == sig` (defense in depth).
+  - `cbor.serialise(decoded_payload) == awd.payload_cbor` (Δ22 canonical re-encode).
+  - All 14 Δ20 field-bindings (`domain_tag`, `network_magic`, `policy_validator`, `policy_id`, `insured_pkh`, `payout_address`, `max_coverage`, `oracle_provider`, `oracle_nft`, `oracle_freshness 0..86_400_000`, `not_before`, `not_after`, `pool_script_hash`, `pool_nft`).
+  - Standard Claim invariants: oracle below strike, fresh, time bounds, A-009 enterprise-pkh aggregate payout, A-008 residual-to-canonical-pool, F-001 single-script-input GLOBAL guard.
+- **Witness disposition**: the witness UTxO is left as an orphan on chain (`d197dd48…#2`, asset_name `0ab7a4fe…07ffd2`). The operator can reclaim its 3.5 ADA min-UTxO via `SweepBurn` after k≥20-block confirmations and `tx_lower > payload.not_after` (per §3.5). The smoke does not run SweepBurn — it is a separate operator-only flow.
+
+#### RotateAuth — Δ32 Option A respend (§1.4)
+
+- **2nd Underwrite-with-auth (setup)**: tx `e0b2d15204f68d4c3937a4a666209ed7f8cd7100b27eb0c4af1aa23eb414971c` — same atomic flow as Phase A above; created policy_id `99cd3218fad701b2bb8dcc19bd785ead8b02971417601806f99c8af2` with `auth_commitment = Some(5186aac2dcb9c66235f3ee2ed01a87fdd4173ae65ad3b08498b44aca1d83eaec)`. Cardanoscan: <https://preprod.cardanoscan.io/transaction/e0b2d15204f68d4c3937a4a666209ed7f8cd7100b27eb0c4af1aa23eb414971c>.
+- **RotateAuth tx hash**: `585a8127ad431fc644e19061a6e95a013bcabf77d184438e98223571b273b7a5`
+- **Cardanoscan**: <https://preprod.cardanoscan.io/transaction/585a8127ad431fc644e19061a6e95a013bcabf77d184438e98223571b273b7a5>
+- **Old commit**: `5186aac2dcb9c66235f3ee2ed01a87fdd4173ae65ad3b08498b44aca1d83eaec`. **New commit**: `357c6681f1cd215778be6811096520578555ae249ddd43d734dcd053b1942f50` — derived from a fresh payload that bumps `oracle_freshness` from 86,400,000 ms to 86,399,999 ms (the only field NOT bound to a policy datum field, so safe to mutate without violating Δ20). Both fall within Δ37's 24h cap, both Ed25519-verify under the operator's vkey, both round-trip through `cbor.serialise` byte-equal.
+- **Spend pattern**: policy UTxO consumed under `RotateAuth { new_commit, new_witness_ref }`; OLD witness UTxO at `auth_witness_validator` consumed under burn-or-respend (validator's spend path's `rotate_path_valid = mint_qty == 0 && continuation_count == 1` arm); NEW witness UTxO RE-spent at the same `auth_witness_validator` script with the new datum. **Mint qty == 0** for the auth_witness_nft asset — the NFT moves with the UTxO via the spend, not via mint/burn. The operator's CIP-30 main-wallet sig satisfies `must_be_signed_by(extra_signatories, datum.insured)`.
+- **What this proves**:
+  - Δ32 Option A respend semantics: the chain holds EXACTLY ONE witness UTxO under `(auth_witness_nft_policy_id, blake2b_224(policy_id))` immediately after rotation — verified via post-tx UTxO query at `auth_witness_validator` (the `c9e3e3a2…d98e141` asset_name appears at exactly one UTxO post-rotation).
+  - Δ25 no-op rejection: `new_commit != old_commit` (5186aa…ec ≠ 357c66…f50).
+  - Δ33 14-field new-payload binding + canonical re-encode + Ed25519 sig verify against the new commit — all bound at rotation time, not deferred to first claim attempt.
+  - Δ37 oracle_freshness 24h cap on chain.
+  - The post-rotation witness UTxO carries the new `payload_cbor` and signature (verifiable by querying `auth_witness_validator` at `585a8127…#1`); the OLD signature would no longer pass `commit_from_cbor(payload_cbor) == commit` against the rotated policy datum.
+
+#### Final on-chain state (post-smoke)
+
+- **Pool**: `e0b2d15204…#1`, 98 ADA; total_liquidity 95.88 ADA, active_coverage 20 ADA (1 v6 stranded policy at 10 ADA + the rotated policy at 10 ADA).
+- **Active policies at `policy_validator`**:
+  - `0130bc8e…#0`: pre-smoke v8 policy with `auth_commitment = None` (standard CIP-30 path), bound to Charli3 (stranded — Charli3 stale).
+  - `585a8127…#0`: rotated v8 policy, `auth_commitment = Some(357c6681…)`, bound to AegisSelf, claimable any time before expiry 2026-05-07.
+- **Witnesses at `auth_witness_validator`**:
+  - `d197dd48…#2`: orphan from Phase B (3.5 ADA awaiting SweepBurn).
+  - `585a8127…#1`: live witness for the rotated policy (NFT moved here from the old `e0b2d152…#2` via Δ32 respend).
+
+#### Quality bar
+
+- All tx submissions succeeded on the first attempt — no retries, no fee-bump cycles, no UTxO-selection workarounds beyond the standard "gather enough pure-ADA inputs to cover premium + fees + change min-UTxO" pattern that mirrors `api/policies.py::create_policy`.
+- pytest: **832 passed, 3 unrelated pre-existing failures** (`api/tests/test_orcfax_resolver.py::test_stale_fs_is_rejected`, `test_claim_isolation.py::test_datum_encoding_roundtrip` — locked to legacy v6 schema, `test_claim_isolation.py::test_ogmios_evaluate` — async fixture).
+- Zero new TODO/FIXME comments in the smoke driver or any modified file.
+- The smoke's UTxO finders (`_find_canonical_pool_utxo`, `_list_policies_at_validator`, `_list_witnesses_at_validator`) reuse the production `oracles.resolve_oracle` dispatcher rather than duplicating oracle-resolution logic — single source of truth on freshness.
+
+The v8 relay-presigned-auth feature is now fully exercised end-to-end on preprod with concrete tx hashes attached. **Tag target unchanged: `v8.0.0-relay-presigned-auth-rc1` after the soak window.**
+
+---
+
+*Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30; v7 addendum 2026-05-04; v8 / relay-presigned-auth addendum 2026-05-06.*
+*Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows. v6 multi-oracle expansion deployed 2026-04-30; v7 self-publish expansion deployed 2026-05-04. v8 relay-presigned-auth design audit at v3.3 — Phase 4 deploy unblocked by Δ42; **end-to-end on-chain smoke green 2026-05-06** with Underwrite-with-auth tx `d197dd48…`, ClaimWithAuth tx `5a13cb1c…`, RotateAuth tx `585a8127…`.*
