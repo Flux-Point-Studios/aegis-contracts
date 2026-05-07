@@ -4,9 +4,9 @@
 
 Aegis is parametric ADA price-crash insurance. A user (the **insured**) buys a policy that pays out a fixed `coverage_amount` of ADA if the ADA/USD oracle price drops below a `strike_price` during the policy's lifetime. The oracle source is policy-bound: each policy elects one of three providers at creation time — **multi-oracle (Charli3 primary, Orcfax secondary, AegisSelf publisher-of-last-resort)** — and the trust handshake stays pinned to that provider for the policy's lifetime. Liquidity providers (LPs) underwrite policies in aggregate via a shared pool; their capital backs every policy proportionally. The protocol earns a configurable fee on each premium (default 2%), of which a fixed share (default 25% = 0.5% of premium) is donated to the Cardano protocol treasury via the Conway-era `treasury_donation` body field — enforced cryptographically.
 
-## Multi-oracle dispatcher (v6 + v7)
+## Multi-oracle dispatcher (v6 + v7 + v8 — present in all redeem paths)
 
-`aegis/oracle.ak` is a **thin dispatcher**. It owns the public entrypoint `resolve_oracle_price(reference_inputs, provider, oracle_nft) -> Price` and the `canonical_oracle_nft(provider) -> ByteArray` helper. The actual CBOR parsing and the per-provider trust handshake live in three submodules under [`contracts/lib/aegis/oracle/`](../contracts/lib/aegis/oracle/):
+`aegis/oracle.ak` is a **thin dispatcher** present in every redeem path — `Claim`, `BatchClaim`, `Cancel`, and (v8 additions) `ClaimWithAuth` and `RotateAuth`. It owns the public entrypoint `resolve_oracle_price(reference_inputs, provider, oracle_nft) -> Price` and the `canonical_oracle_nft(provider) -> ByteArray` helper. The actual CBOR parsing and the per-provider trust handshake live in three submodules under [`contracts/lib/aegis/oracle/`](../contracts/lib/aegis/oracle/):
 
 | Module | Provider | Constr | Trust handshake |
 |---|---|---|---|
@@ -20,7 +20,7 @@ The v6.0.2 round-6 fix added a second pin: the Underwrite-time `pdat.oracle_nft 
 
 ## Validator topology
 
-Three validators plus one one-shot minting policy:
+Five validators plus one one-shot minting policy (v8 added the bottom two — `auth_witness_validator` and `auth_witness_nft` — for relay-presigned-auth, see "Relay-presigned authorization (v8)" below):
 
 ```
         ┌──────────────────────┐
@@ -48,17 +48,34 @@ Three validators plus one one-shot minting policy:
         │  over init_utxo +    │   the init UTxO is consumed, no second mint
         │  token_name)         │   is possible (A-011).
         └──────────────────────┘
+
+        ┌──────────────────────┐
+        │ auth_witness_        │ — [v8] locks witness UTxOs that carry the
+        │ validator            │   user-signed `AuthWitnessDatum`. Spend path
+        │ (parameterized over  │   accepts only burn-or-respend (mint==-1 ∧
+        │  auth_witness_nft_   │   continuations==0) OR rotation respend
+        │  policy_id)          │   (mint==0 ∧ continuations==1, Δ32). Witness
+        └──────────────────────┘   UTxOs are reference-only for ClaimWithAuth.
+
+        ┌──────────────────────┐
+        │ auth_witness_nft.    │ — [v8] mints the witness NFT atomically with
+        │ auth_witness_nft     │   Underwrite. Parameterized over (init_utxo_
+        │ (parameterized over  │   ref, network_tag, operator_pkh) — Δ41/Δ42.
+        │  init_utxo_ref +     │   Three redeemers: MintWitness (atomic with
+        │  network_tag +       │   Underwrite), BurnViaConsume (co-spent with
+        │  operator_pkh)       │   Cancel/Expire), SweepBurn (operator-only
+        └──────────────────────┘   orphan cleanup, Δ19+Δ31).
 ```
 
-The policy validator is byte-stable across deployments unless a shared library it imports changes. The pool validator's hash rotates whenever the policy hash changes (because pool is parameterized over it). The lp_token hash cascades from the pool. This deliberate factoring lets the policy validator stay stable for most reviews.
+The policy validator is byte-stable across deployments unless a shared library it imports changes. The pool validator's hash rotates whenever the policy hash changes (because pool is parameterized over it). The lp_token hash cascades from the pool. This deliberate factoring lets the policy validator stay stable for most reviews. v8 adds two new validators that participate in Underwrite-with-auth / ClaimWithAuth / RotateAuth flows; the v3.3 deploy ordering is truly linear in 5 build steps with no compile-hash fixed-point cycle (see `docs/audit/RELAY_PRESIGNED_AUTH_SCOPE_v2.md` §6 / §12.3 / §12.4).
 
 ## Datum schemas (`contracts/lib/aegis/types.ak`)
 
-### `PolicyDatum` (Constr 0, 11 fields — v6 schema)
+### `PolicyDatum` (Constr 0, 12 fields — v8 schema)
 
 | Field | Type | Purpose |
 |---|---|---|
-| `policy_id` | ByteArray | Off-chain identifier (hash of original terms). Not used for uniqueness on chain. |
+| `policy_id` | ByteArray | On-chain unique identifier — derived from `derive_policy_id(insured, strike, coverage, start, expiry, pool_nft, underwrite_anchor)` (Δ3 / §1.8 of the v8 spec). Anchored on the consumed pool UTxO ref so two same-terms policies cannot collide. |
 | `insured` | VerificationKeyHash | The beneficiary — payouts must land at an enterprise address with this hash (A-009). |
 | `strike_price` | Int | Trigger price in 1e6-scaled USD (e.g., $0.35 = 350_000). |
 | `coverage_amount` | Int | Maximum payout in lovelace. The policy UTxO holds at least this many lovelace as collateral (A-004). |
@@ -69,6 +86,7 @@ The policy validator is byte-stable across deployments unless a shared library i
 | `pool_script_hash` | ByteArray | Hash of the pool validator this policy is bound to. Used for routing residuals (A-008). |
 | `pool_nft` | ByteArray | NFT policy id of the canonical pool. Combined with `pool_script_hash`, uniquely identifies the pool UTxO (A-008). |
 | `oracle_provider` | OracleProvider | [v6 NEW — 11th field] Sum-type tag (`Charli3 \| Orcfax \| AegisSelf`). Selects the dispatcher arm + the trust handshake at Claim/Cancel/Expire time. Pinned at policy creation, immutable for the policy's lifetime. |
+| `auth_commitment` | Option<ByteArray> | [v8 NEW — 12th field] 32-byte BLAKE2b-256 of the canonical-CBOR-encoded `AuthCoveragePayload`, OR `None` if the user opted out of relay coverage. When `Some(commit)`, `ClaimWithAuth` is enabled — any relay can submit the claim using the user-signed witness UTxO at `auth_witness_validator`. The commit is rotation-able via the `RotateAuth` redeemer (CIP-30 main-wallet signature gate, Δ32 respend). |
 
 **`oracle_nft` semantics by provider:**
 
@@ -112,6 +130,18 @@ The policy validator is byte-stable across deployments unless a shared library i
 | `Expire` | 2 | Reclaim premium after policy expires unclaimed (premium goes to pool, LPs profit). |
 | `BatchExpire` | 3 | Batched expiry. |
 | `Cancel` | 4 | Cancel within the 1-hour window; 10% fee retained, 90% premium refunded. Out-of-the-money guard (A-010). Round-6 fix: now requires `tx_lower >= price.observed_at` (L-003). |
+| `ClaimWithAuth { sig }` | 5 | [v8 NEW] Relay-presigned claim. Validator references the witness UTxO at `auth_witness_validator`, decodes its `AuthWitnessDatum`, binds all 14 payload fields to active-network constants + the policy datum (Δ20), re-encodes canonical CBOR (Δ22), and verifies the user's Ed25519 signature over the commitment (Δ12). Payout lands at the user's enterprise address — no relay custody. |
+| `RotateAuth { new_commit, new_witness_ref }` | 6 | [v8 NEW] Rotates `auth_commitment` to a new payload (e.g., user has migrated their CIP-30 main wallet or wants to change `payout_address`). Gated by CIP-30 main-wallet `extra_signatories` (must_be_signed_by datum.insured); old witness UTxO is SPENT and a new one is RESPENT at the same `auth_witness_validator` script — the NFT moves with the UTxO via the spend, no mint/burn (Δ32 Option A). New witness payload is bound across all 14 fields + Ed25519-verified at rotation time (Δ33). |
+
+### Auth-witness mint policy redeemers
+
+The `auth_witness_nft` minting policy carries three redeemers, all enforced by the policy code itself (parameterized over `(init_utxo_ref, network_tag, operator_pkh)`):
+
+| Redeemer | Constr | Branch |
+|---|---|---|
+| `MintWitness { policy_id, payload_cbor }` | 0 | [v8] Atomic with Underwrite (Δ1). Mints exactly one token under `(own_policy_id, blake2b_224(policy_id))`; asserts canonical CBOR re-encode (Δ34) + 14-field payload binding to the policy output's datum + `auth_commitment == Some(blake2b_256(payload_cbor))`. |
+| `BurnViaConsume` | 1 | [v8] Co-spent with Cancel/Expire on the policy side (Δ19). Requires the matching policy UTxO to be consumed in the same tx so a third party cannot grief-burn live witness UTxOs. |
+| `SweepBurn` | 2 | [v8] Operator-only orphan cleanup (Δ19+Δ31). Gated by `must_be_signed_by(operator_pkh)` AND `tx_validity.lower_bound > witness_payload.not_after` — the auth window must have provably elapsed. `not_after` is read from the WITNESS UTxO's payload (Δ31), not from a redeemer field, so an operator-key compromise cannot destroy live witnesses. |
 
 ## Key invariants enforced on-chain
 
@@ -162,8 +192,12 @@ All pool branches require the continuation output to be at the pool address AND 
 
 ## Test coverage
 
-`contracts/lib/aegis/test_helpers/security_tests.ak` houses the `green_a_NNN_*` and `green_v6_*` / `green_v7_*` family of green-path tests, one or more per audit finding. These complement the per-module unit tests in `pricing.ak`, `pool.ak`, oracle parsers, etc. Total: **222 tests, all passing** as of v6.0.2-redteam-round6.
+`contracts/lib/aegis/test_helpers/security_tests.ak` houses the `green_a_NNN_*` and `green_v6_*` / `green_v7_*` family of green-path tests, one or more per audit finding. `contracts/lib/aegis/test_helpers/v8_integration_tests.ak` adds 53+ end-to-end Transaction-context tests covering every v8 redeemer branch (MintWitness, BurnViaConsume, SweepBurn, ClaimWithAuth, RotateAuth, BatchUnderwrite policy_id derivation; one negative test per Δ20 field-binding violation). These complement the per-module unit tests in `pricing.ak`, `pool.ak`, oracle parsers, etc. Total: **388 Aiken tests, all passing** as of v8.0.0-rc1 (was 222 in v6.0.2-redteam-round6 — the +166 are v8 unit + integration tests). Cross-stack parity is enforced via 5 reference test vectors (TV-1..TV-5 at `contracts/tests/fixtures/cbor_test_vectors.json`) + a 15-rule invalid-payload manifest at `contracts/tests/fixtures/invalid_payload_vectors.json`; both Aiken and the off-chain TypeScript / Python encoders produce byte-identical canonical CBOR for every reference payload.
 
 ## Deployment topology
 
-Each deployment (v0 through v6.0.2) consumes ~6 ADA in fees + ~50 ADA locked across reference scripts and the bootstrap pool UTxO. The current live state (v6.0.2) is documented in [`deploy/deploy-state.preprod.json`](../deploy/deploy-state.preprod.json). Previous versions' deploy states are archived in [`deploy/archive/`](../deploy/archive/) for forensic reproduction of pre-fix attack surfaces.
+Each deployment (v0 through v8.0.0-rc1) consumes ~6 ADA in fees + ~50 ADA locked across reference scripts and the bootstrap pool UTxO. v8 publishes **5 reference UTxOs** (was 3 in v5/v6/v7): policy / pool / lp_token / auth_witness / auth_witness_nft. The current live state (v8.0.0-rc1 on preprod) is documented in [`deploy/deploy-state.preprod.json`](../deploy/deploy-state.preprod.json). Previous versions' deploy states are archived in [`deploy/archive/`](../deploy/archive/) for forensic reproduction of pre-fix attack surfaces.
+
+## Relay-presigned authorization (v8)
+
+v8 introduces relay-presigned authorization, which lets any relay submit a claim on behalf of a policy owner whose browser is closed and who has no hot wallet of their own. At policy creation, the user signs a 14-field `AuthCoveragePayload` (network tag, payout enterprise address, max coverage, oracle binding, time window, pool binding, etc.) with their Aegis-wallet Ed25519 key; the BLAKE2b-256 commitment of the canonical CBOR encoding is stored as `PolicyDatum.auth_commitment` and the full payload + signature are locked at the new `auth_witness_validator` as a witness UTxO carrying the canonical `auth_witness_nft`. A relay holding no user funds can later submit `ClaimWithAuth { sig }`: the validator references the witness UTxO, binds all 14 payload fields to active-network constants and the policy datum, re-encodes the CBOR canonically (Δ22), verifies the Ed25519 signature, and pays the coverage to the user's enterprise address — the relay can never redirect funds. `RotateAuth` lets the user rotate `auth_commitment` (e.g., on suspected Aegis-seed leak or main-wallet migration) gated by their CIP-30 main-wallet signature, with the old witness consumed and a fresh witness respent atomically (Δ32 Option A) so the chain never holds two witnesses for one policy. The full spec — 42 deltas (Δ1..Δ42) absorbing 7 rounds of red-team / verification / cycle-break iterations — is at [`docs/audit/RELAY_PRESIGNED_AUTH_SCOPE_v2.md`](audit/RELAY_PRESIGNED_AUTH_SCOPE_v2.md) (v3.3, authoritative).
