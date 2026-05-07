@@ -6,11 +6,40 @@ Every transaction below is on Cardano preprod and verifiable via [preprod.cardan
 
 ---
 
-## 1. Operator deploy flow (5 deployments)
+## 1. Operator deploy flow (7 deployments)
 
 These prove the deploy scripts (`mint_pool_nft.py`, `publish_refs.py`, `init_pool.py`) produce txs the chain accepts. Each deployment version also proves the parameterization cascade (policy hash → pool hash → lp_token hash) is correct end-to-end.
 
-### Latest live deploy — v7-self-publish (2026-05-04)
+### Latest live deploy — v6.0.2-redteam-round6 (2026-05-05)
+
+v6.0.2 closes 5 round-6 findings: A-026 CRITICAL (AegisSelf parser accepted any caller-supplied `oracle_nft` — fix: pin via `aegis_self_nft_policy` + Underwrite-time `pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)`), A-027 HIGH (same shape for Orcfax — fix: `orcfax_fsp_script_hash` constant), Charli3 NFT pin HIGH (same shape for Charli3, extending A-016 — fix: `charli3_ada_usd_nft_policy` constant), L-006 CRITICAL (`ProcessClaim` / `BatchExpireProcess` / `AcceptCancellation` looked up the policy script credential via a redeemer-supplied `policy_script` field — fix: dropped the field, pool now uses parameterized `policy_script_hash`), L-003 HIGH (Claim/BatchClaim/Cancel missed `tx_lower >= price.observed_at` — fix: added at all 3 sites). Validator hash cascade: pool and lp_token rotated; policy_validator also rotated because `oracle.ak` and the Underwrite path changed.
+
+| Step | Tx hash | Verifier link |
+|---|---|---|
+| `pool_nft` mint (`AEGIS_POOL_V10`, one-shot A-011) | `3dd0624e7c068819302dfb27dd635f9b17ea63faed3289b9c936ecebabc66c82` | [explorer](https://preprod.cardanoscan.io/transaction/3dd0624e7c068819302dfb27dd635f9b17ea63faed3289b9c936ecebabc66c82) |
+| publish ref `policy_validator` (hash `9b58ec9f…`) | `74814536f6036e1481ddef280ee6159daa4d2cc90ba72bb4cd784d9c90d617b0` | [explorer](https://preprod.cardanoscan.io/transaction/74814536f6036e1481ddef280ee6159daa4d2cc90ba72bb4cd784d9c90d617b0) |
+| publish ref `pool_validator` (hash `13b2150d…`) | `a0cf43a0652ba0e0185c1785855d58759c11164bcab3558e5f63056d624b05e8` | [explorer](https://preprod.cardanoscan.io/transaction/a0cf43a0652ba0e0185c1785855d58759c11164bcab3558e5f63056d624b05e8) |
+| publish ref `lp_token_policy` (hash `70bea1fe…`) | `390279be9816087cd5fb5e92f2726c47cf5be98192eb1101f9afc33a7e81f32f` | [explorer](https://preprod.cardanoscan.io/transaction/390279be9816087cd5fb5e92f2726c47cf5be98192eb1101f9afc33a7e81f32f) |
+| `init_pool` (locks `AEGIS_POOL_V10` + 6-field PoolDatum) | `989b691816fa65cc9fd93ef0b92e94e2addacc6c1e6f7340d2fb608bb662acc2` | [explorer](https://preprod.cardanoscan.io/transaction/989b691816fa65cc9fd93ef0b92e94e2addacc6c1e6f7340d2fb608bb662acc2) |
+| `add_liquidity` (50 ADA bootstrap) | `9ce729b38abeb017be867e2dc6871301482cb94e61c2810d2548c3ac2adbe3bd` | [explorer](https://preprod.cardanoscan.io/transaction/9ce729b38abeb017be867e2dc6871301482cb94e61c2810d2548c3ac2adbe3bd) |
+| **green-path Underwrite proof** (10 ADA cov, 2 ADA premium, 10000 lovelace donation, oracle=charli3) | `23889dec359280a428d8bfda160df8ffdd717735aebb419720e6dd7651255db2` | [explorer](https://preprod.cardanoscan.io/transaction/23889dec359280a428d8bfda160df8ffdd717735aebb419720e6dd7651255db2) |
+
+**v6.0.2 canonical state on preprod:**
+- `policy_validator` hash: `9b58ec9f1749c87235ad81bd6c3c71e2238b6df7f00f93c386d307d8`
+- `policy_validator` address: `addr_test1wzd43mylzayusu344kqm6mpuw83z8zmd7lcqly7rsmfs0kqw4z86r`
+- `pool_validator` hash: `13b2150d5ca3b26bda15f24177852bdee357a5b934dab59ecf7c99da`
+- `pool_validator` address: `addr_test1wqfmy9gdtj3my676zheyzau9900wx4a9hy6d4dv7ea7fnks34ehfs`
+- `lp_token_policy` hash: `70bea1fe107845b0f0f0c0a465230054a682274f4ab3b417b815b6c4`
+- `pool_nft` policy id: `cfbc3f26fdbefeb3c9ac31dcab38f731780ef79d4a8bbc7232a4b3d6`
+- `pool_nft` asset name: `AEGIS_POOL_V10`
+- canonical pool UTxO (post green-path Underwrite): `23889dec359280a428d8bfda160df8ffdd717735aebb419720e6dd7651255db2#1`
+- AegisSelf publisher VKH (compile-time pinned): `6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152`
+- `AEGIS_PRICE_FEED_V1` NFT (preprod): `d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f`
+- `orcfax_freshness_window_ms`: `4_200_000` (70 min — widened from 30 in v7)
+
+The Underwrite tx confirms `valid_contract: true` against the v6.0.2 contracts. It exercises the round-6 invariants: the new Underwrite-time `pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)` pin (closes A-026 / A-027 / Charli3 NFT-pin extension) and the parameterized `policy_script_hash` (no redeemer-supplied script — closes L-006). The post-Underwrite continuation pool UTxO (output index 1) is the canonical pool for all subsequent operations.
+
+### Previous deploy — v7-self-publish (2026-05-04)
 
 v7 adds **AegisSelf** as a third `OracleProvider` variant alongside Charli3 and Orcfax. We publish ADA/USD ourselves at a UTxO under a one-shot-minted publisher NFT (`AEGIS_PRICE_FEED_V1`) at a dedicated publisher wallet's payment credential. Same Charli3-compatible CBOR datum format so the on-chain parser delegates to existing accessors. Vendor-survival-independent: even if Charli3 dissolves and Orcfax sunsets (announced 2026-07-31), Aegis stays claimable. The change rotates every validator hash via the cascading parameterization. Also widens the Orcfax freshness window from 30 min to 70 min based on empirical mainnet measurement (1h heartbeat, p95 51 min, max 55 min). v7 also added a 4th data source (Bitfinex) on the publisher side so a 3-of-4 quorum tolerates any single source going down.
 
@@ -99,7 +128,7 @@ It is not yet evidence of a green-path Claim execution. Pre-mainnet plan: deploy
 
 ### Historical deploy txs
 
-Prior version (v5) deploy state archived at [`configs/deploy-state.preprod.v5.json`](../configs/). Each hash rotation is driven by a closed audit finding or scope expansion (see `SECURITY_AUDIT_REPORT.md` "Hash rotation history").
+Prior versions are archived under [`deploy/archive/`](../deploy/archive/) (`deploy-state.preprod.v0.json` through `deploy-state.preprod.v5.json`). v6, v6.0.1, and v7 / v7.0.1 are documented in the per-deploy sections of this file (their full state was not separately captured because the `oracle_provider` schema migration kept the cascade tightly coupled and v6.0.2 supersedes them all on chain). Each hash rotation is driven by a closed audit finding or scope expansion (see `audit/SECURITY_AUDIT_REPORT.md` "Hash rotation history").
 
 ---
 
@@ -130,12 +159,13 @@ Single-policy underwrite. The headline demo: validator's `donation_ok` clause ex
 
 | Version / network | Oracle | Tx hash | Coverage | Premium | Donation (body field 22) | Verifier |
 |---|---|---|---|---|---|---|
+| **v6.0.2 / preprod (current)** | **Charli3** (round-6 build, post-A-026/A-027/L-006/L-003/Charli3-NFT-pin) | `23889dec359280a428d8bfda160df8ffdd717735aebb419720e6dd7651255db2` | 10 ADA | 2 ADA | 10,000 lovelace | [explorer](https://preprod.cardanoscan.io/transaction/23889dec359280a428d8bfda160df8ffdd717735aebb419720e6dd7651255db2) |
 | v7 / preprod | **AegisSelf** (Flux Point Studios self-published feed under NFT `d2f08410…`) | `981eb8b13dbcbbbfec30493a0cb53577c843fee4a766f83412d34a4cf97d33f1` | 10 ADA | 2 ADA | 10,000 lovelace | [explorer](https://preprod.cardanoscan.io/transaction/981eb8b13dbcbbbfec30493a0cb53577c843fee4a766f83412d34a4cf97d33f1) |
 | v6 / **preview** | **Orcfax** (real preview FSP `0690081b…4230`) | `70e0d655210ee3aba0bf22e926fe06569de209740d49a18b4e4c7e1f61b13dda` | 10 tADA | 2 tADA | 10,000 lovelace | [explorer](https://preview.cardanoscan.io/transaction/70e0d655210ee3aba0bf22e926fe06569de209740d49a18b4e4c7e1f61b13dda) |
 | v6 / preprod | Charli3 | `ff940ca1c89f5824c0ac9a7f897f2c81bb2f7d15b53cc69507a9b5a42f95fe13` | 10 ADA | 2 ADA | 10,000 lovelace | [explorer](https://preprod.cardanoscan.io/transaction/ff940ca1c89f5824c0ac9a7f897f2c81bb2f7d15b53cc69507a9b5a42f95fe13) |
 | v5 (historical) | Charli3 | `6ff0ebac89fbcb56823a9f94d38c231269389ee7a31b922f33fb918c2f3a6caa` | 10 ADA | 2 ADA | 10,000 lovelace | [explorer](https://preprod.cardanoscan.io/transaction/6ff0ebac89fbcb56823a9f94d38c231269389ee7a31b922f33fb918c2f3a6caa) |
 
-All four: `valid_contract: true`. Body CBOR includes `body[22] = 10000` — verified via `curl /api/v0/txs/<hash>/cbor` and decoding. Donation amount = exactly `calculate_treasury_cut(2_000_000, 200, 2500) = 10_000`.
+All five: `valid_contract: true`. Body CBOR includes `body[22] = 10000` — verified via `curl /api/v0/txs/<hash>/cbor` and decoding. Donation amount = exactly `calculate_treasury_cut(2_000_000, 200, 2500) = 10_000`.
 
 The v6 txs prove the new 11-field PolicyDatum encoding parses correctly on-chain — Charli3 path (preprod row) through `aegis/oracle.resolve_oracle_price` -> `aegis/oracle/charli3.resolve`, and Orcfax path (preview row) through the same dispatcher's `Orcfax` branch. Underwrite itself does not invoke the oracle (no body[18] reference inputs needed at Underwrite time — oracle is consulted only at Claim/Cancel/Expire), but writing the new 11th field `oracle_provider: Orcfax (Constr 1)` and having the pool validator accept the resulting PolicyDatum at the canonical pool is the binding proof that the v6 schema migration cleanly accommodates both providers.
 
@@ -163,7 +193,7 @@ Just a self-transfer with the donation field set, to prove the field works at th
 
 ### `policy.Claim` + `pool.ProcessClaim`
 
-**Status:** Aiken-tested (186/0 green-path), live preprod demo blocked by external dependency.
+**Status:** Aiken-tested (222/0 green-path), live preprod demo blocked by external dependency.
 
 Reproducing `Claim` on chain requires:
 1. A policy that's in-the-money (oracle price ≤ strike).
@@ -208,9 +238,9 @@ We have multi-policy state on chain (the BatchUnderwrite above produced 2 fresh 
 The validators currently powering Aegis preprod are stored as CIP-33 reference scripts. Auditors can fetch the raw script bytes from any of the ref-script UTxOs above and recompute the hash:
 
 ```bash
-# Fetch the v6 pool_validator's reference script
+# Fetch the v6.0.2 pool_validator's reference script
 curl -H "project_id: <YOUR_BLOCKFROST_KEY>" \
-  https://cardano-preprod.blockfrost.io/api/v0/scripts/5902fbe6bd1aefd0124341ce4dcc00b7bc6ea05e1b1112fb92d34a6d/cbor
+  https://cardano-preprod.blockfrost.io/api/v0/scripts/13b2150d5ca3b26bda15f24177852bdee357a5b934dab59ecf7c99da/cbor
 
 # Recompute the hash with cardano-cli or any UPLC tooling — should match.
 ```
@@ -223,18 +253,23 @@ The committed `contracts/plutus.json` is the **parameter-free** blueprint; produ
 
 | Branch | Aiken green test | On-chain proof |
 |---|---|---|
-| `pool_nft.mint` | `pool_nft_logic_*` | ✅ 7 deploys (latest v7 `38a6faf3...`) |
-| `OracleProvider` 3-arm dispatcher (v7) | `dispatcher_charli3_branch_compiles`, `dispatcher_orcfax_branch_compiles`, `dispatcher_aegis_self_branch_compiles` | ✅ v7 ref UTxO `62e0032d...` |
-| `aegis_self.resolve` parser (v7) | `reuses_charli3_datum_shape`, `trust_handshake_requires_publisher_vkh` | ✅ live publisher feed at NFT `d2f08410…` |
-| `policy_validator` v7 schema migration | `policy_datum_aegis_self_variant_constructs`, `green_v7_*` | ✅ v7 Underwrite `981eb8b1…` (`oracle_provider: AegisSelf`) |
-| `pool.Underwrite` + treasury donation + oracle dispatcher | `green_a_021_*`, dispatcher exhaustivity | ✅ v7 `981eb8b1…` (AegisSelf), v6 `ff940ca1…` (Charli3), v6 preview `70e0d655…` (Orcfax), v5 `6ff0ebac…` |
-| `pool.BatchUnderwrite` + treasury donation aggregate + A-012 uniform-provider | `green_a_021_batch_underwrite_aggregate_donation_correct`, `green_a_022_*`, `green_a_025_*`, A-012 generalized to (provider, oracle_nft) tuple incl. AegisSelf | ✅ `b1f1ec3e...` (v5 baseline; v7 batch demo pending) |
-| Orcfax freshness widened 30→70 min | `green_v7_orcfax_freshness_window_70_minutes`, `orcfax_freshness_window_is_70_minutes` | ✅ v7 hash rotation captures the constant |
-| `pool.AddLiquidity` + `lp_token.MintLP` | `verify_add_liquidity_datum_*` | ✅ `4ac30d4c...`, `df16e1cf...` |
+| `pool_nft.mint` | `pool_nft_logic_*` | ✅ 7 deploys (latest v6.0.2 `3dd0624e...`) |
+| `OracleProvider` 3-arm dispatcher | `dispatcher_charli3_branch_compiles`, `dispatcher_orcfax_branch_compiles`, `dispatcher_aegis_self_branch_compiles` | ✅ v6.0.2 ref UTxO `74814536...` |
+| `aegis_self.resolve` parser | `reuses_charli3_datum_shape`, `trust_handshake_requires_publisher_vkh` | ✅ live publisher feed at NFT `d2f08410…` |
+| `policy_validator` v6 schema migration (11 fields) | `policy_datum_aegis_self_variant_constructs`, `green_v6_*`, `green_v7_*` | ✅ v6.0.2 Underwrite `23889dec…` (Charli3), v7 `981eb8b1…` (AegisSelf), v6 preview `70e0d655…` (Orcfax) |
+| **A-026 / A-027 / Charli3 NFT pin (round-6)** — `pdat.oracle_nft == canonical_oracle_nft(provider)` | round-6 green tests under `security_tests.ak` (`green_a_026_*`, `green_a_027_*`, Charli3 NFT pin replay) | ✅ v6.0.2 hash rotation captures the pin; live Underwrite `23889dec…` |
+| **L-006 (round-6)** — `policy_script` removed from 3 redeemers; pool uses parameterized `policy_script_hash` | `security_tests` redeemer-shape coverage; pool validator parameterization round-trip | ✅ v6.0.2 hash rotation; live Underwrite `23889dec…` |
+| **L-003 (round-6)** — `tx_lower >= price.observed_at` at Claim/BatchClaim/Cancel | `security_tests` freshness-lower-bound coverage | ✅ v6.0.2 hash rotation captures the gate (Claim demo blocked by stale oracle separately) |
+| `pool.Underwrite` + treasury donation + oracle dispatcher | `green_a_021_*`, dispatcher exhaustivity | ✅ v6.0.2 `23889dec…` (Charli3), v7 `981eb8b1…` (AegisSelf), v6 `ff940ca1…` (Charli3), v6 preview `70e0d655…` (Orcfax), v5 `6ff0ebac…` |
+| `pool.BatchUnderwrite` + treasury donation aggregate + A-012 uniform-provider | `green_a_021_batch_underwrite_aggregate_donation_correct`, `green_a_022_*`, `green_a_025_*`, A-012 generalized to `(provider, oracle_nft)` tuple incl. AegisSelf | ✅ `b1f1ec3e...` (v5 baseline; v6.0.2 batch demo pending) |
+| Orcfax freshness widened 30→70 min | `green_v7_orcfax_freshness_window_70_minutes`, `orcfax_freshness_window_is_70_minutes` | ✅ v7 / v6.0.2 hash rotation captures the constant |
+| `pool.AddLiquidity` + `lp_token.MintLP` | `verify_add_liquidity_datum_*` | ✅ `9ce729b3...` (v6.0.2 bootstrap), `4ac30d4c...`, `df16e1cf...` |
 | `pool.RemoveLiquidity` + `lp_token.BurnLP` | `verify_remove_liquidity_datum_*`, `solve_lp_burn_for_withdrawal_*` | ✅ `3322c5a5...` |
 | `policy.Claim` + `pool.ProcessClaim` | `verify_claim_datum_*`, `green_a_001_*`, `green_a_005_*`, `green_a_009_*` | ⏳ blocked by stale Charli3 preprod oracle |
 | `policy.Cancel` + `pool.AcceptCancellation` | `green_a_010_*`, `green_a_020_*` | ⏳ requires out-of-money + fresh oracle |
 | `policy.Expire` + `pool.BatchExpireProcess` | (datum-transition tests) | ⏳ requires 24+ h wait after creation |
+
+**Total: 222 tests, 0 failures.**
 
 ---
 
@@ -245,7 +280,7 @@ To reproduce any of the green-path txs above:
 1. Clone this repo and the private backend repo.
 2. Configure `.env` with a preprod Blockfrost key + an operator wallet path (instructions in [`deploy/README.md`](../deploy/README.md)).
 3. Fund the operator wallet with ~50 ADA from the Cardano preprod faucet.
-4. Run `python -m offchain.scripts.smoke_underwrite --skip-add-liquidity --coverage 10 2>&1` — produces a fresh Underwrite + treasury donation tx of the same shape as `6ff0ebac...`.
+4. Run `python -m offchain.scripts.smoke_underwrite --skip-add-liquidity --coverage 10 2>&1` — produces a fresh Underwrite + treasury donation tx of the same shape as `23889dec…`.
 5. Verify on Blockfrost: the body field 22 carries the expected donation, `valid_contract: true`.
 
 For the not-yet-demonstrated branches, see the `redteam/` directory's smoke scripts and adapt to your test wallet.
