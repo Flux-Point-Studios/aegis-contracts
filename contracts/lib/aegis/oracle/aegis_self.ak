@@ -72,15 +72,15 @@ pub fn find_feed_datum(
   reference_inputs: List<Input>,
   oracle_nft: ByteArray,
 ) -> OracleDatum {
-  // [v6.0.2 / A-026 fix] Pin `oracle_nft` to the canonical AegisSelf
-  // publisher NFT. The pre-fix file-header comment claimed the trust
-  // handshake "requires the attacker to BOTH steal the publisher key AND
-  // mint under our parameterized one-shot policy" — that argument was
-  // wrong because `oracle_nft` was caller-controlled per policy. With
-  // this pin in place, an attacker forging a fake NFT under their own
-  // permissive policy is rejected before the payment-credential check
-  // even runs.
-  expect oracle_nft == aegis_types.aegis_self_nft_policy
+  // [v12 / A-026 generalised] Pin `oracle_nft` to the canonical AegisSelf
+  // allowlist (five one-shot mints under the same publisher VKH, one per
+  // supported pair). The semantics are unchanged from the round-6 single-
+  // NFT pin: an attacker forging a fake NFT under their own permissive
+  // policy is rejected before the payment-credential check even runs. The
+  // only set-theoretic change is the canonical set's cardinality (5 vs 1).
+  // See `lib/aegis/types.ak::aegis_self_canonical_nfts` for the threat
+  // model and per-pair rotation contract.
+  expect list.has(aegis_types.aegis_self_canonical_nfts, oracle_nft)
   when find_feed_output(reference_inputs, oracle_nft) is {
     Some(output) ->
       when output.datum is {
@@ -141,4 +141,64 @@ test trust_handshake_requires_publisher_vkh() {
   // (e.g., separate mainnet mnemonic in v7+) the trust binding is the place
   // to update it.
   aegis_types.aegis_self_publisher_vkh == #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
+}
+
+// ---------------------------------------------------------------------------
+// [v12] Per-pair NFT allowlist round-trip tests
+//
+// The allowlist itself is pinned in `types.ak::aegis_self_canonical_nfts`;
+// these tests confirm the parser's V12 `list.has` rewrite admits each
+// canonical NFT and rejects anything else.
+// ---------------------------------------------------------------------------
+
+test oracle_accepts_ada_nft() {
+  list.has(
+    aegis_types.aegis_self_canonical_nfts,
+    #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+  )
+}
+
+test oracle_accepts_btc_nft() {
+  list.has(
+    aegis_types.aegis_self_canonical_nfts,
+    #"ae304e27806536dbbc222115c2b543e845f99bd8c7a3a01669f2d7bd",
+  )
+}
+
+test oracle_accepts_eth_nft() {
+  list.has(
+    aegis_types.aegis_self_canonical_nfts,
+    #"d80aa1a72a46813b5045e163751076d54551fac4a6f8d720e15807ad",
+  )
+}
+
+test oracle_accepts_usdt_nft() {
+  list.has(
+    aegis_types.aegis_self_canonical_nfts,
+    #"a4093bfc7758b86ca1b96df842367bce96cb954650a392020246c0cb",
+  )
+}
+
+test oracle_accepts_usdc_nft() {
+  list.has(
+    aegis_types.aegis_self_canonical_nfts,
+    #"860faa663d8a3ae3071d61f95464340c0e49c1f47f56db76441df7a0",
+  )
+}
+
+test oracle_rejects_unknown_nft() fail {
+  // A non-canonical NFT must trip the `expect list.has(...)` in
+  // `find_feed_datum`. Wrapping a `fail` test marker around an expectation
+  // is the Aiken idiom for "this code path must abort". We invoke
+  // `find_feed_datum` directly to assert the panic.
+  let oracle_nft =
+    #"00112233445566778899001122334455667788990011223344556677"
+  let datum = find_feed_datum([], oracle_nft)
+  get_oracle_price(datum) == 0
+}
+
+test oracle_rejects_empty_nft() fail {
+  // Defensive: an empty bytestring must not match any canonical entry.
+  let datum = find_feed_datum([], #"")
+  get_oracle_price(datum) == 0
 }

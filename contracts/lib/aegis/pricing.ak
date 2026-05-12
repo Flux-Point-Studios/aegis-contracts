@@ -81,6 +81,35 @@ pub fn calculate_treasury_cut(
   premium * protocol_fee_bps / 10_000 * treasury_share_bps / 10_000
 }
 
+/// [v12] Split a protocol fee into team and partner cuts.
+///
+/// Returns `(team_cut, partner_cut)` such that
+///   `team_cut + partner_cut == calculate_protocol_fee(premium, protocol_fee_bps)`
+/// exactly (no rounding drift between the two halves).
+///
+/// `partner_share_bps` is in bps OF THE FEE (not of the premium). At the
+/// V12 defaults (`protocol_fee_bps = 200`, `partner_share_bps = 0..=2000`),
+/// partner_cut is 0..=0.4% of premium and team_cut is 1.6..=2.0% of premium.
+///
+/// Floor-rounding convention: any fractional lovelace from the multi-stage
+/// division accrues to `team_cut` (not partner). Rationale: the team is the
+/// protocol's economic baseline; partners are a routing detail. Flooring
+/// the partner share once and deriving team by subtraction guarantees the
+/// invariant `team_cut + partner_cut == total_fee` holds exactly without a
+/// double-rounding ambiguity. The `pool.ak` Underwrite / AcceptCancellation
+/// / BatchUnderwrite branches all read this helper, so changing the
+/// rounding convention here is a validator-hash-rotating event.
+pub fn calculate_protocol_fee_split(
+  premium: Int,
+  protocol_fee_bps: Int,
+  partner_share_bps: Int,
+) -> (Int, Int) {
+  let total_fee = calculate_protocol_fee(premium, protocol_fee_bps)
+  let partner_cut = total_fee * partner_share_bps / 10_000
+  let team_cut = total_fee - partner_cut
+  (team_cut, partner_cut)
+}
+
 // ---------------------------------------------------------------------------
 // Cancellation Fee Calculation
 // ---------------------------------------------------------------------------
@@ -301,4 +330,56 @@ test treasury_cut_matches_fee_times_share() {
   let fee = calculate_protocol_fee(premium, 200)
   let expected = fee * 2_500 / 10_000
   calculate_treasury_cut(premium, 200, 2_500) == expected
+}
+
+// ---------------------------------------------------------------------------
+// [v12] Protocol Fee Split Tests
+//
+// TDD-first: these tests were written before `calculate_protocol_fee_split`
+// (RED). The four spec-mandated cases plus two extra cross-checks below
+// (sum-equals-total + Some(addr)/0-bps distinction).
+// ---------------------------------------------------------------------------
+
+test fee_split_solo_policy_routes_full_fee_to_team() {
+  // 100 ADA premium, 2% fee = 2 ADA, no partner -> team gets full 2 ADA.
+  let (team, partner) = calculate_protocol_fee_split(100_000_000, 200, 0)
+  team == 2_000_000 && partner == 0
+}
+
+test fee_split_partner_at_max_cap() {
+  // 100 ADA premium, 2% fee = 2 ADA, partner @ 20% -> partner 0.4, team 1.6.
+  let (team, partner) = calculate_protocol_fee_split(100_000_000, 200, 2_000)
+  team == 1_600_000 && partner == 400_000
+}
+
+test fee_split_zero_premium_yields_zero_both_sides() {
+  let (team, partner) = calculate_protocol_fee_split(0, 200, 1_000)
+  team == 0 && partner == 0
+}
+
+test fee_split_zero_fee_yields_zero_both_sides() {
+  // protocol_fee_bps = 0 with partner_share_bps non-zero must yield (0, 0).
+  // Guards against a degenerate path where partner_cut is computed against
+  // a non-existent fee base.
+  let (team, partner) = calculate_protocol_fee_split(100_000_000, 0, 2_000)
+  team == 0 && partner == 0
+}
+
+test fee_split_sum_equals_total_fee_exact() {
+  // Cross-check the invariant: split sums exactly to the total fee
+  // regardless of partner_share_bps. Uses a mid-range bps (1337) to provoke
+  // any rounding drift that would arise if both halves were independently
+  // floored. The team-by-subtraction convention guarantees exact sum.
+  let premium = 250_000_000
+  let total_fee = calculate_protocol_fee(premium, 200)
+  let (team, partner) = calculate_protocol_fee_split(premium, 200, 1_337)
+  team + partner == total_fee
+}
+
+test fee_split_partner_share_zero_routes_full_fee_to_team() {
+  // Distinct from solo: partner_address may be Some(_) in the calling
+  // datum, but share == 0. The split function does not see the address;
+  // it just respects the bps. Same numeric result as solo.
+  let (team, partner) = calculate_protocol_fee_split(100_000_000, 200, 0)
+  team == 2_000_000 && partner == 0
 }

@@ -10,7 +10,7 @@ use aegis/types.{ScriptHash, VerificationKeyHash}
 
 use aiken/collection/list
 use aiken/interval.{Finite}
-use cardano/address.{Address, Script, VerificationKey}
+use cardano/address.{Address, Credential, Script, VerificationKey}
 use cardano/assets
 use cardano/transaction.{Input, NoDatum, Output, OutputReference, ValidityRange}
 

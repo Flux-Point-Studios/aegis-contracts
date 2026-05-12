@@ -40,9 +40,10 @@ use aegis/oracle/charli3
 use aegis/oracle/orcfax
 use aegis/oracle/types as oracle_types
 use aegis/types.{
-  AegisSelf, Charli3, OracleProvider, Orcfax, aegis_self_nft_policy,
+  AegisSelf, Charli3, OracleProvider, Orcfax, aegis_self_canonical_nfts,
   charli3_ada_usd_nft_policy, orcfax_fsp_script_hash,
 }
+use aiken/collection/list
 use cardano/transaction.{Input}
 
 // ---------------------------------------------------------------------------
@@ -81,23 +82,34 @@ pub fn resolve_oracle_price(
   }
 }
 
-/// [v6.0.2 / A-026 / A-027 fix] Per-provider canonical oracle handle.
+/// [v12 generalised] Predicate: is the supplied `oracle_nft` a canonical
+/// handle for the supplied provider?
 ///
-/// Returns the network-pinned NFT policy id (Charli3, AegisSelf) or FSP
-/// script hash (Orcfax) for the supplied provider. Used by the pool
-/// validator's `Underwrite` and `BatchUnderwrite` paths to assert
-/// `pdat.oracle_nft == canonical_oracle_nft(pdat.oracle_provider)` at
-/// policy-creation time — defense in depth so a non-canonical handle can
-/// never enter a `PolicyDatum` in the first place. The per-parser
-/// `expect oracle_nft == canonical` checks (in
-/// `aegis/oracle/{charli3,orcfax,aegis_self}.ak`) are the redundant second
+/// Returns True iff `oracle_nft` matches the network-pinned canonical
+/// handle for the supplied provider:
+///   * Charli3 -> equality with `charli3_ada_usd_nft_policy`
+///   * Orcfax  -> equality with `orcfax_fsp_script_hash`
+///   * AegisSelf -> membership in `aegis_self_canonical_nfts` (V12 allowlist)
+///
+/// Used by the pool validator's `Underwrite` and `BatchUnderwrite` paths to
+/// assert `is_canonical_oracle_nft(pdat.oracle_provider, pdat.oracle_nft)`
+/// at policy-creation time — defense in depth so a non-canonical handle
+/// can never enter a `PolicyDatum` in the first place. The per-parser
+/// `expect oracle_nft == canonical` / `list.has` checks in
+/// `aegis/oracle/{charli3,orcfax,aegis_self}.ak` are the redundant second
 /// layer that catches any path which would bypass Underwrite (e.g., a
 /// hand-crafted policy UTxO not created via the pool validator).
-pub fn canonical_oracle_nft(provider: OracleProvider) -> ByteArray {
+///
+/// [v12] The AegisSelf arm widens from a single-value equality to a
+/// closed five-element allowlist; Charli3 and Orcfax arms are unchanged.
+pub fn is_canonical_oracle_nft(
+  provider: OracleProvider,
+  oracle_nft: ByteArray,
+) -> Bool {
   when provider is {
-    Charli3 -> charli3_ada_usd_nft_policy
-    Orcfax -> orcfax_fsp_script_hash
-    AegisSelf -> aegis_self_nft_policy
+    Charli3 -> oracle_nft == charli3_ada_usd_nft_policy
+    Orcfax -> oracle_nft == orcfax_fsp_script_hash
+    AegisSelf -> list.has(aegis_self_canonical_nfts, oracle_nft)
   }
 }
 
