@@ -4,8 +4,8 @@ use aegis/pool.{
   verify_remove_liquidity_datum, verify_underwrite_datum,
 }
 use aegis/pricing.{
-  calculate_protocol_fee_split, calculate_refund, calculate_treasury_cut,
-  is_premium_adequate, net_premium,
+  calculate_fee_total, calculate_protocol_fee, calculate_protocol_fee_split,
+  calculate_refund, calculate_treasury_cut, is_premium_adequate, net_premium,
 }
 use aegis/types.{
   AcceptCancellation, AddLiquidity, BatchExpireProcess, BatchUnderwrite,
@@ -85,37 +85,48 @@ fn consumed_policies_total_to(
 }
 
 // ---------------------------------------------------------------------------
-// [v12 §3.10] BatchFeeTotals — aggregated walker output for BatchUnderwrite.
+// [v12.2 §3.7] BatchFeeTotals — aggregated walker output for BatchUnderwrite.
 //
-// The walker `batch_policies_match_totals_v12` (below) folds across the tx
-// outputs and produces this record. Two separate sums are tracked for team
-// and partner cuts:
-//   * `team_total_floored` / `partner_totals_floored` — used by the team/
-//     partner output check (`output_to_address_at_least`). Each per-policy
-//     cut is floored to min_utxo BEFORE summing — submitter pads each
-//     floor gap, NOT the pool.
-//   * `team_total_unfloored` / `partner_totals_unfloored_sum` — used by the
-//     pool's value_ok invariant. Pool grows by `total_premium - team_total
-//     _unfloored - partner_totals_unfloored_sum` (percentage-calculated cuts
-//     only, NOT floored). The floor pads come from the submitter wallet,
-//     exogenous to pool accounting.
+// The walker `batch_policies_match_totals_v12_2` (below) folds across the
+// tx outputs and produces this record. V12.2 collapses V12's two-tier
+// floored/unfloored tracking into a single canonical "actual lovelace
+// routed" set of sums because the silent partner_cut absorb rule already
+// encodes the contract — there's no separate "intended" tracking needed.
 //
-// `partner_totals_floored` is keyed by Address — the off-chain builder
-// emits ONE consolidated output per unique partner address. The aggregator
-// in `accumulate_partner` (below) merges per-policy contributions per
-// address.
+//   * `cov_sum` / `prem_sum`  — aggregate coverage and premium from policy
+//                                outputs (must match redeemer totals).
+//   * `funded_ok`             — every policy output's lovelace >= its
+//                                coverage.
+//   * `fee_total_sum`         — Σ fee_total_i (per-policy floored fee_totals).
+//                                Drives the pool's value invariant:
+//                                  cont == own + (total_premium - fee_total_sum).
+//   * `team_total`            — Σ team_cut_i. By construction, equals
+//                                fee_total_sum - partner_totals_sum.
+//   * `partner_totals`        — `List<(Address, Int)>` of per-unique-
+//                                partner aggregated cuts. Only entries
+//                                with partner_cut_i > 0 contribute
+//                                (silently-absorbed policies don't add to
+//                                this list, even when partner_address is
+//                                Some(_)).
+//   * `partner_totals_sum`    — Σ over all entries in partner_totals
+//                                (cached for the value-invariant check).
+//   * `shares_ok`             — all policies pass partner_share_bps ∈
+//                                [0, cap] AND the `Some(_) | share == 0
+//                                when None` consistency check.
 //
-// `shares_ok` = all policies pass partner_share_bps ∈ [0, cap] AND the
-// `Some(_) | share == 0 when None` consistency check.
+// V12 had 8 fields (added `team_total_unfloored` /
+// `partner_totals_unfloored_sum` for the pool-value invariant separately
+// from the floored sums for the output checks); V12.2 has 7 because the
+// floor is inside fee_total and no separate unfloored tracking is needed.
 // ---------------------------------------------------------------------------
 type BatchFeeTotals {
   cov_sum: Int,
   prem_sum: Int,
   funded_ok: Bool,
-  team_total_floored: Int,
-  team_total_unfloored: Int,
-  partner_totals_floored: List<(Address, Int)>,
-  partner_totals_unfloored_sum: Int,
+  fee_total_sum: Int,
+  team_total: Int,
+  partner_totals: List<(Address, Int)>,
+  partner_totals_sum: Int,
   shares_ok: Bool,
 }
 
@@ -258,10 +269,10 @@ fn batch_policies_match_totals_v12(
       cov_sum: 0,
       prem_sum: 0,
       funded_ok: True,
-      team_total_floored: 0,
-      team_total_unfloored: 0,
-      partner_totals_floored: [],
-      partner_totals_unfloored_sum: 0,
+      fee_total_sum: 0,
+      team_total: 0,
+      partner_totals: [],
+      partner_totals_sum: 0,
       shares_ok: True,
     }
   let totals =
@@ -290,9 +301,6 @@ fn batch_policies_match_totals_v12(
                     let funded =
                       assets.lovelace_of(out.value) >= pdat.coverage_amount
                     // [v12 §3.10] Per-policy partner_share_bps invariants.
-                    // Bounds + consistency are folded into shares_ok; the
-                    // validator's top-level conjunction rejects the whole
-                    // batch if ANY policy fails.
                     let bps_in_bounds =
                       pdat.partner_share_bps >= 0 && pdat.partner_share_bps <= partner_share_cap_bps
                     let bps_consistency =
@@ -301,47 +309,52 @@ fn batch_policies_match_totals_v12(
                         None -> pdat.partner_share_bps == 0
                       }
                     let this_shares_ok = bps_in_bounds && bps_consistency
-                    // [v12 §3.10] Per-policy fee split. Both halves
-                    // (floored AND unfloored) accumulate — the floored
-                    // sum drives the per-address output checks; the
-                    // unfloored sum drives the pool's value_ok invariant.
-                    let (team_cut_i, partner_cut_i) =
-                      calculate_protocol_fee_split(
+                    // [v12.2 §3.7] Per-policy Hybrid fee math:
+                    //   fee_total_i = max(min_utxo, premium_i * fee_bps / 10_000)
+                    //   (team_cut_i, partner_cut_i) = split with silent absorb
+                    // The split helper's contract guarantees
+                    //   team_cut_i + partner_cut_i == fee_total_i
+                    // exactly, and partner_cut_i ∈ {0, ≥ min_utxo}.
+                    let fee_total_i =
+                      calculate_fee_total(
                         pdat.premium_paid,
                         protocol_fee_bps,
-                        pdat.partner_share_bps,
+                        min_utxo_lovelace,
                       )
-                    let team_cut_floored_i = floor_to_min_utxo(team_cut_i)
-                    // [v12 §3.10 / D7] Per-policy floor on partner_cut: each
-                    // policy's partner_cut floors independently BEFORE
-                    // summing into the per-address aggregate. The
-                    // attacker-bypass attempt
-                    // (aggregate-then-floor) was specifically called out
-                    // in §3.10.2(1) — per-policy floor is what's enforced.
-                    let partner_cut_floored_i = floor_to_min_utxo(partner_cut_i)
-                    let new_partner_totals_floored =
+                    let (team_cut_i, partner_cut_i) =
+                      calculate_protocol_fee_split(
+                        fee_total_i,
+                        pdat.partner_share_bps,
+                        min_utxo_lovelace,
+                      )
+                    // [v12.2 §3.7] partner_totals only accumulates entries
+                    // where partner_cut_i > 0. The silent-absorb path
+                    // (partner_cut_i == 0) contributes nothing to
+                    // partner_totals AND nothing to partner_totals_sum.
+                    let new_partner_totals =
                       when pdat.partner_address is {
                         Some(addr) ->
-                          accumulate_partner(
-                            acc.partner_totals_floored,
-                            addr,
-                            partner_cut_floored_i,
-                          )
-                        None -> acc.partner_totals_floored
+                          if partner_cut_i > 0 {
+                            accumulate_partner(
+                              acc.partner_totals,
+                              addr,
+                              partner_cut_i,
+                            )
+                          } else {
+                            acc.partner_totals
+                          }
+                        None -> acc.partner_totals
                       }
-                    let partner_unfloored_delta =
-                      when pdat.partner_address is {
-                        Some(_) -> partner_cut_i
-                        None -> 0
-                      }
+                    let new_partner_totals_sum =
+                      acc.partner_totals_sum + partner_cut_i
                     BatchFeeTotals {
                       cov_sum: acc.cov_sum + pdat.coverage_amount,
                       prem_sum: acc.prem_sum + pdat.premium_paid,
                       funded_ok: acc.funded_ok && funded,
-                      team_total_floored: acc.team_total_floored + team_cut_floored_i,
-                      team_total_unfloored: acc.team_total_unfloored + team_cut_i,
-                      partner_totals_floored: new_partner_totals_floored,
-                      partner_totals_unfloored_sum: acc.partner_totals_unfloored_sum + partner_unfloored_delta,
+                      fee_total_sum: acc.fee_total_sum + fee_total_i,
+                      team_total: acc.team_total + team_cut_i,
+                      partner_totals: new_partner_totals,
+                      partner_totals_sum: new_partner_totals_sum,
                       shares_ok: acc.shares_ok && this_shares_ok,
                     }
                   } else {
@@ -613,17 +626,22 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let can_cover =
           can_underwrite(datum.total_liquidity, datum.active_coverage, coverage)
 
-        // 4. Calculate net premium (after protocol fee)
-        let net = net_premium(premium, datum.protocol_fee_bps)
+        // 4. [v12.2 §3.5] Compute fee_total with floor INSIDE the carve.
+        // Pool grows by `net_pool_growth = premium - fee_total`; the
+        // fee_total leaves the pool to team/partner outputs.
+        let fee_total =
+          calculate_fee_total(premium, datum.protocol_fee_bps, min_utxo_lovelace)
+        let net_pool_growth = premium - fee_total
 
-        // 5. Verify datum update is correct
+        // 5. Verify datum update is correct. The new datum's total_liquidity
+        // grows by net_pool_growth (NOT premium, NOT V12's net_premium).
         let datum_ok =
           verify_underwrite_datum(
             datum.total_liquidity,
             datum.active_coverage,
             new_datum.total_liquidity,
             new_datum.active_coverage,
-            net,
+            net_pool_growth,
             coverage,
           )
 
@@ -632,13 +650,14 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
-        // 7. [v12 §3.8] Pool value grows by `net`, NOT by the full premium.
-        // Pre-V12 this was `+ premium` and the 2% sat as phantom lovelace in
-        // the pool — unreachable by team OR LPs (since `total_liquidity`
-        // only counted `net`). V12 routes the 2% explicitly to the
-        // team/partner outputs below, making pool accounting honest.
+        // 7. [v12.2 §3.5] Pool value grows by `net_pool_growth`, NOT by
+        // the full premium and NOT by V12's `net_premium`. The fee_total
+        // leaves the pool to team/partner outputs; the floor is inside
+        // fee_total so the pool gives back a slight discount on small
+        // premiums (LP absorbs the floor cost in exchange for a clean
+        // user-facing fee curve — V12.2 spec §10.1).
         let value_ok =
-          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net
+          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth
 
         // 8. [FIX A-004 / v12] An Underwrite tx MUST create exactly one
         // policy output bound to THIS pool with matching coverage/premium.
@@ -678,37 +697,39 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> new_partner_share_bps == 0
           }
 
-        // 11. [v12 §3.8] Compute the (team_cut, partner_cut) split.
+        // 11. [v12.2 §3.5] Compute the (team_cut, partner_cut) split with
+        // silent partner_cut absorb. team_cut absorbs sub-floor partner_cut.
         let (team_cut, partner_cut) =
           calculate_protocol_fee_split(
-            premium,
-            datum.protocol_fee_bps,
+            fee_total,
             new_partner_share_bps,
+            min_utxo_lovelace,
           )
 
-        // 12. [v12 / D7] Team output check. Required lovelace is
-        // max(min_utxo, team_cut). When team_cut < min_utxo (premium < 100
-        // ADA at the default fee), the submitter's wallet supplies the
-        // floor pad — see the dedicated block-comment on
-        // `floor_to_min_utxo` above.
-        let team_required_lovelace = floor_to_min_utxo(team_cut)
+        // 12. [v12.2 §3.5] Team output check. Threshold IS `team_cut`
+        // (no floor_to_min_utxo wrapper). team_cut >= min_utxo_lovelace
+        // is guaranteed by the silent-absorb invariant (V12.2 spec
+        // §8.1.4): either partner_cut == 0 → team == fee_total >=
+        // min_utxo, or partner_cut > 0 → fee_total >= 5 × min_utxo (cap
+        // forces) → team >= 4 × min_utxo. Either way team >= min_utxo.
         let team_output_funded =
-          output_to_address_at_least(outputs, team_address, team_required_lovelace)
+          output_to_address_at_least(outputs, team_address, team_cut)
 
-        // 13. [v12 §3.8 / D7] Partner output check. If partner_address is
-        // Some(addr), an output at addr with lovelace >=
-        // max(min_utxo, partner_cut) is required. If None,
-        // `partner_consistency` above already enforces share == 0, so
-        // partner_cut == 0 and there is nothing to route.
-        let partner_required_lovelace = floor_to_min_utxo(partner_cut)
+        // 13. [v12.2 §3.5] Partner output check with silent absorb. When
+        // partner_cut == 0 (sub-floor → absorbed by team), the partner
+        // output is OMITTED entirely — even if partner_address is
+        // Some(_), no on-chain output to partner_address is required.
+        // PolicyDatum still records the partner attribution for off-chain
+        // analytics (V12.2 spec §10.3 silent-absorb security analysis).
         let partner_output_funded =
           when new_partner_address is {
             Some(addr) ->
-              output_to_address_at_least(
-                outputs,
-                addr,
-                partner_required_lovelace,
-              )
+              if partner_cut > 0 {
+                output_to_address_at_least(outputs, addr, partner_cut)
+              } else {
+                // Silent absorb path: no partner output required.
+                True
+              }
             None -> True
           }
 
@@ -966,10 +987,10 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
-        // 5. [v12 §3.10] Walk policy outputs ONCE, aggregating per-policy
-        // team_cut and partner_cut totals (floored AND unfloored), the
-        // canonical-pool/pool_nft binding, oracle pin, time range, and
-        // partner_share_bps invariants.
+        // 5. [v12.2 §3.7] Walk policy outputs ONCE, aggregating per-policy
+        // fee_total_i (= max(min_utxo, premium_i × fee_bps / 10_000)) and
+        // (team_cut_i, partner_cut_i) with silent absorb. Single
+        // canonical sum set — no V12 floored/unfloored distinction.
         let own_pool_hash =
           when self_input.output.address.payment_credential is {
             Script(h) -> h
@@ -987,62 +1008,57 @@ validator pool_validator(policy_script_hash: ByteArray) {
             datum.protocol_fee_bps,
           )
 
-        // 6. [v12 §3.10] Derive `total_net` from UNFLOORED per-policy sums.
-        // The floored sums are used by the team/partner output gates only;
-        // the pool's value invariant is the percentage-calculated cuts only
-        // (floor pads come from submitter, not pool).
-        let total_net =
-          total_premium - batch_totals.team_total_unfloored - batch_totals.partner_totals_unfloored_sum
+        // 6. [v12.2 §3.7] Aggregate net pool growth = total_premium −
+        // Σ fee_total_i. team_total + partner_totals_sum == fee_total_sum
+        // by construction (split helper contract).
+        let net_pool_growth = total_premium - batch_totals.fee_total_sum
 
-        // 7. Verify datum update with the per-policy net premium sum.
+        // 7. Verify datum update with the per-policy net pool growth.
         let datum_ok =
           verify_underwrite_datum(
             datum.total_liquidity,
             datum.active_coverage,
             new_datum.total_liquidity,
             new_datum.active_coverage,
-            total_net,
+            net_pool_growth,
             total_coverage,
           )
 
-        // 8. [v12 §3.10] Pool value equality — grow by `total_net`, NOT by
-        // `total_premium`. The 2% premium-fee delta exits the pool to
-        // team/partner outputs; floor pads come from the submitter and
-        // never touch the pool value invariant.
+        // 8. [v12.2 §3.7] Pool value equality — grow by net_pool_growth.
+        // The fee_total leaves the pool to team/partner outputs; the floor
+        // is inside fee_total so the pool gives back a slight discount on
+        // small premiums (LP absorbs the floor cost, V12.2 spec §10.1).
         let value_ok =
-          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + total_net
+          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth
 
-        // 9. [v12 §3.10] Funded check from `batch_totals`: coverage and
+        // 9. [v12.2 §3.7] Funded check from `batch_totals`: coverage and
         // premium sums match the redeemer; every policy output is at the
         // canonical policy script and carries >= its coverage in lovelace.
         let batch_policies_funded = batch_totals.funded_ok
 
-        // 10. [v12 §3.10] Per-policy partner_share_bps invariants
-        // (cap, consistency, non-negativity) folded into shares_ok by the
-        // walker.
+        // 10. [v12.2 §3.7] Per-policy partner_share_bps invariants folded
+        // into shares_ok by the walker.
         let shares_ok = batch_totals.shares_ok
 
-        // 11. [v12 §3.10] Team output check on the aggregated floored sum.
-        // A single consolidated team output is the natural off-chain shape
-        // (the off-chain builder always emits ONE team output per batch).
-        // `list.any` with `>=` accepts the single-output shape; an N-split
-        // team shape would not satisfy `list.any` here, but is structurally
-        // unusual (waste of CBOR bytes).
+        // 11. [v12.2 §3.7] Team output check on the aggregated sum. Threshold
+        // is `team_total` exactly (no floor wrapper) — team_total is the
+        // sum of per-policy team_cut_i (which includes silently-absorbed
+        // partner cuts).
         let team_output_funded =
           output_to_address_at_least(
             outputs,
             team_address,
-            batch_totals.team_total_floored,
+            batch_totals.team_total,
           )
 
-        // 12. [v12 §3.10] Partner output check on each unique partner
-        // address in the aggregator. For each entry `(addr, cut_sum)` in
-        // `partner_totals_floored`, an output at addr with value >=
-        // cut_sum must exist. Aggregated form (one output per unique
-        // partner) is the natural builder shape.
+        // 12. [v12.2 §3.7] Partner output check on each unique partner
+        // address. `partner_totals` only contains entries for policies
+        // whose `partner_cut_i > 0` (silently-absorbed policies don't
+        // contribute). Each entry has cut_sum >= min_utxo by construction
+        // (since each per-policy partner_cut_i ∈ {0, ≥ min_utxo}).
         let partner_outputs_funded =
           list.all(
-            batch_totals.partner_totals_floored,
+            batch_totals.partner_totals,
             fn(entry) {
               output_to_address_at_least(outputs, entry.1st, entry.2nd)
             },
@@ -1219,33 +1235,40 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> policy_datum.partner_share_bps == 0
           }
 
-        // 8. [v12 §3.9] Split the cancellation_fee using the canonical
-        // helper. Uses the PoolDatum's protocol_fee_bps (same as Underwrite
-        // — the cancel cut tracks the pool's current fee rate).
-        let (team_cut, partner_cut) =
-          calculate_protocol_fee_split(
+        // 8. [v12.2 §3.6] Apply Hybrid fee math to the cancellation_fee
+        // retention. fee_total floors to min_utxo INSIDE the carve, so
+        // the pool's value drops by exactly `fee_total_cancel` (not
+        // raw_fee + exogenous pad).
+        let fee_total_cancel =
+          calculate_fee_total(
             cancellation_fee,
             datum.protocol_fee_bps,
+            min_utxo_lovelace,
+          )
+        let (team_cut, partner_cut) =
+          calculate_protocol_fee_split(
+            fee_total_cancel,
             policy_datum.partner_share_bps,
+            min_utxo_lovelace,
           )
 
         // 9. Sanity bounds (defensive — guarantees no underflow).
         let bounds_ok =
           refund_amount >= 0 && refund_amount <= datum.total_liquidity && policy_datum.coverage_amount <= datum.active_coverage
 
-        // 10. [v12 §3.9] Pool's value decreases by refund_amount AND the
-        // team/partner cuts extracted from the cancellation fee retention.
-        // The refund goes to the insured (routed by `policy.Cancel`);
-        // team_cut/partner_cut go to their respective outputs (below).
+        // 10. [v12.2 §3.6] Pool's value decreases by refund_amount AND
+        // fee_total_cancel. team_cut + partner_cut sum exactly to
+        // fee_total_cancel by helper contract; tracking fee_total here
+        // makes the value invariant easier to audit.
         let value_ok =
-          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) - refund_amount - team_cut - partner_cut
+          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) - refund_amount - fee_total_cancel
 
-        // 11. [v12 §3.9] Datum: total_liquidity drops by refund + team_cut +
-        // partner_cut (all three flow out of the pool). active_coverage
-        // drops by the consumed policy's coverage_amount (de-reservation).
+        // 11. [v12.2 §3.6] Datum: total_liquidity drops by refund +
+        // fee_total_cancel (sum of team_cut + partner_cut by construction).
+        // active_coverage drops by the consumed policy's coverage_amount.
         // lp_supply unchanged.
         let datum_ok =
-          new_datum.total_liquidity == datum.total_liquidity - refund_amount - team_cut - partner_cut && new_datum.active_coverage == datum.active_coverage - policy_datum.coverage_amount
+          new_datum.total_liquidity == datum.total_liquidity - refund_amount - fee_total_cancel && new_datum.active_coverage == datum.active_coverage - policy_datum.coverage_amount
 
         // 12. Immutable fields preserved (incl. lp_supply — LP supply does
         // NOT change on cancel; only Add/Remove Liquidity move it).
@@ -1256,26 +1279,26 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let remains_non_negative =
           new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0
 
-        // 14. [v12 / D7] Team output check on the cancel-path cut. Required
-        // lovelace is max(min_utxo, team_cut). For the typical 100-ADA
-        // premium case team_cut is 0.2 ADA so required is the 2-ADA floor;
-        // the canceller's wallet supplies the 1.8-ADA pad.
-        let team_required_lovelace = floor_to_min_utxo(team_cut)
+        // 14. [v12.2 §3.6] Team output check. Threshold = team_cut
+        // exactly (no floor_to_min_utxo wrapper). team_cut >=
+        // min_utxo_lovelace by the silent-absorb invariant.
         let team_output_funded =
-          output_to_address_at_least(outputs, team_address, team_required_lovelace)
+          output_to_address_at_least(outputs, team_address, team_cut)
 
-        // 15. [v12 / D7] Partner output check on the cancel-path cut. Same
-        // shape as Underwrite — conditional on the policy datum's
-        // partner_address.
-        let partner_required_lovelace = floor_to_min_utxo(partner_cut)
+        // 15. [v12.2 §3.6] Partner output check with silent absorb on
+        // cancel. When partner_cut == 0 (sub-floor → absorbed), the
+        // partner output is OMITTED entirely even if partner_address is
+        // Some(_). PolicyDatum still records the partner attribution for
+        // off-chain analytics.
         let partner_output_funded =
           when policy_datum.partner_address is {
             Some(addr) ->
-              output_to_address_at_least(
-                outputs,
-                addr,
-                partner_required_lovelace,
-              )
+              if partner_cut > 0 {
+                output_to_address_at_least(outputs, addr, partner_cut)
+              } else {
+                // Silent absorb path: no partner output required.
+                True
+              }
             None -> True
           }
 

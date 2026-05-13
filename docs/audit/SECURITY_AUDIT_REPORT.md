@@ -2842,7 +2842,175 @@ The headline v8 feature — Underwrite-with-auth → ClaimWithAuth → RotateAut
 
 The v8 relay-presigned-auth feature is now fully exercised end-to-end on preprod with concrete tx hashes attached. **Tag target unchanged: `v8.0.0-relay-presigned-auth-rc1` after the soak window.**
 
+### v8 Phase 4 follow-up — per-policy oracle dispatch in API listing path (2026-05-06)
+
+The v8 SDK migration above closed the on-chain side and the per-policy build endpoints (claim, cancel, expire, batch-claim) — those already routed through `oracles.resolve_oracle(provider=oracle_provider_label(policy_datum.oracle_provider), ...)` so each tx the API constructs attaches the right reference inputs for the policy's bound provider. One v7-era seam remained on the **read** side: `GET /api/policies` (the wallet listing endpoint) used a single AegisSelf-first / Charli3-fallback default price for ALL policies' status computation, so a wallet holding both Charli3-bound and AegisSelf-bound policies could see incorrect "claimable" badges when the two providers disagreed on price.
+
+`api/policies.py::get_all_policies` now dispatches per policy:
+
+- The function parses every UTxO at the policy script address, groups policies by `oracle_provider`, and resolves each provider's price exactly once via `oracles.resolve_oracle(provider=...)`. N Charli3 policies cost one Charli3 query; same for Orcfax and AegisSelf.
+- Each policy's status is computed against ITS bound provider's price — never silently fellback across providers. A Charli3-bound policy whose Charli3 oracle is unavailable falls back to `"active"` (the safe default — matches on-chain behaviour where the validator would also reject a claim against a missing oracle), NOT to `"claimable"` against AegisSelf's price. This is the trust-handshake invariant the user agreed to at policy creation: provider X for the lifetime of the policy.
+- Stranded v5 (10-field) and v6 (11-field) datums silently fail `_try_parse_policy_datum` and are dropped from the listing — the UI no longer surfaces fake-claimable rows after a redeploy.
+- Each returned policy carries its `oracle_provider` label so the UI can render provider-specific badges next to the status pill.
+
+`api/server.py::_get_default_oracle_price` is now restricted to dashboard / aggregate / pre-creation paths (fear-index, depeg feed, premium previews, the public `/api/oracle/price` endpoint default). Per-policy preflight everywhere — listing, claim, cancel, expire, batch-claim — uses the dispatcher. The docstring on `_get_default_oracle_price` makes the rule explicit so future callers don't drift back.
+
+**Test posture (cumulative)**:
+
+- New file `api/tests/test_per_policy_oracle_dispatch.py` adds 8 tests locking the invariant: per-provider routing, mixed-provider listings, stranded-v5 drop, unavailable-provider fallback, and the headline trust-handshake test (a Charli3-bound policy is NOT silently re-evaluated against AegisSelf when Charli3 is unavailable).
+- `pytest D:\aegis\api\tests\` — **152 passed, 1 unrelated pre-existing failure** (`test_orcfax_resolver.py::test_stale_fs_is_rejected`, freshness window mismatch unrelated to this work).
+- `pytest D:\aegis\offchain\tests\` — **341 passed**.
+
+This closes the documented v8 follow-up: on-chain validator dispatches per-policy, every API write path dispatches per-policy, and now the API read path dispatches per-policy as well. There is no remaining surface where a Charli3 policy can be evaluated under AegisSelf's price (or vice versa) anywhere in the Aegis stack.
+
+### v8 Phase 4 wallet-UX gap — network-mismatch banner (2026-05-06)
+
+The CIP-30 connect flow in `src/wallet/cip30_helpers.ts::WalletConnection` captured the wallet's network id (0=testnet / 1=mainnet) at enable-time but no UI surfaced a mismatch warning when that disagreed with the TopBar Preprod/Mainnet toggle. Result: silent submit failures when a user clicked Buy Coverage / Manual Claim / Cancel / Add Liquidity / Withdraw while on the wrong network — script hashes don't exist on the wrong chain so the wallet's submit step rejected with an opaque error. Closed by `src/components/NetworkMismatchBanner.tsx`: sticky warning banner directly below TopBar with a primary "Switch Aegis to {wallet network}" CTA (one-click flip of the App's network state) and a secondary collapsible per-wallet instruction block (Eternl, Lace, Nami, Yoroi, Vespr, Typhon, NuFi, Begin, Gero, Flint + a generic fallback). `useWallet` now exposes a `networkMismatch: boolean` derived from `(connection.network, appNetwork)` that every transaction-submitting CTA across BuyPanel, PoliciesPanel, PoolPanel, LendingPanel, DepegPanel, and AegisWalletPanel reads to disable the button — single source of truth, no prop-drilling. **Known UX limitation surfaced via the banner's always-rendered soft note**: CIP-30 reports `testnet` for both Preprod and Preview networks, so a wallet on Preview while Aegis is set to Preprod will not trip the banner — the script lookups simply return empty. The note tells the user to expect this if they're on Preview. 12 new tests in `tests/components/NetworkMismatchBanner.test.tsx` + 2 regression tests in `tests/PoliciesPanel.test.tsx`. Frontend test suite: **317 passed (was 301)**, ESLint clean, `tsc -b` clean.
+
 ---
 
-*Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30; v7 addendum 2026-05-04; Round 6 addendum 2026-05-05; v8 / relay-presigned-auth addendum 2026-05-06.*
-*Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows. v6 multi-oracle expansion deployed 2026-04-30; v7 self-publish expansion deployed 2026-05-04. v8 relay-presigned-auth design audit at v3.3 — Phase 4 deploy unblocked by Δ42; **end-to-end on-chain smoke green 2026-05-06** with Underwrite-with-auth tx `d197dd48…`, ClaimWithAuth tx `5a13cb1c…`, RotateAuth tx `585a8127…`.*
+## V12 — Multi-asset + protocol fee (2026-05-11)
+
+V12 is a coordinated validator upgrade covering two changes shipped together for one audit pass.
+
+### V12.A — AegisSelf NFT allowlist (1 → 5)
+
+Round-6 fix A-026 pinned `oracle_nft == aegis_self_nft_policy` to a single canonical NFT. V12 generalises to `list.has(aegis_self_canonical_nfts, oracle_nft)` over 5 compile-time NFTs (ADA / BTC / ETH / USDT / USDC), all one-shot mints under the same canonical publisher VKH `6096332c…45622152` with keys discarded. Cardinality 5 vs 1; same trust anchor. Implementation: `lib/aegis/oracle/aegis_self.ak::is_canonical_oracle_nft` + `types.ak::aegis_self_canonical_nfts`. Test surface: 5 positive tests (one per asset) + 1 negative test (random NFT rejected).
+
+### V12.B — Protocol fee mechanism (fixes V11 "phantom 2%")
+
+V11 quietly stuck 2% of every premium in the pool as untracked phantom lovelace: `cont_pool == old_pool + premium` but `total_liquidity` only grew by `net_premium = premium − fee`. The 2% was inside the pool but invisible to LP accounting — accumulated across thousands of policies it would cause a slow LP-share dilution drift.
+
+V12 properly extracts the 2% as required outputs at the validator level:
+
+- 98% → pool (`cont_pool == old_pool + net_premium`, `cont_total_liquidity == old_total_liquidity + net_premium`)
+- 2% × (1 − `partner_share`) → compile-time-pinned `team_address`
+- 2% × `partner_share` → caller-supplied `PolicyDatum.partner_address` (`Option<Address>`), cap: 20% of fee (= 0.4% of premium)
+- 0.5% → Cardano treasury (Conway `treasury_donation`, paid from submitter — unchanged from v6)
+
+Applies to **Underwrite**, **AcceptCancellation** (cuts from 10% retention per B2 operator decision), and **BatchUnderwrite** (per-policy floor + aggregated outputs). Submitter is responsible for paying the per-output min-utxo floor (2 ADA) — in V12, these floor pads are added on top of the premium as separate outputs from the submitter. **This is the "team min-utxo floor pad" pattern that V12.2 replaces.**
+
+### V12 hash rotation (vs v6.0.2 = v8.0.0-rc1)
+
+| Hash | v6.0.2 | V12 |
+|---|---|---|
+| `policy_validator` | `8fe45e44…3a3f5` | `313b03cdc7f92c182b6e052eabf114b66f96a9f387b22fdce0d042dc` |
+| `pool_validator` (unparameterized) | `41cc5c53…f09650f` | `ed2f2947959d318df3cfee1bbe364e69d1a9bf83d0218d78a15279ef` |
+| `lp_token_policy` (unparameterized) | `cd8048bf…ec004` | `5052905c3748192210411b32425de847530a5c03320936106c22e036` |
+| `pool_nft.mint` | (unchanged) | `0d5a325f3f74d60021633ddd209f4b9e9888a86f45bde1261927f61f` |
+
+Pool NFT asset name: `AEGIS_POOL_V12` (live policy id `391d190858734f4a5e48d22d03ca95fd2c924b346d602579d8aba2eb` for preprod V12 deploy).
+
+Test count V11 → V12: 232 → 286 (+54 tests).
+
+Full spec: `docs/v12_validator_upgrade.md` (2337 lines). Operator-decisions table at §1.4: hard-cut redeploy, 20% partner cap, 2-ADA floor with submitter-paid pad, B2 cancel split, full base-address pin for team wallet.
+
+---
+
+## V12.2 — Hybrid fee + Indigo as 4th OracleProvider + soft-disable (2026-05-11)
+
+V12.2 is a coordinated V12 follow-up covering four changes shipped together for one audit pass. **It is the active mainnet candidate.**
+
+### V12.2.A — Hybrid fee model (`pricing.ak`)
+
+V12's protocol-fee mechanism worked but produced a confusing UX line item: small premiums (≤20 ADA) emitted two outputs to the team (the 2% fee + the 1.6-ADA min-utxo floor pad), with the floor pad funded by the submitter as a separate UTxO contribution on top of the premium. The pad sounded like the team was *contributing* to the floor, when actually it was a cost-of-tiny-policy that someone had to absorb.
+
+V12.2 carves the floor INSIDE the fee: `fee_total = max(min_utxo_lovelace, raw_fee)`, where `raw_fee = premium × fee_bps / 10_000`. The pool then grows by `pool_growth = premium − fee_total` (so the LP absorbs the floor shortfall on small premiums). Worked examples:
+
+- **20-ADA premium, no partner**: `raw_fee = 0.40 ADA`, `fee_total = max(2.00, 0.40) = 2.00 ADA`. Pool +18.00 ADA (vs V12 +19.60), team +2.00 ADA. LP absorbs −1.60 ADA.
+- **100-ADA premium, no partner**: `raw_fee = 2.00 ADA`, `fee_total = 2.00 ADA`. Identical to V12 from this premium and up — Hybrid is purely a small-premium absorber.
+- **500-ADA premium, partner @ 15%**: `raw_fee = 10 ADA`, `fee_total = 10 ADA`. `partner_cut_raw = 10 × 1500 / 10_000 = 1.5 ADA` (below 2-ADA floor) → **silent absorb**: partner output dropped, team absorbs full 10 ADA. (V12 emitted a 2-ADA partner output with a 0.5-ADA pad from submitter.)
+
+Helper: `pricing.ak::calculate_fee_total` + `calculate_protocol_fee_split` (returns `(team_cut, partner_cut)` with silent-absorb logic). Implementation invariant `team_cut + partner_cut == fee_total` exactly.
+
+### V12.2.B — Silent partner_cut absorb
+
+When `partner_cut_raw < min_utxo_lovelace`, the partner output is dropped from the tx (datum still records `PolicyDatum.partner_address` for analytics; pool's view of the partner is unchanged). Eliminates the V12 partner-floor-pad emission path. Audit invariant: the absence of a partner output for a policy with a non-null `partner_address` is correct V12.2 behaviour when `partner_cut_raw < 2_000_000`.
+
+### V12.2.C — Indigo as 4th OracleProvider (`oracle/indigo.ak`)
+
+Constructor index 3 added to `OracleProvider` (Charli3=0, Orcfax=1, AegisSelf=2, **Indigo=3**). Direct-binds Indigo's **on-chain** price-oracle UTxOs (NOT the Indigo Analytics REST API — that's a separate REST surface for the iAsset CDP registry, which is unrelated to the price oracle and lives at a different script address). Four iAssets supported: iUSD / iBTC / iETH / iSOL.
+
+Three-layer trust handshake at `is_canonical_oracle_nft(Indigo, _)`:
+
+1. **NFT pin** — `oracle_nft ∈ indigo_canonical_nfts` (one of 4 mainnet hashes / 4 preprod mock hashes)
+2. **Paired script credential pin** — the UTxO carrying the NFT MUST sit at the script address in `indigo_oracle_script_hashes[i]` where `i` is the index of the NFT in `indigo_canonical_nfts`. Per-iAsset script addresses are distinct on mainnet (Indigo's deploy choice); preprod uses a single shared mock script (`d27ccc13…03ee75`) for all 4 iAssets.
+3. **Single-token-of-policy** — exactly one token under the canonical NFT policy id in the UTxO's value bundle (defends against multi-mint policies seeded with the canonical id).
+
+Datum schema: `OracleDatum { price: PriceData { price: Int }, expiration: PosixTimeMs }`. CBOR form `Constr_0[Constr_0[price_int], expiration_ms]`. Price scale 1e6, ADA-denominated. Freshness check: `tx_lower <= datum.expiration`.
+
+iAsset implementation note: 3 of the 4 mainnet iAssets use timestamp-suffixed asset names (`iETH20221219191302` etc.); iSOL diverges with `iSOL_ORACLE` (literal). `chain.py::AEGIS_INDIGO_*_NFT_ASSET_NAME_MAINNET` pins all 4 explicitly, so the divergence is handled by enumeration.
+
+### V12.2.D — Soft-disable Charli3 + Orcfax
+
+`is_canonical_oracle_nft(Charli3 | Orcfax, _) → False` for all NFTs. The parser modules + sum-type variants remain in tree, but no new policy can be created against either provider. Rationale:
+
+- **Charli3** — feed availability degraded. Their ODV system is currently in restructuring; the canonical preprod ADA/USD feed is not reliably fresh.
+- **Orcfax** — preprod has no real deployment (mock only); mainnet feed pinning is correct but their organization is downscaling and SLA is unclear.
+
+Reactivation is a 2-line diff if either provider stabilises. The "in-tree but disabled" pattern keeps the audit surface stable across reactivation.
+
+### Round 7 — V12.2 red-team (2026-05-12)
+
+Two adversarial sessions exercised the V12.2 surface. Full report: `redteam/V12.2_ROUND_7_REPORT.md`.
+
+| Finding | Severity | Status | File:line | Description |
+|---|---|---|---|---|
+| **R7-A** | MED | **FIXED** | `types.ak:290-307` | Cancel-cycle LP drain at `min_premium = 2_000_000` (preprod). At the floor, `raw_fee = 0.04 ADA < min_utxo` so `fee_total` is floored to 2 ADA, pool gains 0 at underwrite, pool loses 3.8 ADA at cancel (refund + cancellation_fee_bps). Asymmetric drain ratio: attacker burns 0.2 ADA, LP loses 3.8 ADA per cycle (19×). Fix: per-network `min_premium` comment-toggle; mainnet at 100_000_000 (threshold where `raw_fee >= min_utxo` so Hybrid floor no longer kicks in). Preprod stays at 2_000_000 (dev-convenient; small TVL bounds the impact). |
+| **R7-B** | HIGH | **FIXED** | `validators/policy.ak:84-99` | `batch_oracles_uniform` non-exhaustive switch — V12 listed Charli3/Orcfax/AegisSelf arms, no Indigo arm, fell through to `_ -> False`. Indigo BatchClaim with ≥2 same-provider policies was rejected; single-policy Indigo claim was unaffected (sentinel `seen` guard skips equality check for first element). Pure availability defect, no fund extraction. Fix: added `(Indigo, Indigo) -> True` as the 4th arm + explicit `Indigo` variant import in `policy.ak`'s `use aegis/types.{...}` block. Test: `redteam_round_7_r7_b_batch_oracles_uniform_accepts_indigo_pair`. |
+| **R7-INFO-1** | INFO | Documented | — | Aiken-on-Windows silent-failure pattern: `aiken check` exits 1 with empty stdout when a sum-type variant is missing from an importer's import list. Wave 2 saw the same gotcha with `calculate_fee_total`. Documented in `docs/v12.2_validator_upgrade.md` §13. |
+
+Regression vs rounds 1-6: full re-run, no regressions; the 286 V12 tests stayed green, V12.2 added 59 tests pre-R7 (345 total), R7 added 6 tests (3 R7-A drain-cost / cycle-pool-delta / attacker-burn + 3 R7-B accepts_indigo_pair / regression-lock-aegis-self / r7-c orcfax constants still in tree) for the final **351/351 green**.
+
+### V12.2 + R7 hash rotation
+
+R7-B re-rotates the policy_validator hash; the cascade through parameterization re-rotates pool_validator + lp_token_policy. pool_nft is parameterized over the init UTxO + asset name and is independent.
+
+| Hash | V12 | V12.2 Wave 4.3 (pre-R7) | V12.2 + R7 |
+|---|---|---|---|
+| `policy_validator` (unparameterized) | `313b03cd…0d042dc` | `037e0d8c99f9fb9aa68cd39ae823d8b143de88358046c9af8415377d` | **`2e4eecf58646dd1140369994fabcfecbf94d348ae537140bb22288c4`** |
+| `pool_validator` (unparameterized) | `ed2f2947…15279ef` | `e95c6ce9d535adc39e003c7d4efcb6f4c79bbf9cd9a614d78ffbb8a8` | **`e95c6ce9d5…`** (UNCHANGED — R7-B doesn't touch pool.ak) |
+| `lp_token_policy` (unparameterized) | `5052905c…22e036` | `5052905c…22e036` | **UNCHANGED** (insulated) |
+| `pool_nft.mint` (unparameterized) | `0d5a325f…7f61f` | `0d5a325f3f…7f61f` | **UNCHANGED** (insulated) |
+| `pool_validator` (parameterized over policy hash) | `81796ac6…3e147` | `a4c4f8e2…105c468c` | **`87523125bef320c159898ab5418a126da469821ffdc8074b0e40469f`** (cascaded) |
+| `lp_token_policy` (parameterized over pool hash) | `b99f853a…4f8f4` | `5b5fd19b…f5ef30f` | **`02727d8e16ff220243d99cf774277205e3be245202ca99f677563802`** (cascaded) |
+
+Pool NFT asset name V12.2 + R7: `AEGIS_POOL_V12_2_R7` (preprod policy id `1cde17c2102937a35219f9530b13fed38fc0591bb87562f913f67c06`; mainnet TBD at deploy time).
+
+**Plutus.json size progression:** v6.0.2 ~75K bytes → V12 84,465 → V12.2 Wave 4.3 85,238 → V12.2 + R7 **85,310 bytes**.
+
+**Test count progression:** v6.0.2 222 → V12 286 → V12.2 pre-R7 345 → V12.2 + R7 **351 tests, 0 failures**.
+
+Full V12.2 + R7 spec: `docs/v12.2_validator_upgrade.md`. Round-7 detail: `redteam/V12.2_ROUND_7_REPORT.md`.
+
+### V12.2 + R7 live preprod (2026-05-12)
+
+Branch `feat/v12.2-hybrid-fee-and-aegis-self-only` HEAD `82b6ce0`. Five-tx redeploy sequence:
+
+1. Publish ref policy_validator → tx `aa611f72…c573a736`
+2. Publish ref pool_validator → tx `6f277e8d…ee3c76a8e`
+3. Publish ref lp_token_policy → tx `54df7a1a…6c63ce21c`
+4. Mint pool NFT (asset `AEGIS_POOL_V12_2_R7`) → tx `70d0c52d…d4418d2`
+5. Init pool (100 ADA bootstrap, fresh PoolDatum) → tx `168ed7a0…39eb7a06`
+
+Total operator spend: ~169 ADA (100 ADA bootstrap + ~67 ADA ref-script min-utxo locks + ~1.2 ADA fees + ~0.2 ADA pool NFT). Operator balance 625 ADA → ~456 ADA.
+
+Live API endpoint `https://aegis-api-production-fa61.up.railway.app/api/pool` confirms the new state on chain:
+
+```json
+{
+  "lp_token_policy": "02727d8e16ff220243d99cf774277205e3be245202ca99f677563802",
+  "utxo_ref": "168ed7a06e8aedd94419b9bfc0f5ce6e0985c25d0cd85c9c56c8219339eb7a06#0",
+  "locked_lovelace": 100000000,
+  "protocol_fee_bps": 200,
+  "lp_supply": 0,
+  "on_chain": true
+}
+```
+
+**Wave 4.3 zombie state.** Three Wave 4.3 ref UTxOs + the old pool UTxO + old pool NFT all remain on-chain at the OLD addresses. No PolicyDatum binds to them (no real user policies were ever underwritten on Wave 4.3 because the pool was empty), so they are harmless zombies. Operator could recover ~67 ADA of locked ADA via a manual spend tx; not blocking anything.
+
+---
+
+*Report compiled by Flux Point Studios · Internal pre-audit · 2026-04-30; v7 addendum 2026-05-04; Round 6 addendum 2026-05-05; v8 / relay-presigned-auth addendum 2026-05-06; V12 addendum 2026-05-11; V12.2 + R7 addendum 2026-05-12.*
+*Priority-1 findings A-001 through A-008 closed 2026-04-30. Findings A-009 through A-013, A-019, A-020, A-021, A-022 closed in subsequent rounds. A-014 / A-015 / A-016 (Low) remain open and mainnet-blocking. Round 2 (A-021, A-022) verified empirically by submitting attack txs to live preprod and confirming the v2-a022 redeploy rejects exploits while accepting legitimate flows. v6 multi-oracle expansion deployed 2026-04-30; v7 self-publish expansion deployed 2026-05-04. v8 relay-presigned-auth design audit at v3.3 — Phase 4 deploy unblocked by Δ42; end-to-end on-chain smoke green 2026-05-06 with Underwrite-with-auth tx `d197dd48…`, ClaimWithAuth tx `5a13cb1c…`, RotateAuth tx `585a8127…`. V12 (AegisSelf 5-NFT allowlist + protocol fee mechanism) deployed 2026-05-11. **V12.2 + R7 (Hybrid fee + Indigo as 4th OracleProvider + R7-B BatchClaim fix) live on preprod 2026-05-12 — mainnet candidate, awaiting external auditor sign-off.***

@@ -79,6 +79,13 @@ pub type OracleProvider {
   /// constant `aegis_self_publisher_vkh`). Vendor-survival-independent —
   /// keeps Aegis claimable even if Charli3 dissolves and Orcfax sunsets.
   AegisSelf
+  /// [v12.2 NEW] Indigo on-chain price oracle. Constructor index 3. 4
+  /// iAssets directly bound (iUSD, iBTC, iETH, iSOL) via
+  /// `indigo_canonical_nfts` + `indigo_oracle_script_hashes` (paired by
+  /// index). Resolver: `oracle/indigo.ak`. Trust handshake: NFT pin +
+  /// per-iAsset oracle script credential pin + single-token-of-policy.
+  /// See V12.2 spec §2.6 for the on-chain architecture.
+  Indigo
 }
 
 // ---------------------------------------------------------------------------
@@ -280,8 +287,24 @@ pub type LPTokenRedeemer {
 // Protocol Constants
 // ---------------------------------------------------------------------------
 
-/// Minimum premium in lovelace (2 ADA)
+/// Minimum premium in lovelace.
+///
+/// [v12.2 Round-7 R7-A] Per-network value to neutralise the cancel-cycle
+/// LP drain attack at the floor threshold.
+///
+///   PREPROD: 2_000_000 (= 2 ADA, current). Dev-convenient — exercises the
+///            full fee_total floor path so red-team tests stay reproducible.
+///            R7-A is bounded by tiny TVL on preprod so the asymmetric
+///            drain ratio doesn't matter for testing.
+///
+///   MAINNET: 100_000_000 (= 100 ADA). Threshold where `raw_fee = premium ×
+///            200 / 10_000 ≥ min_utxo`, so the Hybrid fee_total floor
+///            stops kicking in and the cancel-cycle asymmetry vanishes.
+///            See V12.2 spec §10.X / red-team report R7-A. The mainnet
+///            deploy must substitute this constant by commenting out the
+///            preprod line and uncommenting the mainnet line below.
 pub const min_premium: Int = 2_000_000
+// MAINNET: pub const min_premium: Int = 100_000_000
 
 /// Maximum coverage-to-premium ratio (50x leverage)
 pub const max_coverage_ratio: Int = 50
@@ -490,6 +513,90 @@ pub const aegis_self_canonical_nfts: List<ByteArray> =
     #"860faa663d8a3ae3071d61f95464340c0e49c1f47f56db76441df7a0",
     // USDT/USD — asset name "AEGIS_PRICE_FEED_USDT_USD_V1"
     #"a4093bfc7758b86ca1b96df842367bce96cb954650a392020246c0cb",
+  ]
+
+// ---------------------------------------------------------------------------
+// Indigo On-chain Oracle Bindings (Aegis v12.2)
+// ---------------------------------------------------------------------------
+
+/// [v12.2 NEW] Indigo canonical oracle NFT policy ids — 4 entries, one per
+/// supported iAsset (iUSD, iBTC, iETH, iSOL).
+///
+/// **Per-iAsset binding.** `PolicyDatum.oracle_nft` is frozen at Underwrite
+/// time, so an iUSD-bound depeg policy reads iUSD prices only and an iBTC-
+/// bound crash policy reads iBTC prices only. No cross-iAsset contamination.
+///
+/// **Ordering.** Indexed: 0=iUSD, 1=iBTC, 2=iETH, 3=iSOL. The order is
+/// load-bearing — the corresponding entry of `indigo_oracle_script_hashes`
+/// at the same index pairs the NFT with the per-iAsset oracle script
+/// credential. A reorder of one list without the other is an audit incident.
+///
+/// **Per-network rotation.** Values below are **PREPROD** mock-mints
+/// minted live on 2026-05-11 via `scripts/init_indigo_mock.py`
+/// (one-shot policies, one per iAsset). The mainnet block (commented
+/// out below) carries the live Indigo NFT policy ids validated
+/// 2026-05-12 via Koios.
+///
+/// **Wave 4 mint provenance.** Each preprod entry is the policy id of
+/// the per-iAsset one-shot mint, bound to a distinct operator-wallet
+/// init UTxO + asset name (`MOCK_IUSD_ORACLE`, `MOCK_IBTC_ORACLE`,
+/// `MOCK_IETH_ORACLE`, `MOCK_ISOL_ORACLE`). Provenance recorded in
+/// `configs/indigo-mock-mint.preprod.json`. Trust anchor for the
+/// preprod path is the operator-controlled mock script
+/// (`d27ccc13...`) holding all 4 UTxOs.
+pub const indigo_canonical_nfts: List<ByteArray> =
+  [
+    // **PREPROD BLOCK (active for V12.2 preprod deploy — Wave 4 mints):**
+    // 0 = iUSD preprod mock NFT policy id (mint tx d0de29b9...)
+    #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+    // 1 = iBTC preprod mock NFT policy id (mint tx 0a923058...)
+    #"1e66200fca30b83d5937b67b896fa46f1adac98922555f9e791c1c83",
+    // 2 = iETH preprod mock NFT policy id (mint tx 146667ec...)
+    #"e81e84a5d34137bcbc2ba73f1b4e735ac0cc375f0bfeb5e98a397102",
+    // 3 = iSOL preprod mock NFT policy id (mint tx cea3b933...)
+    #"875cea49cb6963ad462187f77dcc5b4d458a66d7eb9a646c2c5405a7",
+    //
+    // **MAINNET BLOCK (commented out until mainnet promotion):**
+    // #"e3455f2715338b454fb853442f72dc03b98396854f97510027fe22ff",  // iUSD
+    // #"408f13b240f57c3473b5727a68a88c50c1b6bb15c0c10912008dc59e",  // iBTC
+    // #"6c9497ffd7e8baf86c3c0d6fcd43c524daa49ad5fceba26d715468e9",  // iETH
+    // #"107992fe118ef6ae341ae0996f355124e03a8fccdcade60692175df2",  // iSOL
+  ]
+
+/// [v12.2 NEW] Indigo per-iAsset oracle script credentials — 4 entries,
+/// paired by index with `indigo_canonical_nfts`.
+///
+/// **Mainnet values** (commented out below; validated Wave 1.5 via Koios):
+///   0 = `1042576d1de963437bd4bb50dcd91459756e6812b7c06dd543a332c8` (iUSD)
+///   1 = `d27ad3ed7b073018d429e57c2f8d1f52445aa241e280e6da149a91b4` (iBTC)
+///   2 = `f350350cd40d0d8e8744f2c6cad54a0abc9d51f107f57fb95c181a3f` (iETH)
+///   3 = `e3c50817e0fbaab03e4411249cfcb22aa004844e9ad86ca4d76524bc` (iSOL)
+///
+/// **Preprod values** are a single shared mock-script hash deployed
+/// Wave 4 (compiled out-of-tree as a 3-line always-succeeds Aiken
+/// validator; bech32 form
+/// `addr_test1wrf8enqnl26m0q5cfg73lxf4xxtu5x5phcrfjs0lcqp7uagh2hm3k`).
+/// On preprod we use ONE shared mock script for all 4 iAssets (vs
+/// Indigo's 4 distinct hashes on mainnet — see V12.2 spec §5b). That
+/// preprod simplification reduces dev-loop cost without weakening the
+/// parser's invariants — the script-credential pin still enforces
+/// "UTxO must be at the canonical script address," it just happens
+/// that the 4 canonical preprod addresses are the same address. The 4
+/// list entries thus all carry the same hash.
+pub const indigo_oracle_script_hashes: List<ByteArray> =
+  [
+    // **PREPROD BLOCK (active for V12.2 preprod deploy — Wave 4 mock):**
+    // All 4 entries point at the operator mock script (one shared address).
+    #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
+    #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
+    #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
+    #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
+    //
+    // **MAINNET BLOCK (commented out until mainnet promotion):**
+    // #"1042576d1de963437bd4bb50dcd91459756e6812b7c06dd543a332c8",  // iUSD
+    // #"d27ad3ed7b073018d429e57c2f8d1f52445aa241e280e6da149a91b4",  // iBTC
+    // #"f350350cd40d0d8e8744f2c6cad54a0abc9d51f107f57fb95c181a3f",  // iETH
+    // #"e3c50817e0fbaab03e4411249cfcb22aa004844e9ad86ca4d76524bc",  // iSOL
   ]
 
 // ---------------------------------------------------------------------------
@@ -772,4 +879,128 @@ test policy_datum_v12_with_partner() {
       partner_share_bps: 2_000,
     }
   datum.partner_share_bps == 2_000
+}
+
+// ---------------------------------------------------------------------------
+// [v12.2] Indigo provider + NFT/script allowlist tests
+// ---------------------------------------------------------------------------
+
+test policy_datum_indigo_variant_constructs() {
+  // V12.2 adds Indigo as the 4th OracleProvider variant. A PolicyDatum
+  // bound to Indigo must construct cleanly with an Indigo canonical NFT.
+  let datum =
+    PolicyDatum {
+      policy_id: #"aabb",
+      insured: #"0011223344556677889900112233445566778899001122334455667788",
+      strike_price: 1_000_000,
+      coverage_amount: 10_000_000_000,
+      premium_paid: 100_000_000,
+      start_time: 1_700_000_000_000,
+      expiry_time: 1_700_604_800_000,
+      // iUSD preprod mock NFT (live Wave-4 mint).
+      oracle_nft: #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+      pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
+      pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
+      oracle_provider: Indigo,
+      partner_address: None,
+      partner_share_bps: 0,
+    }
+  let is_indigo =
+    when datum.oracle_provider is {
+      Indigo -> True
+      _ -> False
+    }
+  datum.strike_price == 1_000_000 && is_indigo
+}
+
+test indigo_canonical_nfts_size_is_exactly_four() {
+  // V12.2 binds exactly 4 iAssets (iUSD, iBTC, iETH, iSOL). A 5th NFT
+  // entry without a validator redeploy would be an audit incident.
+  list.length(indigo_canonical_nfts) == 4
+}
+
+test indigo_oracle_script_hashes_size_matches_nft_count() {
+  // The two lists are paired by index — a length mismatch is structurally
+  // wrong (the parser's lookup would either crash or pair the wrong
+  // (NFT, script) entries). Static-size pin.
+  list.length(indigo_oracle_script_hashes) == list.length(indigo_canonical_nfts)
+}
+
+test indigo_accepts_iusd_preprod_nft() {
+  // iUSD preprod mock NFT (live Wave-4 mint tx d0de29b9...).
+  list.has(
+    indigo_canonical_nfts,
+    #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+  )
+}
+
+test indigo_accepts_ibtc_preprod_nft() {
+  // iBTC preprod mock NFT (live Wave-4 mint tx 0a923058...).
+  list.has(
+    indigo_canonical_nfts,
+    #"1e66200fca30b83d5937b67b896fa46f1adac98922555f9e791c1c83",
+  )
+}
+
+test indigo_accepts_ieth_preprod_nft() {
+  // iETH preprod mock NFT (live Wave-4 mint tx 146667ec...).
+  list.has(
+    indigo_canonical_nfts,
+    #"e81e84a5d34137bcbc2ba73f1b4e735ac0cc375f0bfeb5e98a397102",
+  )
+}
+
+test indigo_accepts_isol_preprod_nft() {
+  // iSOL preprod mock NFT (live Wave-4 mint tx cea3b933...).
+  list.has(
+    indigo_canonical_nfts,
+    #"875cea49cb6963ad462187f77dcc5b4d458a66d7eb9a646c2c5405a7",
+  )
+}
+
+test indigo_rejects_unknown_nft() {
+  // A non-canonical NFT must not appear in the allowlist.
+  !list.has(
+    indigo_canonical_nfts,
+    #"00112233445566778899001122334455667788990011223344556677",
+  )
+}
+
+test indigo_rejects_empty_nft() {
+  !list.has(indigo_canonical_nfts, #"")
+}
+
+test indigo_disjoint_from_aegis_self() {
+  // The Indigo and AegisSelf allowlists must be disjoint. An NFT in one
+  // MUST NOT be in the other. Defensive pin against accidental drift.
+  !list.has(
+    indigo_canonical_nfts,
+    #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+  ) && !list.has(
+    aegis_self_canonical_nfts,
+    #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+  )
+}
+
+test indigo_oracle_script_hash_first_entry_is_28_bytes() {
+  // All 4 entries must be 28-byte ByteArrays (Blake2b-224 script hashes).
+  when indigo_oracle_script_hashes is {
+    [first, ..] -> bytearray.length(first) == 28
+    [] -> False
+  }
+}
+
+test indigo_canonical_nft_first_entry_is_28_bytes() {
+  // Same defensive length pin for the NFT policy ids.
+  when indigo_canonical_nfts is {
+    [first, ..] -> bytearray.length(first) == 28
+    [] -> False
+  }
+}
+
+test aegis_self_canonical_nfts_unchanged_at_five_in_v12_2() {
+  // V12.2 explicitly keeps AegisSelf at 5 entries (the original Wave-1 plan
+  // to add iUSD was cancelled in Wave 1.5 when we pivoted to Indigo
+  // direct-bind). Pinning this length protects against accidental drift.
+  list.length(aegis_self_canonical_nfts) == 5
 }

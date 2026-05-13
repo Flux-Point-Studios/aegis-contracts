@@ -9,6 +9,7 @@
 // =============================================================================
 
 use aegis/types.{max_coverage_ratio, min_premium}
+use aiken/math
 
 // ---------------------------------------------------------------------------
 // Premium Validation
@@ -42,17 +43,60 @@ pub fn is_premium_adequate(premium: Int, coverage: Int) -> Bool {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol Fee Calculation
+// Protocol Fee Calculation (V12.2: Hybrid Fee — floor inside carve)
 // ---------------------------------------------------------------------------
 
-/// Calculate the protocol fee from a premium.
+/// Calculate the raw (un-floored) protocol fee from a premium.
 /// Fee is denominated in basis points (1 bp = 0.01%).
-/// Example: 200 bps on 10 ADA premium = 0.2 ADA fee
+/// Example: 200 bps on 10 ADA premium = 0.2 ADA raw_fee.
+///
+/// V12.2 callers usually want `calculate_fee_total` instead (which applies
+/// the min-utxo floor). This helper is the un-floored value, used for:
+///   * The treasury-cut math (treasury_share_bps of the RAW fee).
+///   * Off-chain analytics that want the "intended" fee separate from the
+///     floor-padded value.
 pub fn calculate_protocol_fee(premium: Int, fee_bps: Int) -> Int {
   premium * fee_bps / 10_000
 }
 
-/// Calculate the net premium that goes to the pool after fee deduction.
+/// [v12.2] Compute the floored fee_total: `max(min_utxo_lovelace, raw_fee)`.
+///
+/// V12.2's "Hybrid Fee" rule moves the 2-ADA min-utxo floor INSIDE the
+/// carve, so the pool's value reduction equals exactly `fee_total` (not
+/// just the percentage fee with a separate exogenous pad as in V12). The
+/// user's outflow equals `premium + treasury_cut + tx_fee` (linear in
+/// premium).
+///
+/// Trade-off vs V12: small premiums (below `min_utxo × 10_000 / fee_bps`
+/// = 100 ADA at the default 200 bps) yield slightly less net_pool_growth
+/// — the LP absorbs the floor cost. Premiums at or above 100 ADA see
+/// `fee_total == raw_fee` (math identical to V12). See V12.2 spec §10.1.
+pub fn calculate_fee_total(
+  premium: Int,
+  fee_bps: Int,
+  min_utxo_lovelace: Int,
+) -> Int {
+  math.max(min_utxo_lovelace, calculate_protocol_fee(premium, fee_bps))
+}
+
+/// [v12.2] Compute the net pool growth: `premium − calculate_fee_total(...)`.
+///
+/// This is the lovelace delta the pool's continuation UTxO grows by on an
+/// Underwrite tx (and the negative of what it decreases by on the cancel-
+/// path extraction). Validator's `value_ok`:
+///   cont_pool.lovelace == own.lovelace + calculate_net_pool_growth(...)
+pub fn calculate_net_pool_growth(
+  premium: Int,
+  fee_bps: Int,
+  min_utxo_lovelace: Int,
+) -> Int {
+  premium - calculate_fee_total(premium, fee_bps, min_utxo_lovelace)
+}
+
+/// [v12.2] DEPRECATED — V12.2 validators use `calculate_net_pool_growth`
+/// instead. V11/V12 callers continue to read this for legacy analytics;
+/// the function stays compiled so cross-version code paths keep working.
+/// V11/V12 semantics: `premium − raw_fee` (no floor).
 pub fn net_premium(premium: Int, fee_bps: Int) -> Int {
   premium - calculate_protocol_fee(premium, fee_bps)
 }
@@ -81,32 +125,43 @@ pub fn calculate_treasury_cut(
   premium * protocol_fee_bps / 10_000 * treasury_share_bps / 10_000
 }
 
-/// [v12] Split a protocol fee into team and partner cuts.
+/// [v12.2] Split a `fee_total` into team and partner cuts with silent
+/// partner_cut absorb.
 ///
-/// Returns `(team_cut, partner_cut)` such that
-///   `team_cut + partner_cut == calculate_protocol_fee(premium, protocol_fee_bps)`
-/// exactly (no rounding drift between the two halves).
+/// Returns `(team_cut, partner_cut)` such that:
+///   `team_cut + partner_cut == fee_total` (always, exactly)
+/// and
+///   `partner_cut == 0 OR partner_cut >= min_utxo_lovelace` (silent absorb).
 ///
-/// `partner_share_bps` is in bps OF THE FEE (not of the premium). At the
-/// V12 defaults (`protocol_fee_bps = 200`, `partner_share_bps = 0..=2000`),
-/// partner_cut is 0..=0.4% of premium and team_cut is 1.6..=2.0% of premium.
+/// Silent absorb rule: when
+///   `partner_cut_raw = fee_total × partner_share_bps / 10_000 < min_utxo_lovelace`,
+/// the partner output is NOT emitted on chain and `team_cut` absorbs the
+/// full `fee_total`. PolicyDatum still records `partner_address` and
+/// `partner_share_bps` for off-chain analytics — the partner registry can
+/// reconstruct "would have received" amounts from the datum + premium.
 ///
-/// Floor-rounding convention: any fractional lovelace from the multi-stage
-/// division accrues to `team_cut` (not partner). Rationale: the team is the
-/// protocol's economic baseline; partners are a routing detail. Flooring
-/// the partner share once and deriving team by subtraction guarantees the
-/// invariant `team_cut + partner_cut == total_fee` holds exactly without a
-/// double-rounding ambiguity. The `pool.ak` Underwrite / AcceptCancellation
-/// / BatchUnderwrite branches all read this helper, so changing the
-/// rounding convention here is a validator-hash-rotating event.
+/// **V12.2 signature breaking change.** V12's helper took
+/// `(premium, protocol_fee_bps, partner_share_bps)`; V12.2's takes
+/// `(fee_total, partner_share_bps, min_utxo_lovelace)`. V12.2 wants the
+/// floored `fee_total` to be computed once at the call site (so the
+/// validator and off-chain math share the same input to the split), and
+/// the silent absorb rule needs `min_utxo_lovelace` as input. Wave 2.5/2.6
+/// updates the three validator branches in `validators/pool.ak`.
+///
+/// See V12.2 spec §10.3 for the absorb-security analysis.
 pub fn calculate_protocol_fee_split(
-  premium: Int,
-  protocol_fee_bps: Int,
+  fee_total: Int,
   partner_share_bps: Int,
+  min_utxo_lovelace: Int,
 ) -> (Int, Int) {
-  let total_fee = calculate_protocol_fee(premium, protocol_fee_bps)
-  let partner_cut = total_fee * partner_share_bps / 10_000
-  let team_cut = total_fee - partner_cut
+  let partner_cut_raw = fee_total * partner_share_bps / 10_000
+  let partner_cut =
+    if partner_cut_raw >= min_utxo_lovelace {
+      partner_cut_raw
+    } else {
+      0
+    }
+  let team_cut = fee_total - partner_cut
   (team_cut, partner_cut)
 }
 
@@ -333,53 +388,183 @@ test treasury_cut_matches_fee_times_share() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12] Protocol Fee Split Tests
-//
-// TDD-first: these tests were written before `calculate_protocol_fee_split`
-// (RED). The four spec-mandated cases plus two extra cross-checks below
-// (sum-equals-total + Some(addr)/0-bps distinction).
+// [v12.2] Hybrid Fee Tests
+// V12 used `(premium, fee_bps, partner_share_bps)`; V12.2 takes the floored
+// `fee_total` directly + `min_utxo_lovelace` for the silent absorb rule.
 // ---------------------------------------------------------------------------
 
-test fee_split_solo_policy_routes_full_fee_to_team() {
-  // 100 ADA premium, 2% fee = 2 ADA, no partner -> team gets full 2 ADA.
-  let (team, partner) = calculate_protocol_fee_split(100_000_000, 200, 0)
+test fee_total_floors_to_min_utxo_on_small_premium() {
+  // 20 ADA premium, 2% fee = 0.4 ADA raw, floors to 2 ADA fee_total.
+  calculate_fee_total(20_000_000, 200, 2_000_000) == 2_000_000
+}
+
+test fee_total_passes_through_on_threshold_premium() {
+  // 100 ADA premium, 2% fee = 2 ADA raw, exactly at floor.
+  calculate_fee_total(100_000_000, 200, 2_000_000) == 2_000_000
+}
+
+test fee_total_above_floor_on_500_ada() {
+  // 500 ADA premium, 2% fee = 10 ADA raw, above floor.
+  calculate_fee_total(500_000_000, 200, 2_000_000) == 10_000_000
+}
+
+test net_pool_growth_on_20_ada_premium_yields_18_ada() {
+  // 20 ADA premium, 2 ADA floored fee → net = 18 ADA.
+  calculate_net_pool_growth(20_000_000, 200, 2_000_000) == 18_000_000
+}
+
+test net_pool_growth_on_100_ada_premium_yields_98_ada() {
+  // 100 ADA premium: raw_fee = floor = 2 ADA, net = 98 ADA.
+  calculate_net_pool_growth(100_000_000, 200, 2_000_000) == 98_000_000
+}
+
+test net_pool_growth_on_500_ada_premium_yields_490_ada() {
+  // 500 ADA premium: fee_total = 10 ADA, net = 490 ADA.
+  calculate_net_pool_growth(500_000_000, 200, 2_000_000) == 490_000_000
+}
+
+test split_solo_policy_routes_full_fee_total_to_team() {
+  // fee_total = 2 ADA, no partner → team = 2, partner = 0.
+  let (team, partner) =
+    calculate_protocol_fee_split(2_000_000, 0, 2_000_000)
   team == 2_000_000 && partner == 0
 }
 
-test fee_split_partner_at_max_cap() {
-  // 100 ADA premium, 2% fee = 2 ADA, partner @ 20% -> partner 0.4, team 1.6.
-  let (team, partner) = calculate_protocol_fee_split(100_000_000, 200, 2_000)
-  team == 1_600_000 && partner == 400_000
+test split_partner_at_max_cap_500_ada_premium_absorbs() {
+  // 500 ADA premium, fee_total = 10 ADA, partner @ 20% (2000 bps):
+  //   partner_cut_raw = 10 × 2000 / 10_000 = 2 ADA (exactly at floor)
+  // 2 >= min_utxo, so partner_cut = 2, team_cut = 8.
+  let (team, partner) =
+    calculate_protocol_fee_split(10_000_000, 2_000, 2_000_000)
+  team == 8_000_000 && partner == 2_000_000
 }
 
-test fee_split_zero_premium_yields_zero_both_sides() {
-  let (team, partner) = calculate_protocol_fee_split(0, 200, 1_000)
+test split_silent_absorb_on_500_ada_premium_15pct_partner() {
+  // 500 ADA premium, fee_total = 10 ADA, partner @ 15% (1500 bps):
+  //   partner_cut_raw = 10 × 1500 / 10_000 = 1.5 ADA (below floor)
+  // partner_cut absorbed → 0, team_cut = full 10 ADA.
+  let (team, partner) =
+    calculate_protocol_fee_split(10_000_000, 1_500, 2_000_000)
+  team == 10_000_000 && partner == 0
+}
+
+test split_partner_above_floor_on_1000_ada_premium_15pct() {
+  // 1000 ADA premium, fee_total = 20 ADA, partner @ 15%:
+  //   partner_cut_raw = 20 × 1500 / 10_000 = 3 ADA (above floor)
+  // partner_cut = 3, team_cut = 17.
+  let (team, partner) =
+    calculate_protocol_fee_split(20_000_000, 1_500, 2_000_000)
+  team == 17_000_000 && partner == 3_000_000
+}
+
+test split_sum_equals_fee_total_silently_absorbed() {
+  // Invariant: team + partner == fee_total ALWAYS, regardless of absorb.
+  let fee_total = 12_345_678
+  let (team, partner) =
+    calculate_protocol_fee_split(fee_total, 1_337, 2_000_000)
+  team + partner == fee_total
+}
+
+test split_zero_fee_yields_zero_both_sides() {
+  // fee_total = 0 (degenerate; should never happen because fee_total has
+  // a min_utxo floor). Defensive case for early-return safety.
+  let (team, partner) = calculate_protocol_fee_split(0, 2_000, 2_000_000)
   team == 0 && partner == 0
 }
 
-test fee_split_zero_fee_yields_zero_both_sides() {
-  // protocol_fee_bps = 0 with partner_share_bps non-zero must yield (0, 0).
-  // Guards against a degenerate path where partner_cut is computed against
-  // a non-existent fee base.
-  let (team, partner) = calculate_protocol_fee_split(100_000_000, 0, 2_000)
-  team == 0 && partner == 0
-}
-
-test fee_split_sum_equals_total_fee_exact() {
-  // Cross-check the invariant: split sums exactly to the total fee
-  // regardless of partner_share_bps. Uses a mid-range bps (1337) to provoke
-  // any rounding drift that would arise if both halves were independently
-  // floored. The team-by-subtraction convention guarantees exact sum.
-  let premium = 250_000_000
-  let total_fee = calculate_protocol_fee(premium, 200)
-  let (team, partner) = calculate_protocol_fee_split(premium, 200, 1_337)
-  team + partner == total_fee
-}
-
-test fee_split_partner_share_zero_routes_full_fee_to_team() {
-  // Distinct from solo: partner_address may be Some(_) in the calling
-  // datum, but share == 0. The split function does not see the address;
-  // it just respects the bps. Same numeric result as solo.
-  let (team, partner) = calculate_protocol_fee_split(100_000_000, 200, 0)
+test split_partner_share_zero_routes_full_fee_to_team() {
+  // partner_address may be Some(_) in the calling datum, but share == 0.
+  // Same numeric result as solo: team = fee_total, partner = 0.
+  let (team, partner) =
+    calculate_protocol_fee_split(2_000_000, 0, 2_000_000)
   team == 2_000_000 && partner == 0
+}
+
+test net_premium_v12_compat_unchanged_for_large_premium() {
+  // The legacy V12 helper continues to compile + work; for large premium
+  // its output equals calculate_net_pool_growth (since fee_total == raw_fee
+  // when raw_fee >= min_utxo).
+  net_premium(500_000_000, 200) == calculate_net_pool_growth(
+    500_000_000,
+    200,
+    2_000_000,
+  )
+}
+
+test net_premium_v12_diverges_from_v12_2_on_small_premium() {
+  // Below the 100-ADA threshold, V12's net_premium gives raw arithmetic
+  // (no floor) while V12.2's calculate_net_pool_growth applies the floor.
+  // Concrete: 20 ADA premium → V12 net = 19.6, V12.2 net = 18.
+  let v12_net = net_premium(20_000_000, 200)
+  let v12_2_net = calculate_net_pool_growth(20_000_000, 200, 2_000_000)
+  v12_net == 19_600_000 && v12_2_net == 18_000_000 && v12_net != v12_2_net
+}
+
+// ---------------------------------------------------------------------------
+// [v12.2 §8] Property-style invariant tests
+// ---------------------------------------------------------------------------
+
+test invariant_1_premium_conservation_holds() {
+  // premium == net_pool_growth + team_cut + partner_cut.
+  let premium = 12_345_678
+  let fee_total = calculate_fee_total(premium, 200, 2_000_000)
+  let (team, partner) =
+    calculate_protocol_fee_split(fee_total, 1_500, 2_000_000)
+  let net = premium - fee_total
+  premium == net + team + partner
+}
+
+test invariant_2_fee_floor_holds_on_small_premium() {
+  let fee_total = calculate_fee_total(20_000_000, 200, 2_000_000)
+  fee_total >= 2_000_000 && fee_total >= 400_000
+}
+
+test invariant_2_fee_floor_holds_on_large_premium() {
+  let fee_total = calculate_fee_total(500_000_000, 200, 2_000_000)
+  fee_total >= 2_000_000 && fee_total >= 10_000_000
+}
+
+test invariant_3_partner_consistency_silent_absorb_at_500() {
+  let (_, partner) =
+    calculate_protocol_fee_split(10_000_000, 1_500, 2_000_000)
+  partner == 0 || partner >= 2_000_000
+}
+
+test invariant_3_partner_consistency_above_floor_at_1000() {
+  let (_, partner) =
+    calculate_protocol_fee_split(20_000_000, 1_500, 2_000_000)
+  partner == 0 || partner >= 2_000_000
+}
+
+test invariant_4_team_safe_silent_absorb_path() {
+  let fee_total = calculate_fee_total(100_000_000, 200, 2_000_000)
+  let (team, _) =
+    calculate_protocol_fee_split(fee_total, 2_000, 2_000_000)
+  team >= 2_000_000
+}
+
+test invariant_4_team_safe_partner_pays_path() {
+  let fee_total = calculate_fee_total(1_000_000_000, 200, 2_000_000)
+  let (team, partner) =
+    calculate_protocol_fee_split(fee_total, 2_000, 2_000_000)
+  team >= 2_000_000 && team == 16_000_000 && partner == 4_000_000
+}
+
+test invariant_4_team_safe_solo_path() {
+  let fee_total = calculate_fee_total(20_000_000, 200, 2_000_000)
+  let (team, _) =
+    calculate_protocol_fee_split(fee_total, 0, 2_000_000)
+  team >= 2_000_000
+}
+
+test invariant_7_pool_delta_20_ada() {
+  calculate_net_pool_growth(20_000_000, 200, 2_000_000) == 18_000_000
+}
+
+test invariant_7_pool_delta_500_ada() {
+  calculate_net_pool_growth(500_000_000, 200, 2_000_000) == 490_000_000
+}
+
+test invariant_7_pool_delta_breakeven_at_100_ada() {
+  calculate_net_pool_growth(100_000_000, 200, 2_000_000) == 98_000_000
 }

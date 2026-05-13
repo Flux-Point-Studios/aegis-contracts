@@ -1,7 +1,7 @@
 use aegis/oracle.{resolve_oracle_price}
 use aegis/pricing.{calculate_refund}
 use aegis/types.{
-  AegisSelf, BatchClaim, BatchExpire, Cancel, Charli3, Claim, Expire,
+  AegisSelf, BatchClaim, BatchExpire, Cancel, Charli3, Claim, Expire, Indigo,
   OracleProvider, Orcfax, PolicyDatum, PolicyRedeemer, cancellation_window,
 }
 use aegis/validation.{
@@ -82,10 +82,18 @@ fn batch_oracles_uniform(
                     let (sent_provider, sent_nft) = sentinel
                     let (this_provider, this_nft) = pair
                     let same_provider =
+                      // [v12.2 Round-7 R7-B] Indigo added as 4th arm.
+                      // Original V12 switch listed only the 3 prior
+                      // providers; an Indigo BatchClaim fell through
+                      // to `_ -> False` and the entire batch tx
+                      // rejected. Single-policy Indigo claim was
+                      // unaffected — the `seen` sentinel guard skips
+                      // the equality check for the first element.
                       when (sent_provider, this_provider) is {
                         (Charli3, Charli3) -> True
                         (Orcfax, Orcfax) -> True
                         (AegisSelf, AegisSelf) -> True
+                        (Indigo, Indigo) -> True
                         _ -> False
                       }
                     (

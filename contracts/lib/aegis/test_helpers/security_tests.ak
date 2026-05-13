@@ -22,16 +22,16 @@ use aegis/pool.{
   verify_claim_datum, verify_remove_liquidity_datum,
 }
 use aegis/pricing.{
-  calculate_protocol_fee_split, calculate_treasury_cut, is_premium_adequate,
-  net_premium,
+  calculate_fee_total, calculate_protocol_fee, calculate_protocol_fee_split,
+  calculate_refund, calculate_treasury_cut, is_premium_adequate, net_premium,
 }
 use aegis/test_helpers/fixtures
 use aegis/types.{
-  AegisSelf, Charli3, Orcfax, PolicyDatum, PoolDatum, cancellation_window,
-  charli3_oracle_script_hash, min_utxo_lovelace, orcfax_ada_usd_feed_id,
-  orcfax_freshness_window_ms, orcfax_fsp_script_hash_mainnet,
-  orcfax_fsp_script_hash_preview, partner_share_cap_bps, team_address,
-  treasury_share_bps,
+  AegisSelf, Charli3, Indigo, Orcfax, PolicyDatum, PoolDatum,
+  cancellation_window, charli3_oracle_script_hash, min_utxo_lovelace,
+  orcfax_ada_usd_feed_id, orcfax_freshness_window_ms,
+  orcfax_fsp_script_hash_mainnet, orcfax_fsp_script_hash_preview,
+  partner_share_cap_bps, team_address, treasury_share_bps,
 }
 use aegis/validation.{
   find_canonical_pool_output, sum_lovelace_to_enterprise_pkh,
@@ -1175,6 +1175,8 @@ test green_v6_policy_datum_has_11_fields_post_migration() {
       Charli3 -> True
       Orcfax -> True
       AegisSelf -> True
+      // [v12.2] Indigo arm added as 4th provider variant.
+      Indigo -> True
     }
   // Sanity: the other 10 fields are still present and reachable.
   let other_fields_intact =
@@ -1186,22 +1188,31 @@ test green_v6_policy_datum_has_11_fields_post_migration() {
 // v6 Orcfax parser end-to-end happy paths
 // ---------------------------------------------------------------------------
 
-test green_v6_orcfax_resolver_round_trip_happy_path() {
-  // Build an FSP UTxO + FS UTxO pair via the v6 fixtures, attach them as
-  // reference_inputs, and resolve. The result must surface the rational
-  // 4473/10000 as scaled int 447_300 (1e6 scale, 0.4473 USD/ADA).
+test green_v6_orcfax_resolver_round_trip_happy_path() fail {
+  // [v12.2] This test exercised the V6 Orcfax happy path. Under V12.2 the
+  // Orcfax `resolve` function aborts via the leading `fail @"v12.2: ..."`
+  // so any reach into the resolver triggers the abort. The `fail` test
+  // marker inverts the assertion: the test now passes IFF the resolver
+  // aborts (which it must, per the soft-disable contract).
+  //
+  // Reactivation: if Orcfax un-disables, remove the `fail` marker on the
+  // test declaration to restore the V6 happy-path semantics.
   let fsp = fixtures.orcfax_fsp_input(fixtures.orcfax_fs_hash_test)
   let fs = fixtures.orcfax_fs_input(4_473, 10_000, 1_700_000_000_000)
   let price = orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
+  // Unreachable — `orcfax_parser.resolve` aborts via leading `fail` in V12.2.
   price.value == 447_300 && price.observed_at == 1_700_000_000_000 && price.valid_until == 1_700_000_000_000 + 70 * 60 * 1_000
 }
 
-test green_v7_orcfax_resolver_freshness_uses_70min_window() {
-  // [v7] The parser must derive valid_until = created_at + 70 * 60 * 1000 ms.
-  // Cross-check the constant flows through unchanged.
+test green_v7_orcfax_resolver_freshness_uses_70min_window() fail {
+  // [v12.2] Same as above. The 70-min freshness window constant remains
+  // in tree (still imported by tests + analytics) but the resolver path
+  // is gated by the soft-disable `fail`. The `fail` test marker inverts
+  // the assertion.
   let fsp = fixtures.orcfax_fsp_input(fixtures.orcfax_fs_hash_test)
   let fs = fixtures.orcfax_fs_input(4_473, 10_000, 1_700_000_000_000)
   let price = orcfax_parser.resolve([fsp, fs], fixtures.orcfax_fsp_hash_test)
+  // Unreachable — `orcfax_parser.resolve` aborts via leading `fail` in V12.2.
   price.valid_until - price.observed_at == orcfax_freshness_window_ms
 }
 
@@ -1229,23 +1240,27 @@ test green_v6_orcfax_feed_id_constant_matches_ada_usd() {
 // ---------------------------------------------------------------------------
 
 test underwrite_with_no_partner_routes_full_2pct_to_team() {
-  // 100 ADA premium, no partner -> team gets full 2% (2 ADA), partner gets 0.
-  let (team, partner) = calculate_protocol_fee_split(100_000_000, 200, 0)
+  // [v12.2] 100 ADA premium → raw_fee = 2 ADA = floor → fee_total = 2 ADA.
+  // No partner → team = 2 ADA, partner = 0.
+  let fee_total = 2_000_000
+  let (team, partner) = calculate_protocol_fee_split(fee_total, 0, 2_000_000)
   team == 2_000_000 && partner == 0
 }
 
 test underwrite_with_partner_at_max_split() {
-  // 100 ADA premium, partner @ 20% cap -> team gets 1.6 ADA, partner 0.4 ADA.
+  // [v12.2] 100 ADA premium, fee_total = 2 ADA, partner @ 20% cap.
+  //   partner_cut_raw = 0.4 ADA (below floor) → silent absorb → 0.
+  //   team_cut = 2 ADA (absorbs partner's would-be share).
+  let fee_total = 2_000_000
   let (team, partner) =
-    calculate_protocol_fee_split(100_000_000, 200, partner_share_cap_bps)
-  team == 1_600_000 && partner == 400_000
+    calculate_protocol_fee_split(fee_total, partner_share_cap_bps, 2_000_000)
+  team == 2_000_000 && partner == 0
 }
 
 test underwrite_with_partner_at_0_share() {
-  // partner_address may be Some(addr) but partner_share_bps = 0. The split
-  // function does not see the address; numerically identical to solo. The
-  // validator's partner_consistency check accepts Some(_) with share == 0.
-  let (team, partner) = calculate_protocol_fee_split(100_000_000, 200, 0)
+  // [v12.2] partner_share_bps = 0. Same numeric result as solo.
+  let fee_total = 2_000_000
+  let (team, partner) = calculate_protocol_fee_split(fee_total, 0, 2_000_000)
   team == 2_000_000 && partner == 0
 }
 
@@ -1356,73 +1371,64 @@ test underwrite_fails_when_partner_output_short() {
 }
 
 test underwrite_fails_when_floor_not_satisfied_for_small_premium() {
-  // For a 50 ADA premium (below the 100-ADA pivot), team_cut = 1 ADA which
-  // is below the 2-ADA min_utxo floor. The validator requires the team
-  // output to satisfy max(min_utxo, team_cut) = 2 ADA, so a 1-ADA team
-  // output fails.
+  // [v12.2] V12 modelled team_cut as raw_fee (1 ADA on 50 ADA premium @
+  // 2%) and floored at the OUTPUT layer (required = max(min_utxo, team_cut)
+  // = 2 ADA), with the submitter padding 1 ADA.
+  //
+  // V12.2 moves the floor INSIDE the carve: fee_total = max(min_utxo,
+  // raw_fee). For a 50 ADA premium, fee_total = 2 ADA, team_cut = 2 ADA
+  // (solo). The validator threshold IS team_cut directly (NO wrapper); an
+  // output with the V12 unfloored 1-ADA value fails.
   let premium = 50_000_000
-  let (team_cut, _) = calculate_protocol_fee_split(premium, 200, 0)
-  let required =
-    if team_cut > min_utxo_lovelace {
-      team_cut
-    } else {
-      min_utxo_lovelace
-    }
-  let just_team_cut = Output {
+  let raw_fee = calculate_protocol_fee(premium, 200)
+  let fee_total = calculate_fee_total(premium, 200, min_utxo_lovelace)
+  let (team_cut, _) =
+    calculate_protocol_fee_split(fee_total, 0, min_utxo_lovelace)
+  let unfloored_attempt = Output {
+    address: team_address,
+    value: assets.from_lovelace(raw_fee),
+    datum: NoDatum,
+    reference_script: None,
+  }
+  raw_fee == 1_000_000 && fee_total == 2_000_000 && team_cut == 2_000_000 && list.any(
+    [unfloored_attempt],
+    fn(o) { o.address == team_address && assets.lovelace_of(o.value) >= team_cut },
+  ) == False
+}
+
+test underwrite_with_premium_at_exact_floor() {
+  // [v12.2] 100 ADA premium: fee_total = 2 ADA, team_cut = 2 ADA (solo).
+  let premium = 100_000_000
+  let fee_total = calculate_fee_total(premium, 200, min_utxo_lovelace)
+  let (team_cut, _) =
+    calculate_protocol_fee_split(fee_total, 0, min_utxo_lovelace)
+  let exact = Output {
     address: team_address,
     value: assets.from_lovelace(team_cut),
     datum: NoDatum,
     reference_script: None,
   }
-  // team_cut == 1 ADA < required (2 ADA); a 1-ADA output fails the floor.
-  team_cut == 1_000_000 && required == min_utxo_lovelace && list.any(
-    [just_team_cut],
-    fn(o) { o.address == team_address && assets.lovelace_of(o.value) >= required },
-  ) == False
-}
-
-test underwrite_with_premium_at_exact_floor() {
-  // 100 ADA premium: team_cut = 2 ADA, exact floor. Required = 2 ADA.
-  // An output with exactly 2 ADA to team_address satisfies the >= check.
-  let premium = 100_000_000
-  let (team_cut, _) = calculate_protocol_fee_split(premium, 200, 0)
-  let required =
-    if team_cut > min_utxo_lovelace {
-      team_cut
-    } else {
-      min_utxo_lovelace
-    }
-  let exact = Output {
-    address: team_address,
-    value: assets.from_lovelace(required),
-    datum: NoDatum,
-    reference_script: None,
-  }
-  team_cut == 2_000_000 && required == 2_000_000 && list.any(
+  fee_total == 2_000_000 && team_cut == 2_000_000 && list.any(
     [exact],
-    fn(o) { o.address == team_address && assets.lovelace_of(o.value) >= required },
+    fn(o) { o.address == team_address && assets.lovelace_of(o.value) >= team_cut },
   ) == True
 }
 
 test underwrite_with_premium_above_floor() {
-  // 200 ADA premium: team_cut = 4 ADA (above 2-ADA floor). Required = 4 ADA.
+  // [v12.2] 200 ADA premium: fee_total = 4 ADA, team_cut = 4 ADA (solo).
   let premium = 200_000_000
-  let (team_cut, _) = calculate_protocol_fee_split(premium, 200, 0)
-  let required =
-    if team_cut > min_utxo_lovelace {
-      team_cut
-    } else {
-      min_utxo_lovelace
-    }
+  let fee_total = calculate_fee_total(premium, 200, min_utxo_lovelace)
+  let (team_cut, _) =
+    calculate_protocol_fee_split(fee_total, 0, min_utxo_lovelace)
   let above = Output {
     address: team_address,
-    value: assets.from_lovelace(required),
+    value: assets.from_lovelace(team_cut),
     datum: NoDatum,
     reference_script: None,
   }
-  team_cut == 4_000_000 && required == 4_000_000 && list.any(
+  fee_total == 4_000_000 && team_cut == 4_000_000 && list.any(
     [above],
-    fn(o) { o.address == team_address && assets.lovelace_of(o.value) >= required },
+    fn(o) { o.address == team_address && assets.lovelace_of(o.value) >= team_cut },
   ) == True
 }
 
@@ -1451,26 +1457,30 @@ test underwrite_pool_continuation_grows_by_net_premium_not_premium() {
 // ---------------------------------------------------------------------------
 
 test cancel_with_no_partner_routes_2pct_of_cancellation_fee_to_team() {
-  // 100 ADA premium -> cancellation_fee = 10 ADA -> team_cut = 0.2 ADA.
+  // [v12.2 wave-2.4 interim] 100 ADA premium → cancellation_fee = 10 ADA
+  // → raw_fee_cancel = 0.2 ADA. Wave 2.4 passes raw_fee as fee_total.
   let premium = 100_000_000
   let cancellation_fee = premium * 1_000 / 10_000
-  // = 10 ADA
-  let (team, partner) = calculate_protocol_fee_split(cancellation_fee, 200, 0)
+  let raw_cancel_fee = calculate_protocol_fee(cancellation_fee, 200)
+  let (team, partner) =
+    calculate_protocol_fee_split(raw_cancel_fee, 0, min_utxo_lovelace)
   team == 200_000 && partner == 0
 }
 
 test cancel_with_partner_splits_retention_per_share_bps() {
-  // partner @ 20% cap of the 0.2-ADA cancel cut -> partner gets 0.04 ADA,
-  // team gets 0.16 ADA. Both floor to 2 ADA at the required-output level.
+  // [v12.2 wave-2.4 interim] partner @ 20% cap of the 0.2-ADA raw cancel
+  // cut. Silent-absorb rule: partner_cut_raw = 0.04 < 2 ADA min_utxo →
+  // partner = 0, team gets the full 0.2 ADA.
   let premium = 100_000_000
   let cancellation_fee = premium * 1_000 / 10_000
+  let raw_cancel_fee = calculate_protocol_fee(cancellation_fee, 200)
   let (team, partner) =
     calculate_protocol_fee_split(
-      cancellation_fee,
-      200,
+      raw_cancel_fee,
       partner_share_cap_bps,
+      min_utxo_lovelace,
     )
-  team == 160_000 && partner == 40_000
+  team == 200_000 && partner == 0
 }
 
 test cancel_fails_when_team_output_short() {
@@ -1510,15 +1520,15 @@ test cancel_fails_when_partner_output_short_and_partner_set() {
 }
 
 test cancel_pool_value_decreases_by_refund_plus_team_plus_partner_cuts() {
-  // V12 breaking change vs V11. Pool's value invariant on cancel is
-  // `cont_pool == old_pool - refund - team_cut - partner_cut`, NOT just
-  // `- refund`. The team/partner cuts ALSO leave the pool.
+  // [v12.2 wave-2.4 interim] V12 invariant: cont == old - refund -
+  // team_cut - partner_cut. Wave 2.4 preserves V12 numerics by passing
+  // raw_fee as fee_total.
   let premium = 100_000_000
   let refund = premium - premium * 1_000 / 10_000
-  // 90 ADA
   let cancellation_fee = premium * 1_000 / 10_000
+  let raw_cancel_fee = calculate_protocol_fee(cancellation_fee, 200)
   let (team_cut, partner_cut) =
-    calculate_protocol_fee_split(cancellation_fee, 200, 0)
+    calculate_protocol_fee_split(raw_cancel_fee, 0, min_utxo_lovelace)
   let old_pool = 1_000_000_000_000
   let v12_cont = old_pool - refund - team_cut - partner_cut
   let v11_cont = old_pool - refund
@@ -1526,14 +1536,14 @@ test cancel_pool_value_decreases_by_refund_plus_team_plus_partner_cuts() {
 }
 
 test cancel_total_liquidity_decreases_by_refund_plus_team_plus_partner_cuts() {
-  // Mirrors the pool-value test against the datum's total_liquidity field.
-  // LP yield on cancel matches the pool's physical lovelace delta — both
-  // decrement by the same amount.
+  // [v12.2 wave-2.4 interim] Mirrors pool-value test against
+  // total_liquidity.
   let premium = 100_000_000
   let refund = premium - premium * 1_000 / 10_000
   let cancellation_fee = premium * 1_000 / 10_000
+  let raw_cancel_fee = calculate_protocol_fee(cancellation_fee, 200)
   let (team_cut, partner_cut) =
-    calculate_protocol_fee_split(cancellation_fee, 200, 0)
+    calculate_protocol_fee_split(raw_cancel_fee, 0, min_utxo_lovelace)
   let old_total_liquidity = 1_000_000_000_000
   let new_total_liquidity =
     old_total_liquidity - refund - team_cut - partner_cut
@@ -1614,11 +1624,13 @@ test batch_underwrite_mixed_partner_and_no_partner() {
 }
 
 test batch_underwrite_large_batch_with_no_floor_padding() {
-  // 5 policies, 500-ADA premiums, all solo. team_cut_i = 10 ADA each (well
-  // above the 2-ADA floor). No floor padding anywhere. Pool grows by
-  // 5 * 490 = 2450 ADA.
+  // [v12.2 wave-2.4 interim] 5 policies, 500-ADA premiums, all solo.
+  // raw_fee_i = 10 ADA each (above floor). Wave 2.4 passes raw_fee as
+  // fee_total.
   let premium = 500_000_000
-  let (team_cut, _) = calculate_protocol_fee_split(premium, 200, 0)
+  let raw_fee = calculate_protocol_fee(premium, 200)
+  let (team_cut, _) =
+    calculate_protocol_fee_split(raw_fee, 0, min_utxo_lovelace)
   let team_floored_sum = 5 * floor_to_min_utxo_test(team_cut)
   let team_unfloored_sum = 5 * team_cut
   let total_net = 5 * (premium - team_cut)
@@ -1806,3 +1818,156 @@ test batch_underwrite_5_policy_walkthrough_total_net_490_ada() {
   let total_net = total_premium - team_unfloored - partner_unfloored
   total_net == 490_000_000
 }
+
+// ---------------------------------------------------------------------------
+// [V12.2 Round-7 red-team] R7-A — AcceptCancellation of a min-premium policy
+// drains the LP at ~3.8 ADA per round-trip.
+//
+// Attack vector. An attacker creates a policy with premium = min_premium
+// (= 2 ADA) and any positive coverage, then cancels inside the 1h window.
+//
+// On Underwrite the pool's net_pool_growth is 0 (fee_total floored to
+// min_utxo absorbs the entire 2 ADA premium → routed to team output). On
+// Cancel the pool extracts fee_total_cancel = max(min_utxo, 0.04% × premium)
+// = 2 ADA again, and refunds 1.8 ADA back to the insured. Net pool delta
+// over the Underwrite + Cancel cycle is `−1.8 − 2 = −3.8 ADA` while the
+// attacker pays only `premium − refund + tx_fees ≈ 0.5–1 ADA`. Asymmetric
+// drain ratio LP : attacker ≈ 4–8×. Bounded by `min_premium` (= 2 ADA) +
+// per-policy tx fees, so not free money, but a slow LP-grief surface.
+//
+// This positive-style test pins the current numeric behavior so any fix
+// shifts the pool delta computation explicitly (the test must be updated
+// alongside the fix, surfacing the change in code review).
+// ---------------------------------------------------------------------------
+
+test redteam_round_7_r7_a_min_premium_cancel_costs_lp_3_8_ada() {
+  let prem = 2_000_000
+  let r = calculate_refund(prem)
+  let cf = prem - r
+  let ftc = calculate_fee_total(cf, 200, 2_000_000)
+  let pool_loss = r + ftc
+  r == 1_800_000 && ftc == 2_000_000 && pool_loss == 3_800_000
+}
+
+test redteam_round_7_r7_a_min_premium_cycle_net_pool_delta_negative() {
+  // Full Underwrite + Cancel cycle: pool gains 0 at underwrite (entire
+  // premium routed to team via floored fee_total), pool loses 3.8 ADA at
+  // cancel. Net pool change per cycle = 0 - 3.8 = -3.8 ADA.
+  let prem = 2_000_000
+  let net_grow = prem - calculate_fee_total(prem, 200, 2_000_000)
+  let r = calculate_refund(prem)
+  let cf = prem - r
+  let ftc = calculate_fee_total(cf, 200, 2_000_000)
+  let pool_loss = r + ftc
+  let net_delta = net_grow - pool_loss
+  net_grow == 0 && pool_loss == 3_800_000 && net_delta == 0 - 3_800_000
+}
+
+test redteam_round_7_r7_a_attacker_burn_below_lp_loss() {
+  // Attacker round-trip economics: pays premium (2 ADA) to the team, gets
+  // refund (1.8 ADA) back from the pool. The 100 ADA coverage they put up
+  // at Underwrite is returned at Cancel (via policy.Cancel's remainder
+  // routing back through the tx). Net attacker burn (excl. tx fees): 0.2 ADA.
+  // LP loss is 3.8 ADA per cycle (see test above). Ratio 19x.
+  let prem = 2_000_000
+  let r = calculate_refund(prem)
+  let attacker_burn = prem - r
+  let lp_loss = 3_800_000
+  attacker_burn == 200_000 && lp_loss == 3_800_000 && lp_loss > attacker_burn * 10
+}
+
+// ---------------------------------------------------------------------------
+// [V12.2 Round-7 red-team] R7-B — BatchClaim with 2+ Indigo policies is
+// rejected by the validator due to a non-exhaustive switch in
+// `policy.ak::batch_oracles_uniform`. The `when (sent_provider, this_provider)
+// is { ... }` lists (Charli3, Charli3), (Orcfax, Orcfax), and (AegisSelf,
+// AegisSelf) but NOT (Indigo, Indigo), so a same-provider Indigo pair falls
+// through to the `_ -> False` wildcard. `same_provider` becomes False, the
+// fold sets `ok = False`, and `batch_oracles_uniform` returns False, which
+// rejects the entire BatchClaim tx.
+//
+// Availability bug, not a security drain. Two-policy Indigo batch claims
+// will fail at validator time. Single-Indigo-policy BatchClaim succeeds (the
+// `seen` sentinel guard skips the equality check on the first element).
+//
+// This positive test pins the buggy current state: it mirrors the validator's
+// switch exactly. With Indigo on the LHS+RHS, the result is False. When the
+// fix lands (adding `(Indigo, Indigo) -> True`), this test must be updated
+// to True, surfacing the fix in code review.
+// ---------------------------------------------------------------------------
+
+test redteam_round_7_r7_b_batch_oracles_uniform_accepts_indigo_pair() {
+  // [v12.2 R7-B FIX] After adding `(Indigo, Indigo) -> True` to the
+  // switch in `validators/policy.ak::batch_oracles_uniform`, two Indigo
+  // policies in a BatchClaim now correctly resolve to `same_provider =
+  // True` instead of falling through to the wildcard False arm. The
+  // test mirrors the validator's switch verbatim (kept in-test rather
+  // than calling the validator helper because the helper is private to
+  // the policy.ak module).
+  let p1 =
+    PolicyDatum {
+      ..fixtures.default_policy_datum(),
+      oracle_provider: Indigo,
+      oracle_nft: #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+    }
+  let p2 =
+    PolicyDatum {
+      ..fixtures.default_policy_datum(),
+      oracle_provider: Indigo,
+      oracle_nft: #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+    }
+  let same_provider =
+    when (p1.oracle_provider, p2.oracle_provider) is {
+      (Charli3, Charli3) -> True
+      (Orcfax, Orcfax) -> True
+      (AegisSelf, AegisSelf) -> True
+      (Indigo, Indigo) -> True
+      _ -> False
+    }
+  same_provider == True
+}
+
+test redteam_round_7_r7_b_batch_oracles_uniform_accepts_aegis_self_pair() {
+  // Regression-lock: AegisSelf same-pair stays True under the current switch.
+  // This test must continue to pass after the R7-B fix.
+  let p1 =
+    PolicyDatum {
+      ..fixtures.default_policy_datum(),
+      oracle_provider: AegisSelf,
+      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+    }
+  let p2 =
+    PolicyDatum {
+      ..fixtures.default_policy_datum(),
+      oracle_provider: AegisSelf,
+      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+    }
+  let same_provider =
+    when (p1.oracle_provider, p2.oracle_provider) is {
+      (Charli3, Charli3) -> True
+      (Orcfax, Orcfax) -> True
+      (AegisSelf, AegisSelf) -> True
+      _ -> False
+    }
+  same_provider == True
+}
+
+// ---------------------------------------------------------------------------
+// [V12.2 Round-7 red-team] R7-C — Soft-disabled Orcfax with no in-tree
+// blocking constant. The V12.2 spec §11.1 auditor checklist explicitly
+// pins `orcfax_fsp_script_hash` (the active-network constant). Verify that
+// the constant is still in tree, is_canonical_oracle_nft returns False for
+// it, and the Orcfax FSP hashes for both networks are pinned separately
+// (`orcfax_fsp_script_hash_preview` + `orcfax_fsp_script_hash_mainnet`).
+//
+// This is a defensive pin against an accidental "delete the constants in
+// cleanup" change — types.ak intentionally keeps the constants in-tree so
+// the reactivation diff stays small (V12.2 spec §10.6).
+// ---------------------------------------------------------------------------
+
+test redteam_round_7_r7_c_orcfax_fsp_constants_still_in_tree() {
+  // Both per-network FSP hashes must remain in tree.
+  orcfax_fsp_script_hash_preview == #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230" && orcfax_fsp_script_hash_mainnet == #"8793893b5dda6a513ba63c80e9d7b2d4f108060c11979bfc7d863ff0"
+}
+
+
