@@ -2,7 +2,25 @@
 
 The audit report's Round-2 / Round-3 sections cite the on-chain transactions that **failed pre-fix attacks** to demonstrate exploits. This document is the converse: it catalogs the on-chain transactions that **succeeded** as intended, proving every user-facing validator branch executes correctly when given canonical inputs.
 
-Every transaction below is on Cardano preprod and verifiable via [preprod.cardanoscan.io](https://preprod.cardanoscan.io) or Blockfrost. All `valid_contract: true` (where applicable).
+Every transaction below is on Cardano preprod and verifiable via [preprod.cexplorer.io](https://preprod.cexplorer.io) or Blockfrost. All `valid_contract: true` (where applicable).
+
+> **V12.2 + R7 status (2026-05-12).** The latest live preprod deploy is **V12.2 + Round-7** at `feat/v12.2-hybrid-fee-and-aegis-self-only` HEAD `82b6ce0`. Deploy flow proven by the 5-tx redeploy sequence in §1.0 below (publish 3 ref scripts + mint pool NFT + init pool, all `valid_contract: true`). User-facing Underwrite / Claim / Cancel / BatchClaim under V12.2 + R7 will be exercised after the pool has been seeded with LP via `add_liquidity`; the green-path Underwrite txs catalogued in §2 below are from V11 / V12 deploys and remain valid as invariant proofs because the V12.2 + R7 changes are localized to (a) the protocol-fee carve in `pool.ak` (Hybrid floor), (b) the Indigo binding in `oracle/indigo.ak`, (c) the `policy.ak::batch_oracles_uniform` Indigo arm. Pool-value-conservation, A-022 policy-script-hash binding, A-024 positivity, A-025 single-policy-output count, A-026 oracle-NFT pin, A-027/L-006 redeemer-schema closure, and treasury-donation enforcement are all unchanged by V12.2 + R7.
+
+---
+
+## 1.0 V12.2 + R7 — operator redeploy (2026-05-12)
+
+V12.2 + R7 was deployed in 5 sequential txs from the operator wallet `addr_test1qrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t99zx9jlzjdkarq5v5n68e37hss6jgyuyutjn6dstg4evgwqfnsjd5`. Total spend ~169 ADA (100 ADA bootstrap + ~67 ADA ref-script min-utxo locks + ~1.2 ADA fees + ~0.2 ADA pool NFT).
+
+| Step | Tx hash | Purpose | `valid_contract` |
+|---|---|---|---|
+| 1 | [`aa611f722b776c7a568df27fbad2604289f482111167d08e7eb31195c573a736`](https://preprod.cexplorer.io/tx/aa611f722b776c7a568df27fbad2604289f482111167d08e7eb31195c573a736) | Publish ref `policy_validator` (`2e4eecf5…`, unparameterized, R7-B rotation) | true |
+| 2 | [`6f277e8d8acb0f41fddae807a23427b89d631b26aa7f50315bf08ecee3c76a8e`](https://preprod.cexplorer.io/tx/6f277e8d8acb0f41fddae807a23427b89d631b26aa7f50315bf08ecee3c76a8e) | Publish ref `pool_validator` (`87523125…`, parameterized over new policy hash) | true |
+| 3 | [`54df7a1a302d4384c02aebc6b5102c9e119d1e429d684a47d3964076c63ce21c`](https://preprod.cexplorer.io/tx/54df7a1a302d4384c02aebc6b5102c9e119d1e429d684a47d3964076c63ce21c) | Publish ref `lp_token_policy` (`02727d8e…`, parameterized over new pool hash) | true |
+| 4 | [`70d0c52d2738fe7ec41e52d579a7f6190fc24feae762612b309fba3d9d4418d2`](https://preprod.cexplorer.io/tx/70d0c52d2738fe7ec41e52d579a7f6190fc24feae762612b309fba3d9d4418d2) | Mint pool NFT (`1cde17c2…` / `AEGIS_POOL_V12_2_R7`) — one-shot parameterized over init UTxO + asset name | true (mint policy executes) |
+| 5 | [`168ed7a06e8aedd94419b9bfc0f5ce6e0985c25d0cd85c9c56c8219339eb7a06`](https://preprod.cexplorer.io/tx/168ed7a06e8aedd94419b9bfc0f5ce6e0985c25d0cd85c9c56c8219339eb7a06) | Init pool — locks NFT + 100 ADA bootstrap with fresh `PoolDatum { total_liquidity: 0, active_coverage: 0, lp_supply: 0, protocol_fee_bps: 200 }` at the new pool address | true |
+
+These prove the V12.2 + R7 parameterization cascade end-to-end. The new pool UTxO is now the canonical pool for all subsequent V12.2 + R7 user-facing flows.
 
 ---
 

@@ -49,3 +49,4 @@ _work_*
 # Build outputs (preserve plutus.json — that IS the deployable artifact)
 # Note: plutus.json IS committed because it's the parameter-free blueprint
 # that downstream tools and auditors verify against.
+aiken-out

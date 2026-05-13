@@ -2,13 +2,22 @@
 
 This document is for the external auditor. It explains the audit's scope, where to start, what previous internal red-team rounds have already found, and how to verify the on-chain remediations empirically.
 
+> **V12.2 + R7 update (2026-05-12).** The current mainnet candidate is **V12.2 + Round-7**, mirrored on branch `feat/v12.2-hybrid-fee-r7`. Authoritative reading order for the auditor:
+>
+> 1. **[`README.md`](../README.md)** (this repo root) — high-level scope, file tree, hash table, quick-start commands.
+> 2. **[`docs/v12.2_validator_upgrade.md`](v12.2_validator_upgrade.md)** — 14-section V12.2 + R7 spec, including §1 worked fee examples, §2.6 Indigo on-chain architecture, §3 per-redeemer changes, §7 + §7.1.1 env rotation, §8 test invariants, §13 spec-vs-code resolutions.
+> 3. **[`redteam/V12.2_ROUND_7_REPORT.md`](../redteam/V12.2_ROUND_7_REPORT.md)** — Round 7 report covering 2 fixed findings (R7-A MED `min_premium` per-network, R7-B HIGH `batch_oracles_uniform` Indigo arm) + 1 INFO (Aiken-on-Windows silent failure) + regression vs rounds 1-6.
+> 4. **[`docs/audit/SECURITY_AUDIT_REPORT.md`](audit/SECURITY_AUDIT_REPORT.md)** — full audit history including the V12 and V12.2 + R7 sections appended at the bottom.
+>
+> The v6.0.2 / v7 / v8 sections of this guide remain accurate for the older deploys; V12.2 + R7 adds (a) multi-asset (ADA/BTC/ETH/USDC/USDT via AegisSelf 5-NFT allowlist + iUSD/iBTC/iETH/iSOL via Indigo), (b) Hybrid fee model with silent partner_cut absorb, (c) Indigo as 4th OracleProvider with 3-layer trust handshake. Soft-disable of Charli3 + Orcfax at the NFT gate is the live mainnet posture.
+
 ## Scope
 
 **In scope (this audit):**
 - All Aiken source under [`contracts/validators/`](../contracts/validators/) — `policy.ak`, `pool.ak`, `lp_token.ak`, `pool_nft.ak`.
-- All shared libs under [`contracts/lib/aegis/`](../contracts/lib/aegis/) — `types.ak`, `pricing.ak`, `pool.ak`, `oracle.ak` (now a thin dispatcher), `oracle/{types,charli3,orcfax,aegis_self}.ak` (per-provider parsers), `validation.ak`, plus test helpers.
-- The compiled blueprint [`contracts/plutus.json`](../contracts/plutus.json).
-- The deploy artifacts [`deploy/deploy-state.preprod.json`](../deploy/deploy-state.preprod.json) — for cross-referencing on-chain state vs. expected hashes.
+- All shared libs under [`contracts/lib/aegis/`](../contracts/lib/aegis/) — `types.ak`, `pricing.ak`, `pool.ak`, `oracle.ak` (thin dispatcher), `oracle/{types,charli3,orcfax,aegis_self,indigo}.ak` (per-provider parsers — `indigo.ak` is V12.2 NEW), `validation.ak`, plus test helpers.
+- The compiled blueprint [`contracts/plutus.json`](../contracts/plutus.json) (85,310 bytes post-R7-B).
+- The deploy artifacts [`deploy/deploy-state.preprod.json`](../deploy/deploy-state.preprod.json) — for cross-referencing on-chain state vs. expected hashes. The Wave 4.3 (pre-R7) and R7 entries are both preserved in `steps.publish_refs.results` for the operator audit trail; the live Railway env points at the R7 entries.
 - The operator-deploy scripts in [`deploy/scripts/`](../deploy/scripts/) — these run only at deploy time and don't sign user txs, but their correctness affects the trust model (e.g., one-shot NFT minting, parameterization order).
 
 **Out of scope (planned separate review — A-017):**

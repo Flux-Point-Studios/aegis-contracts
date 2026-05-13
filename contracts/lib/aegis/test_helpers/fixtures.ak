@@ -90,7 +90,11 @@ pub fn default_policy_datum() -> PolicyDatum {
     pool_script_hash,
     pool_nft: pool_nft_policy,
     oracle_provider: Charli3,
-    auth_commitment: None,
+    // [v12] Default fixtures are solo policies (no partner). Specific
+    // tests construct datums with `partner_address: Some(_)` via record
+    // spread.
+    partner_address: None,
+    partner_share_bps: 0,
   }
 }
 
@@ -109,7 +113,8 @@ pub fn synthetic_attack_policy_datum() -> PolicyDatum {
     pool_script_hash,
     pool_nft: pool_nft_policy,
     oracle_provider: Charli3,
-    auth_commitment: None,
+    partner_address: None,
+    partner_share_bps: 0,
   }
 }
 

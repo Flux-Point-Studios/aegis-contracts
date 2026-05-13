@@ -6,9 +6,13 @@
 //          helper modules (oracle.ak, pricing.ak, validation.ak, pool.ak).
 // =============================================================================
 
-use aiken/crypto.{Blake2b_224, Hash, Script, VerificationKey, blake2b_224}
+use aiken/collection/list
+use aiken/crypto.{Blake2b_224, Hash, Script, VerificationKey}
 use aiken/primitive/bytearray
-use cardano/transaction.{OutputReference}
+use cardano/address.{
+  Address, VerificationKey as PaymentVKCred, from_verification_key,
+  with_delegation_key,
+}
 
 // ---------------------------------------------------------------------------
 // Type Aliases
@@ -75,6 +79,13 @@ pub type OracleProvider {
   /// constant `aegis_self_publisher_vkh`). Vendor-survival-independent —
   /// keeps Aegis claimable even if Charli3 dissolves and Orcfax sunsets.
   AegisSelf
+  /// [v12.2 NEW] Indigo on-chain price oracle. Constructor index 3. 4
+  /// iAssets directly bound (iUSD, iBTC, iETH, iSOL) via
+  /// `indigo_canonical_nfts` + `indigo_oracle_script_hashes` (paired by
+  /// index). Resolver: `oracle/indigo.ak`. Trust handshake: NFT pin +
+  /// per-iAsset oracle script credential pin + single-token-of-policy.
+  /// See V12.2 spec §2.6 for the on-chain architecture.
+  Indigo
 }
 
 // ---------------------------------------------------------------------------
@@ -133,20 +144,30 @@ pub type PolicyDatum {
   /// ensures the trust handshake the insured agreed to at premium-payment
   /// time is the same one enforced at claim time.
   oracle_provider: OracleProvider,
-  /// [v8 NEW / RELAY-PRESIGNED-AUTH] 32-byte BLAKE2b-256 of the canonical
-  /// CBOR encoding of the `AuthCoveragePayload` the insured signed off-chain
-  /// to authorize a relay to file a claim on their behalf. `None` means the
-  /// insured opted out of relay coverage at policy-creation time and only
-  /// the in-browser auto-claim or a manually-built tx can spend the policy
-  /// via `Claim`/`BatchClaim`. `Some(commit)` permits the additional
-  /// `ClaimWithAuth` and `RotateAuth` redeemers gated on a witness UTxO
-  /// reference whose payload hashes to `commit`.
+  /// [v12 NEW] Optional partner address that receives a share of the 2%
+  /// protocol fee. Set at policy-creation time and immutable. None means
+  /// the entire protocol fee flows to `team_address` (solo policy); Some(addr)
+  /// requires `partner_share_bps > 0` and routes `partner_cut` to that
+  /// address.
   ///
-  /// This 12-field schema is INCOMPATIBLE with the v6.0.2 11-field
-  /// `PolicyDatum` — the existing preprod policy `23889dec…` is stranded
-  /// against the v8 validator hash. Pre-redeploy the operator must Cancel
-  /// or Expire that policy against the v6.0.2 validator (still on-chain).
-  auth_commitment: Option<ByteArray>,
+  /// Trust model: caller-supplied. Anyone can set any address. A caller
+  /// setting an attacker-controlled `partner_address` is self-pwning
+  /// (diverting their own fees away from the team to a wallet they don't
+  /// control); the protocol incurs no risk. Partner registry / lookup is
+  /// a frontend UX concern (post-V12 follow-up).
+  partner_address: Option<Address>,
+  /// [v12 NEW] Partner share of the protocol fee in basis points of the
+  /// fee (NOT of the premium). 0..=2000 (capped by validator at
+  /// `partner_share_cap_bps`). Set at policy-creation time and immutable.
+  ///
+  /// Validator invariants:
+  ///   * `partner_share_bps >= 0` (defensive; rejects signed-int weirdness)
+  ///   * `partner_share_bps <= partner_share_cap_bps` (= 2000 bps = 20% of fee)
+  ///   * `partner_address == None` => `partner_share_bps == 0`
+  ///   * `partner_address == Some(_)` => no lower-bound on partner_share_bps;
+  ///     a 0-share partner is legal (treated as a "credit" — partner is
+  ///     recorded in the datum for analytics but receives no lovelace)
+  partner_share_bps: Int,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,120 +210,6 @@ pub type PolicyRedeemer {
   BatchExpire
   /// Cancel a policy within the cancellation window.
   Cancel
-  /// [v8 NEW] Relay-driven claim path. The relay supplies a 64-byte raw
-  /// Ed25519 signature `sig` over `datum.auth_commitment` (the 32-byte
-  /// BLAKE2b-256 of the insured's canonical-CBOR `AuthCoveragePayload`).
-  /// The validator iterates `reference_inputs`, locates the unique witness
-  /// UTxO carrying the canonical `auth_witness_nft_policy_id` token whose
-  /// asset name equals `blake2b_224(datum.policy_id)`, decodes its
-  /// `AuthWitnessDatum`, and asserts: payload hashes to commit, vkey hashes
-  /// to insured PKH, signature verifies, oracle provider matches policy,
-  /// payout address equals enterprise address of insured. The same Claim
-  /// invariants (oracle freshness, time bounds, A-009 enterprise payout
-  /// aggregate, A-008 residual to canonical pool, F-001 single-script-input
-  /// global guard) all apply.
-  ClaimWithAuth { sig: ByteArray }
-  /// [v8 NEW] Rotate the auth commitment without paying out — used when the
-  /// insured wants to invalidate an old auth (suspected Aegis-seed share
-  /// leak, payout-address rotation, oracle-provider rotation by re-mint).
-  /// Gated by a CIP-30 main-wallet `extra_signatories` check on
-  /// `datum.insured`. Re-uses the policy UTxO (consumed and recreated) and
-  /// requires a fresh witness UTxO at `auth_witness_validator_hash` carrying
-  /// the new commitment in its datum.
-  RotateAuth { new_commit: ByteArray, new_witness_ref: OutputReference }
-}
-
-// ---------------------------------------------------------------------------
-// [v8 NEW] Auth Coverage Payload + Witness Datum
-// ---------------------------------------------------------------------------
-
-/// [v8] The off-chain payload the insured signs (with their Aegis-wallet
-/// Ed25519 key) at policy-creation time to authorize a relay to file a
-/// claim on their behalf. Encoded as canonical CBOR (constructor-zero
-/// indefinite-length, matching `cbor.serialise`); the BLAKE2b-256 of that
-/// CBOR is the `auth_commitment` stored in the policy datum.
-///
-/// FIELD ORDER IS LOAD-BEARING. Cross-stack tools (TypeScript via
-/// `@stricahq/cbors`, Python via `cbor2`, on-chain via `cbor.serialise`)
-/// must produce byte-identical CBOR; the field order here defines the
-/// canonical ordering for all three encoders. See Appendix B of
-/// RELAY_PRESIGNED_AUTH_SCOPE_v2.md for the reference test vectors.
-pub type AuthCoveragePayload {
-  /// Network-specific bytes — `"AEGIS_CLAIM_AUTH_v1_PREPROD"` or
-  /// `"AEGIS_CLAIM_AUTH_v1_MAINNET"` (or `_PREVIEW`). Combined with
-  /// `network_magic` no signature can replay across networks even if the
-  /// user shares an Ed25519 keypair across them (BIP-44 derivation does).
-  domain_tag: ByteArray,
-  /// Cardano network magic — 1 for preprod, 2 for preview, 764824073 for
-  /// mainnet. Numeric guard alongside the textual `domain_tag`.
-  network_magic: Int,
-  /// 28-byte v8 policy_validator script hash. Pinned at sig time so a
-  /// future redeploy of the policy validator (which rotates the hash)
-  /// invalidates all outstanding auths — visible trust signal.
-  policy_validator: ByteArray,
-  /// `PolicyDatum.policy_id` — derived per `derive_policy_id` (§1.8).
-  policy_id: ByteArray,
-  /// `PolicyDatum.insured` — VKH of the insured.
-  insured_pkh: ByteArray,
-  /// 29-byte enterprise CIP-19 address bytes (header byte 0x60/0x61 +
-  /// 28-byte payment_credential VKH). For preprod/preview the header is
-  /// 0x60; for mainnet it is 0x61. The validator computes this canonically
-  /// from `datum.insured` via `enterprise_addr_of` and asserts equality.
-  payout_address: ByteArray,
-  /// `PolicyDatum.coverage_amount` (lovelace).
-  max_coverage: Int,
-  /// `PolicyDatum.oracle_provider` encoded as a Constr index — 0=Charli3,
-  /// 1=Orcfax, 2=AegisSelf. Stored as `Int` here (rather than the sum
-  /// type) so the canonical CBOR is shape-stable across stacks; the
-  /// validator and mint policy assert it matches the policy datum's tag.
-  oracle_provider: Int,
-  /// `PolicyDatum.oracle_nft` — provider-specific handle. For Charli3 +
-  /// AegisSelf this is the NFT policy id; for Orcfax this is the FSP
-  /// script hash.
-  oracle_nft: ByteArray,
-  /// Advisory milliseconds — informational (not enforced on-chain).
-  /// Encoded explicitly as `Int` (NOT `Option<Int>`) so the field is
-  /// always present with a numeric value; off-chain UIs may display it
-  /// to the user as part of the human-readable signing prompt (Δ16). A
-  /// value of `0` denotes "no specific freshness commitment".
-  oracle_freshness: Int,
-  /// `PolicyDatum.start_time` (POSIX milliseconds).
-  not_before: Int,
-  /// `PolicyDatum.expiry_time` (POSIX milliseconds).
-  not_after: Int,
-  /// `PolicyDatum.pool_script_hash`.
-  pool_script_hash: ByteArray,
-  /// `PolicyDatum.pool_nft`.
-  pool_nft: ByteArray,
-}
-
-/// [v8] Datum stored at the `auth_witness_validator` address, carrying the
-/// insured's pre-signed coverage payload for the relay to use later. The
-/// witness UTxO is created atomically with the policy at Underwrite (Δ1)
-/// and CANNOT be spent except via the auth-NFT-burn-only path (§1.6) —
-/// i.e., it is reference-only for `ClaimWithAuth` and `RotateAuth`.
-pub type AuthWitnessDatum {
-  /// Must equal `PolicyDatum.policy_id` of the bound policy. The validator
-  /// re-asserts this; a witness whose `policy_id` mismatches the policy is
-  /// rejected.
-  policy_id: ByteArray,
-  /// 32-byte Ed25519 verification key of the AEGIS WALLET (NOT the CIP-30
-  /// main wallet). The validator asserts `blake2b_224(insured_vkey) ==
-  /// datum.insured` so a substituted vkey under a controlled signature
-  /// fails the binding (closes C-2).
-  insured_vkey: ByteArray,
-  /// Canonical-CBOR-encoded `AuthCoveragePayload`. Stored on-chain so any
-  /// relay can verify locally without an off-chain registry. The validator
-  /// re-decodes this at claim time (cheap — one CBOR decode + one
-  /// BLAKE2b-256) so the payload semantics are NOT trusted from the
-  /// commitment alone.
-  payload_cbor: ByteArray,
-  /// 64-byte raw Ed25519 signature over `blake2b_256(payload_cbor)`. Equal
-  /// to the `sig` carried in the `ClaimWithAuth` redeemer (the validator
-  /// asserts redundancy: both must match — defense in depth so a relay
-  /// cannot present a stale witness with a fresh redeemer-supplied sig
-  /// for a different commitment).
-  signature: ByteArray,
 }
 
 // ---------------------------------------------------------------------------
@@ -380,8 +287,24 @@ pub type LPTokenRedeemer {
 // Protocol Constants
 // ---------------------------------------------------------------------------
 
-/// Minimum premium in lovelace (2 ADA)
+/// Minimum premium in lovelace.
+///
+/// [v12.2 Round-7 R7-A] Per-network value to neutralise the cancel-cycle
+/// LP drain attack at the floor threshold.
+///
+///   PREPROD: 2_000_000 (= 2 ADA, current). Dev-convenient — exercises the
+///            full fee_total floor path so red-team tests stay reproducible.
+///            R7-A is bounded by tiny TVL on preprod so the asymmetric
+///            drain ratio doesn't matter for testing.
+///
+///   MAINNET: 100_000_000 (= 100 ADA). Threshold where `raw_fee = premium ×
+///            200 / 10_000 ≥ min_utxo`, so the Hybrid fee_total floor
+///            stops kicking in and the cancel-cycle asymmetry vanishes.
+///            See V12.2 spec §10.X / red-team report R7-A. The mainnet
+///            deploy must substitute this constant by commenting out the
+///            preprod line and uncommenting the mainnet line below.
 pub const min_premium: Int = 2_000_000
+// MAINNET: pub const min_premium: Int = 100_000_000
 
 /// Maximum coverage-to-premium ratio (50x leverage)
 pub const max_coverage_ratio: Int = 50
@@ -555,313 +478,192 @@ pub const orcfax_fsp_script_hash: ByteArray =
 pub const aegis_self_publisher_vkh: ByteArray =
   #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
 
-// ---------------------------------------------------------------------------
-// [v8 NEW] Auth Witness Constants
-// ---------------------------------------------------------------------------
-
-/// [v8] Network-specific Ed25519 signing-domain tag for `AuthCoveragePayload`.
-/// Combined with `network_magic` no signature can replay across networks
-/// even if the user shares an Ed25519 keypair across them. The tag is the
-/// FIRST field of the canonical CBOR payload (§2.1) so any cross-network
-/// replay attempt fails the in-validator decode-and-recompare check.
+/// [v12 / A-026 generalised] AegisSelf canonical publisher NFT allowlist.
 ///
-/// Pinned to the preprod tag for the current build target. Per-network
-/// rotation is via a redeploy that swaps this constant — the visible
-/// validator-hash rotation IS the trust signal that the network binding
-/// changed. Mainnet build will set this to `auth_domain_tag_mainnet`.
-pub const auth_domain_tag: ByteArray =
-  #"41454749535f434c41494d5f415554485f76315f50524550524f44"
-
-/// [v8] UTF-8 of `"AEGIS_CLAIM_AUTH_v1_PREPROD"` — re-exposed as a named
-/// constant so tests can compare by alias rather than re-typing hex.
-pub const auth_domain_tag_preprod: ByteArray =
-  #"41454749535f434c41494d5f415554485f76315f50524550524f44"
-
-/// [v8] UTF-8 of `"AEGIS_CLAIM_AUTH_v1_PREVIEW"`.
-pub const auth_domain_tag_preview: ByteArray =
-  #"41454749535f434c41494d5f415554485f76315f50524556494557"
-
-/// [v8] UTF-8 of `"AEGIS_CLAIM_AUTH_v1_MAINNET"`.
-pub const auth_domain_tag_mainnet: ByteArray =
-  #"41454749535f434c41494d5f415554485f76315f4d41494e4e4554"
-
-/// [v8] Cardano network magic — 1 for preprod (current), 2 for preview,
-/// 764824073 for mainnet. Pinned at compile time alongside the domain tag.
-pub const network_magic_preprod: Int = 1
-
-pub const network_magic_preview: Int = 2
-
-pub const network_magic_mainnet: Int = 764_824_073
-
-/// [v8] Active-build network magic. Set per build target — flipping this
-/// value rotates the validator hash, which is the visible trust signal
-/// that the network binding has changed.
-pub const network_magic: Int = 1
-
-/// [v8] One-shot-minted `auth_witness_nft` policy id. Pinned at compile
-/// time so the `auth_witness_validator` self-check rejects any witness
-/// UTxO whose token does NOT match this canonical policy id (closes the
-/// redeemer-controlled-identifier anti-pattern flagged in round 6 /
-/// Δ17). The mint policy is parameterized over `(init_utxo_ref,
-/// network_tag, operator_pkh)`; a fresh mint per network produces a
-/// different policy id. Update this constant per build target.
+/// Five one-shot mints under the SAME canonical publisher VKH, one per
+/// supported pair (ADA/USD, BTC/USD, ETH/USD, USDC/USD, USDT/USD). Each
+/// NFT has `quantity: 1` permanent and its mint authority is the consumed
+/// init UTxO of `pool_nft.ak`, already spent — so re-minting is impossible
+/// even with a publisher-key compromise. The parser at
+/// `aegis/oracle/aegis_self.ak` rejects any `oracle_nft` that is not a
+/// member of this list, preserving the round-6 A-026 trust anchor — the
+/// only set-theoretic change is that the canonical set now has five
+/// elements instead of one.
 ///
-/// Placeholder until first preprod deploy of the auth_witness_nft minting
-/// policy (post-Phase-1). The compile-time pin enforces "this validator
-/// only trusts witness NFTs from THIS minting policy"; a wrong constant
-/// would silently never match any witness UTxO at validation time
-/// (fail-closed), making length-checked tests below load-bearing as a
-/// regression guard against typos.
+/// **Per-policy binding.** `PolicyDatum.oracle_nft` is frozen at
+/// Underwrite time, so a BTC-bound policy reads BTC prices only and an
+/// ADA-bound policy reads ADA prices only. No cross-pair contamination.
 ///
-/// [v8 / Δ41 — v3.2 + Δ42 — v3.3 deploy-cycle break] Used by
-/// `auth_witness_validator` (self-check on the witness UTxO's
-/// `own_value`). The `policy_validator` does NOT reference this
-/// constant directly; instead it asserts the witness UTxO sits at
-/// `auth_witness_validator_hash` (script-credential equality). The
-/// two checks compose transitively: only legit-minted NFTs can ever
-/// reach the auth_witness_validator script address (via the spend-
-/// path's burn-or-respend self-check on `own_value`), and only UTxOs
-/// at that script address are accepted as witnesses by
-/// policy_validator — same security as the pre-v3.2 token-policy-id
-/// binding.
+/// **Order.** Alphabetical by symbol (ADA, BTC, ETH, USDC, USDT) for diff
+/// stability. `list.has` is order-agnostic so the on-chain semantics do
+/// not depend on the order; this is a maintenance convention only.
 ///
-/// [Δ42 — v3.3] The `auth_witness_nft.ak` mint validator no longer
-/// references `auth_witness_validator_hash` either: the Underwrite-
-/// path destination check is dropped and replaced by a per-tx
-/// "EXACTLY ONE output carries this asset + matching AuthWitnessDatum"
-/// pin. This makes the mint policy's compiled hash INDEPENDENT of the
-/// `auth_witness_validator_hash` constant value, closing the v3.2
-/// second-order deploy cycle and enabling a truly linear deploy
-/// ordering (see `auth_witness_validator_hash` doc below).
-///
-/// Updated post-deploy via the deploy ordering documented in §12.4 of
-/// `RELAY_PRESIGNED_AUTH_SCOPE_v2.md`. The `check_deploy_constants.py`
-/// gate enforces both auth-related constants are non-placeholder
-/// before mainnet tag.
-pub const auth_witness_nft_policy_id: ByteArray =
-  #"6a468ac08682ac2ae89cde1cdbec4f4761504cea10290eb610eb23f4"
-
-/// [v8 / Δ41 — v3.2 + Δ42 — v3.3 deploy-cycle break] Compile-time-pinned
-/// 28-byte script hash of the deployed `auth_witness_validator`. The
-/// `policy_validator` references THIS constant when locating witness
-/// UTxOs (`ClaimWithAuth` and `RotateAuth` branches), via a
-/// `Script(auth_witness_validator_hash)` payment-credential equality
-/// check on the candidate UTxO's address. Pre-v3.2 the policy
-/// validator referenced `auth_witness_nft_policy_id` (the NFT policy
-/// id) at the same call sites, which created a circular deploy dep:
-/// `auth_witness_nft` was parameterized over `policy_validator_hash`,
-/// while `policy_validator` referenced `auth_witness_nft_policy_id` —
-/// neither hash converges at deploy time. v3.2 broke the first-order
-/// cycle by having `policy_validator` bind to the
-/// auth_witness_validator script hash instead; v3.3 closes the
-/// second-order cycle (Δ42) by also dropping all references to this
-/// constant from `auth_witness_nft.ak`, so this constant's value
-/// affects ONLY the `policy_validator` compiled hash.
-///
-/// The auth_witness_validator's own self-check on `own_value` (using
-/// `auth_witness_nft_policy_id`) is the security backbone — only
-/// legit-minted witnesses can ever exist at that script address.
-///
-/// **Deploy ordering** (post-Δ42 / v3.3 — linear, acyclic, 5 rebuilds):
-///
-///   1. Build with both `auth_witness_nft_policy_id` and
-///      `auth_witness_validator_hash` at the all-zeros placeholder.
-///      `auth_witness_nft.mint` base hash is STABLE (no const
-///      dependency post-Δ42).
-///   2. Apply `auth_witness_nft(init_utxo_ref, network_tag,
-///      operator_pkh)` — 3 params, NO `policy_validator_hash` and NO
-///      reference to `auth_witness_validator_hash` → stable
-///      `auth_witness_nft_policy_id`.
-///   3. Bake `auth_witness_nft_policy_id` const → rebuild →
-///      `auth_witness_validator.spend` hash freezes (depends only on
-///      this const).
-///   4. Bake `auth_witness_validator_hash` const → rebuild →
-///      `policy_validator.spend` hash freezes (depends only on this
-///      const). `auth_witness_nft.mint` base hash does NOT change at
-///      this step (Δ42 invariant).
-///   5. Mint pool NFT, deploy reference scripts, init pool (existing
-///      v6.0.2 → v8 procedure). The pool validator's compile-time
-///      `policy_script_hash` parameter consumes the
-///      policy_validator hash from step 4.
-///
-/// Placeholder until first preprod deploy of the auth_witness_validator
-/// (post-Phase-1, step 4 above). The compile-time pin enforces "this
-/// validator only trusts witness UTxOs sitting at THIS validator
-/// script"; a wrong constant would silently never match any witness
-/// UTxO (fail-closed). The `check_deploy_constants.py` gate enforces
-/// it is non-placeholder AND 28 bytes before mainnet tag.
-pub const auth_witness_validator_hash: ByteArray =
-  #"5c404889f2d25ab7af9fc52f54c088bd427934742cea9ca53cdfcf4b"
-
-/// [v8 / Δ19 / V-002 / V-008] Operator-only sweeper PKH. The mint policy's
-/// `SweepBurn` redeemer requires this PKH to be in the tx's
-/// `extra_signatories` and the policy's `payload.not_after` to have already
-/// elapsed before allowing an orphan witness UTxO to be burned without
-/// co-spending the policy. Compile-time-pinned so a fresh sweeper key
-/// rotation requires a redeploy + visible validator-hash change.
-///
-/// Currently set to `aegis_self_publisher_vkh` — the operator wallet that
-/// signs publisher txs is the same wallet authorized to sweep orphan
-/// witnesses. If we later separate the sweeper key from the publisher key,
-/// this constant becomes its own pin.
-pub const aegis_operator_pkh: ByteArray =
-  #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
-
-/// [v8 / Δ24 / V-009] UTF-8 of `"PREPROD"` — accepted `network_tag`
-/// parameter value for the auth_witness_nft mint policy.
-pub const network_tag_preprod: ByteArray = #"50524550524f44"
-
-/// [v8 / Δ24 / V-009] UTF-8 of `"PREVIEW"`.
-pub const network_tag_preview: ByteArray = #"50524556494557"
-
-/// [v8 / Δ24 / V-009] UTF-8 of `"MAINNET"`.
-pub const network_tag_mainnet: ByteArray = #"4d41494e4e4554"
-
-/// [v8] Address bytes prefix for a CIP-19 type-6 (key-payment, no stake)
-/// enterprise address on a TESTNET network (preprod, preview). The header
-/// byte is `0x60` per CIP-19. Combined with the 28-byte VKH this yields
-/// a 29-byte enterprise address — the canonical form `payout_address`
-/// must take in `AuthCoveragePayload` (Δ9).
-pub const enterprise_addr_header_testnet: ByteArray = #"60"
-
-/// [v8] Address bytes prefix for a CIP-19 type-6 enterprise address on
-/// MAINNET. The header byte is `0x61` per CIP-19.
-pub const enterprise_addr_header_mainnet: ByteArray = #"61"
-
-/// [v8] Active-build enterprise address header. Pinned to testnet for
-/// preprod build; mainnet build flips to `enterprise_addr_header_mainnet`.
-pub const enterprise_addr_header: ByteArray = #"60"
-
-/// [v6.0.2 / A-026 fix] AegisSelf canonical publisher NFT policy id.
-///
-/// One-shot-minted per network (current preprod value below). The parser
-/// now rejects any `oracle_nft` that does not equal this constant, closing
-/// the surface where an attacker mints a fake NFT under their own permissive
-/// policy and outputs it at the publisher VKH address (which anyone can do
-/// — Cardano addresses accept inbound outputs from any sender; only spending
-/// is gated by the payment credential).
-///
-/// **Why the original two-layer handshake was insufficient.** The header
-/// of `aegis/oracle/aegis_self.ak` claimed the trust handshake "requires
-/// the attacker to BOTH steal the publisher key AND mint under our
-/// parameterized one-shot policy." That argument was wrong: the parser
-/// only checked that the UTxO contained a token under the *caller-supplied*
-/// `oracle_nft` policy id, not that the policy id was canonical. An
-/// attacker minting under a fresh permissive policy and referencing the
-/// resulting UTxO bypassed both legs.
-///
-/// **Per-network rotation.** The publisher NFT is a one-shot minted via
-/// the `pool_nft.ak` validator parameterized over an init UTxO consumed
-/// at mint time; a fresh mint per network produces a different policy id.
-/// Update this constant per build target. Current value: preprod
-/// `AEGIS_PRICE_FEED_V1`.
-pub const aegis_self_nft_policy: ByteArray =
-  #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f"
+/// **Per-network rotation.** Values below are preprod. Mainnet flips to
+/// fresh one-shot mints during the mainnet deploy and rotates the
+/// validator hash as the visible trust signal.
+pub const aegis_self_canonical_nfts: List<ByteArray> =
+  [
+    // ADA/USD — asset name "AEGIS_PRICE_FEED_V1"
+    #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+    // BTC/USD — asset name "AEGIS_PRICE_FEED_BTC_USD_V1"
+    #"ae304e27806536dbbc222115c2b543e845f99bd8c7a3a01669f2d7bd",
+    // ETH/USD — asset name "AEGIS_PRICE_FEED_ETH_USD_V1"
+    #"d80aa1a72a46813b5045e163751076d54551fac4a6f8d720e15807ad",
+    // USDC/USD — asset name "AEGIS_PRICE_FEED_USDC_USD_V1"
+    #"860faa663d8a3ae3071d61f95464340c0e49c1f47f56db76441df7a0",
+    // USDT/USD — asset name "AEGIS_PRICE_FEED_USDT_USD_V1"
+    #"a4093bfc7758b86ca1b96df842367bce96cb954650a392020246c0cb",
+  ]
 
 // ---------------------------------------------------------------------------
-// [v8 NEW] Helpers — policy_id derivation, enterprise address, provider tag
+// Indigo On-chain Oracle Bindings (Aegis v12.2)
 // ---------------------------------------------------------------------------
 
-/// [v8 / Δ3 / H-3] Compute the canonical `policy_id` for a freshly-created
-/// policy. INCLUDES the consumed underwrite input ref so two same-terms
-/// policies cannot collide on `policy_id` even when assembled from
-/// different LP capital. The pool validator's Underwrite branch verifies
-/// `pdat.policy_id == derive_policy_id(...)` (cheap — one BLAKE2b hash).
+/// [v12.2 NEW] Indigo canonical oracle NFT policy ids — 4 entries, one per
+/// supported iAsset (iUSD, iBTC, iETH, iSOL).
 ///
-/// Encoding is byte concatenation in a fixed order; widths are pinned so
-/// the off-chain builder produces byte-identical input. Integers are
-/// big-endian to match the CBOR convention used elsewhere in the protocol.
-/// `output_index` is encoded as 2 bytes — the ledger limits an output
-/// index to 2^15-1 in practice, so 16-bit big-endian is comfortably wide.
+/// **Per-iAsset binding.** `PolicyDatum.oracle_nft` is frozen at Underwrite
+/// time, so an iUSD-bound depeg policy reads iUSD prices only and an iBTC-
+/// bound crash policy reads iBTC prices only. No cross-iAsset contamination.
 ///
-/// **Single-Underwrite path** (one input, one policy output): callers use
-/// `derive_policy_id` and supply `own_ref` (the consumed pool UTxO's
-/// reference) as the anchor. The OutputReference.output_index in this case
-/// is the consumed UTxO's tx-output index — already unique per pool
-/// continuation since each Underwrite consumes a fresh pool UTxO.
-pub fn derive_policy_id(
-  insured_pkh: ByteArray,
-  strike_price: Int,
-  coverage_amount: Int,
-  start_time: Int,
-  expiry_time: Int,
-  pool_nft: ByteArray,
-  underwrite_tx_input: OutputReference,
-) -> ByteArray {
-  let preimage =
-    insured_pkh
-      |> bytearray.concat(bytearray.from_int_big_endian(strike_price, 8))
-      |> bytearray.concat(bytearray.from_int_big_endian(coverage_amount, 8))
-      |> bytearray.concat(bytearray.from_int_big_endian(start_time, 8))
-      |> bytearray.concat(bytearray.from_int_big_endian(expiry_time, 8))
-      |> bytearray.concat(pool_nft)
-      |> bytearray.concat(underwrite_tx_input.transaction_id)
-      |> bytearray.concat(
-          bytearray.from_int_big_endian(underwrite_tx_input.output_index, 2),
-        )
-  blake2b_224(preimage)
-}
-
-/// [v8 / Δ21 / V-003] Compute the canonical `policy_id` for a single
-/// policy output produced by a `BatchUnderwrite`. The batch path consumes
-/// ONE pool input but produces N policy outputs, so the per-output anchor
-/// must distinguish each batch entry. The salt `batch_index` is the
-/// 0-based index of the policy output within the batch — combined with
-/// the consumed pool UTxO's `OutputReference`, every batch output has a
-/// unique anchor and thus a unique `policy_id`.
+/// **Ordering.** Indexed: 0=iUSD, 1=iBTC, 2=iETH, 3=iSOL. The order is
+/// load-bearing — the corresponding entry of `indigo_oracle_script_hashes`
+/// at the same index pairs the NFT with the per-iAsset oracle script
+/// credential. A reorder of one list without the other is an audit incident.
 ///
-/// Encoding mirrors `derive_policy_id` exactly with one extra trailing
-/// 2-byte big-endian `batch_index` so the hash preimage cannot collide
-/// across the single-Underwrite and batch-Underwrite paths (single uses
-/// the 80-byte preimage, batch uses 82). Off-chain builders MUST mirror
-/// this construction byte-for-byte.
-pub fn derive_policy_id_batch(
-  insured_pkh: ByteArray,
-  strike_price: Int,
-  coverage_amount: Int,
-  start_time: Int,
-  expiry_time: Int,
-  pool_nft: ByteArray,
-  underwrite_tx_input: OutputReference,
-  batch_index: Int,
-) -> ByteArray {
-  let preimage =
-    insured_pkh
-      |> bytearray.concat(bytearray.from_int_big_endian(strike_price, 8))
-      |> bytearray.concat(bytearray.from_int_big_endian(coverage_amount, 8))
-      |> bytearray.concat(bytearray.from_int_big_endian(start_time, 8))
-      |> bytearray.concat(bytearray.from_int_big_endian(expiry_time, 8))
-      |> bytearray.concat(pool_nft)
-      |> bytearray.concat(underwrite_tx_input.transaction_id)
-      |> bytearray.concat(
-          bytearray.from_int_big_endian(underwrite_tx_input.output_index, 2),
-        )
-      |> bytearray.concat(bytearray.from_int_big_endian(batch_index, 2))
-  blake2b_224(preimage)
-}
+/// **Per-network rotation.** Values below are **PREPROD** mock-mints
+/// minted live on 2026-05-11 via `scripts/init_indigo_mock.py`
+/// (one-shot policies, one per iAsset). The mainnet block (commented
+/// out below) carries the live Indigo NFT policy ids validated
+/// 2026-05-12 via Koios.
+///
+/// **Wave 4 mint provenance.** Each preprod entry is the policy id of
+/// the per-iAsset one-shot mint, bound to a distinct operator-wallet
+/// init UTxO + asset name (`MOCK_IUSD_ORACLE`, `MOCK_IBTC_ORACLE`,
+/// `MOCK_IETH_ORACLE`, `MOCK_ISOL_ORACLE`). Provenance recorded in
+/// `configs/indigo-mock-mint.preprod.json`. Trust anchor for the
+/// preprod path is the operator-controlled mock script
+/// (`d27ccc13...`) holding all 4 UTxOs.
+pub const indigo_canonical_nfts: List<ByteArray> =
+  [
+    // **PREPROD BLOCK (active for V12.2 preprod deploy — Wave 4 mints):**
+    // 0 = iUSD preprod mock NFT policy id (mint tx d0de29b9...)
+    #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+    // 1 = iBTC preprod mock NFT policy id (mint tx 0a923058...)
+    #"1e66200fca30b83d5937b67b896fa46f1adac98922555f9e791c1c83",
+    // 2 = iETH preprod mock NFT policy id (mint tx 146667ec...)
+    #"e81e84a5d34137bcbc2ba73f1b4e735ac0cc375f0bfeb5e98a397102",
+    // 3 = iSOL preprod mock NFT policy id (mint tx cea3b933...)
+    #"875cea49cb6963ad462187f77dcc5b4d458a66d7eb9a646c2c5405a7",
+    //
+    // **MAINNET BLOCK (commented out until mainnet promotion):**
+    // #"e3455f2715338b454fb853442f72dc03b98396854f97510027fe22ff",  // iUSD
+    // #"408f13b240f57c3473b5727a68a88c50c1b6bb15c0c10912008dc59e",  // iBTC
+    // #"6c9497ffd7e8baf86c3c0d6fcd43c524daa49ad5fceba26d715468e9",  // iETH
+    // #"107992fe118ef6ae341ae0996f355124e03a8fccdcade60692175df2",  // iSOL
+  ]
 
-/// [v8 / Δ9 / F-AUTH-4] Compute the canonical 29-byte CIP-19 enterprise
-/// address bytes for a given payment-credential VKH on the active network.
-/// Header byte is `0x60` for testnet (preprod, preview) and `0x61` for
-/// mainnet. The validator computes this canonically from `datum.insured`
-/// and asserts equality against `payload.payout_address` so a relay
-/// cannot redirect the payout to its own address.
-pub fn enterprise_addr_of(insured: ByteArray) -> ByteArray {
-  bytearray.concat(enterprise_addr_header, insured)
-}
+/// [v12.2 NEW] Indigo per-iAsset oracle script credentials — 4 entries,
+/// paired by index with `indigo_canonical_nfts`.
+///
+/// **Mainnet values** (commented out below; validated Wave 1.5 via Koios):
+///   0 = `1042576d1de963437bd4bb50dcd91459756e6812b7c06dd543a332c8` (iUSD)
+///   1 = `d27ad3ed7b073018d429e57c2f8d1f52445aa241e280e6da149a91b4` (iBTC)
+///   2 = `f350350cd40d0d8e8744f2c6cad54a0abc9d51f107f57fb95c181a3f` (iETH)
+///   3 = `e3c50817e0fbaab03e4411249cfcb22aa004844e9ad86ca4d76524bc` (iSOL)
+///
+/// **Preprod values** are a single shared mock-script hash deployed
+/// Wave 4 (compiled out-of-tree as a 3-line always-succeeds Aiken
+/// validator; bech32 form
+/// `addr_test1wrf8enqnl26m0q5cfg73lxf4xxtu5x5phcrfjs0lcqp7uagh2hm3k`).
+/// On preprod we use ONE shared mock script for all 4 iAssets (vs
+/// Indigo's 4 distinct hashes on mainnet — see V12.2 spec §5b). That
+/// preprod simplification reduces dev-loop cost without weakening the
+/// parser's invariants — the script-credential pin still enforces
+/// "UTxO must be at the canonical script address," it just happens
+/// that the 4 canonical preprod addresses are the same address. The 4
+/// list entries thus all carry the same hash.
+pub const indigo_oracle_script_hashes: List<ByteArray> =
+  [
+    // **PREPROD BLOCK (active for V12.2 preprod deploy — Wave 4 mock):**
+    // All 4 entries point at the operator mock script (one shared address).
+    #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
+    #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
+    #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
+    #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
+    //
+    // **MAINNET BLOCK (commented out until mainnet promotion):**
+    // #"1042576d1de963437bd4bb50dcd91459756e6812b7c06dd543a332c8",  // iUSD
+    // #"d27ad3ed7b073018d429e57c2f8d1f52445aa241e280e6da149a91b4",  // iBTC
+    // #"f350350cd40d0d8e8744f2c6cad54a0abc9d51f107f57fb95c181a3f",  // iETH
+    // #"e3c50817e0fbaab03e4411249cfcb22aa004844e9ad86ca4d76524bc",  // iSOL
+  ]
 
-/// [v8] Encode an `OracleProvider` as the integer Constr index used in
-/// the canonical `AuthCoveragePayload` CBOR — 0=Charli3, 1=Orcfax,
-/// 2=AegisSelf. The validator and mint policy assert
-/// `payload.oracle_provider == oracle_provider_to_int(datum.oracle_provider)`
-/// so a sig over a payload with a different provider is rejected (Δ5).
-pub fn oracle_provider_to_int(provider: OracleProvider) -> Int {
-  when provider is {
-    Charli3 -> 0
-    Orcfax -> 1
-    AegisSelf -> 2
-  }
-}
+// ---------------------------------------------------------------------------
+// Protocol Fee Routing (Aegis v12)
+// ---------------------------------------------------------------------------
+
+/// [v12] Team wallet address (preprod) that receives the team's share of the
+/// 2% protocol fee on every Underwrite / BatchUnderwrite / AcceptCancellation
+/// tx. Compile-time pinned per network — rotation = new validator hash =
+/// new deploy.
+///
+/// The fee path: each fee-bearing branch checks that the tx outputs contain
+/// at least one entry with `address == team_address` carrying lovelace
+/// >= max(min_utxo_lovelace, team_cut). The validator compares the FULL
+/// `Address` value (payment + stake), not just payment_credential — so an
+/// operator who delegates the team wallet to a different stake pool
+/// (rotating the stake VKH) must rebuild and redeploy.
+///
+/// **Per D9 operator confirmation.** Smart-constructor form (Path B): the
+/// preprod team address bech32
+/// `addr_test1qrph8epfa8dg6wjwmls873g0xllyjnlt3hh08nv9kcrw9ln40ur83k9c87dpxuar3jucqrg0sc54zvzmf53pu6due2eqa5m8d2`
+/// decodes to payment VKH `c373e429e9da8d3a4edfe07f450f37fe494feb8deef3cd85b606e2fe`
+/// and stake VKH `757f0678d8b83f9a1373a38cb9800d0f862951305b4d221e69bccab2`.
+/// Bytes pinned verbatim from `docs/architecture/_decode_addresses.py`.
+pub const team_address_preprod: Address =
+  from_verification_key(
+    #"c373e429e9da8d3a4edfe07f450f37fe494feb8deef3cd85b606e2fe",
+  )
+    |> with_delegation_key(
+        #"757f0678d8b83f9a1373a38cb9800d0f862951305b4d221e69bccab2",
+      )
+
+/// [v12] Team wallet address (mainnet).
+///
+/// Bech32: `addr1q9s6m9d8yedfcf53yhq5j5zsg0s58wpzamwexrxpfelgz2wgk0s9l9fqc93tyc8zu4z7hp9dlska2kew9trdg8nscjcq3sk5s3`
+/// (Flux Point Studios team wallet). Decodes to payment VKH
+/// `61ad95a7265a9c269125c149505043e143b822eedd930cc14e7e8129` and stake VKH
+/// `c8b3e05f9520c162b260e2e545eb84adfc2dd55b2e2ac6d41e70c4b0`.
+pub const team_address_mainnet: Address =
+  from_verification_key(
+    #"61ad95a7265a9c269125c149505043e143b822eedd930cc14e7e8129",
+  )
+    |> with_delegation_key(
+        #"c8b3e05f9520c162b260e2e545eb84adfc2dd55b2e2ac6d41e70c4b0",
+      )
+
+/// [v12] Active-network team address. Set per build target.
+///
+/// Currently pinned to preprod; promoting to mainnet flips this to
+/// `team_address_mainnet` and rotates the validator hash. Same selection
+/// shape as `orcfax_fsp_script_hash` — a single active-network constant
+/// whose value is edited per build.
+pub const team_address: Address = team_address_preprod
+
+/// [v12] Maximum partner share of the protocol fee, in basis points of the
+/// protocol fee (not of the premium). 2000 bps = 20% of the 2% protocol
+/// fee = 0.4% of the premium maximum to any partner. The validator rejects
+/// any `PolicyDatum.partner_share_bps > partner_share_cap_bps` at
+/// Underwrite / BatchUnderwrite / AcceptCancellation time.
+///
+/// The cap is a defense-in-depth measure: caller-supplied `partner_address`
+/// is a self-pwn surface (a caller diverting their own fees away from the
+/// team into a wallet they don't control), but a careless integrator could
+/// set `partner_share_bps = 10_000` and route 100% of the protocol fee to
+/// the partner, leaving the team with nothing. The cap pins the floor on
+/// team revenue at 80% of the protocol fee (1.6% of premium).
+pub const partner_share_cap_bps: Int = 2_000
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -881,7 +683,8 @@ test policy_datum_construction() {
       pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
       pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
       oracle_provider: Charli3,
-      auth_commitment: None,
+      partner_address: None,
+      partner_share_bps: 0,
     }
   datum.strike_price == 350_000 && datum.coverage_amount == 5_000_000_000
 }
@@ -936,7 +739,8 @@ test policy_datum_aegis_self_variant_constructs() {
       pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
       pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
       oracle_provider: AegisSelf,
-      auth_commitment: None,
+      partner_address: None,
+      partner_share_bps: 0,
     }
   let is_aegis_self =
     when datum.oracle_provider is {
@@ -944,4 +748,259 @@ test policy_datum_aegis_self_variant_constructs() {
       _ -> False
     }
   datum.strike_price == 1_000_000 && is_aegis_self
+}
+
+// ---------------------------------------------------------------------------
+// [v12] NFT allowlist tests
+// ---------------------------------------------------------------------------
+
+test allowlist_accepts_ada_usd() {
+  list.has(
+    aegis_self_canonical_nfts,
+    #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+  )
+}
+
+test allowlist_accepts_btc_usd() {
+  list.has(
+    aegis_self_canonical_nfts,
+    #"ae304e27806536dbbc222115c2b543e845f99bd8c7a3a01669f2d7bd",
+  )
+}
+
+test allowlist_accepts_eth_usd() {
+  list.has(
+    aegis_self_canonical_nfts,
+    #"d80aa1a72a46813b5045e163751076d54551fac4a6f8d720e15807ad",
+  )
+}
+
+test allowlist_accepts_usdc_usd() {
+  list.has(
+    aegis_self_canonical_nfts,
+    #"860faa663d8a3ae3071d61f95464340c0e49c1f47f56db76441df7a0",
+  )
+}
+
+test allowlist_accepts_usdt_usd() {
+  list.has(
+    aegis_self_canonical_nfts,
+    #"a4093bfc7758b86ca1b96df842367bce96cb954650a392020246c0cb",
+  )
+}
+
+test allowlist_rejects_non_canonical_nft() {
+  // Random 28-byte hex string not in the canonical list.
+  !list.has(
+    aegis_self_canonical_nfts,
+    #"00112233445566778899001122334455667788990011223344556677",
+  )
+}
+
+test allowlist_rejects_empty_nft() {
+  // Defensive: empty bytestring must not match any canonical entry.
+  !list.has(aegis_self_canonical_nfts, #"")
+}
+
+test allowlist_size_is_exactly_five() {
+  // Guards against accidental drift — adding a sixth NFT without rotating
+  // the validator hash would be an audit incident.
+  list.length(aegis_self_canonical_nfts) == 5
+}
+
+// ---------------------------------------------------------------------------
+// [v12] Protocol-fee constant tests
+// ---------------------------------------------------------------------------
+
+test team_address_preprod_payment_credential_28_bytes() {
+  // Defensive length pin. A typo in the hex literal would silently bypass
+  // the equality check at Underwrite time and route fees to an attacker.
+  when team_address_preprod.payment_credential is {
+    PaymentVKCred(h) -> bytearray.length(h) == 28
+    _ -> False
+  }
+}
+
+test team_address_mainnet_payment_credential_28_bytes() {
+  when team_address_mainnet.payment_credential is {
+    PaymentVKCred(h) -> bytearray.length(h) == 28
+    _ -> False
+  }
+}
+
+test team_address_preprod_has_stake_credential() {
+  // The team address is a BASE address (payment + stake), not enterprise.
+  team_address_preprod.stake_credential != None
+}
+
+test team_address_mainnet_has_stake_credential() {
+  team_address_mainnet.stake_credential != None
+}
+
+test partner_share_cap_bps_is_2000() {
+  partner_share_cap_bps == 2_000
+}
+
+test policy_datum_v12_no_partner() {
+  let datum =
+    PolicyDatum {
+      policy_id: #"aabb",
+      insured: #"0011223344556677889900112233445566778899001122334455667788",
+      strike_price: 350_000,
+      coverage_amount: 5_000_000_000,
+      premium_paid: 100_000_000,
+      start_time: 1_700_000_000_000,
+      expiry_time: 1_700_604_800_000,
+      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+      pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
+      pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
+      oracle_provider: AegisSelf,
+      partner_address: None,
+      partner_share_bps: 0,
+    }
+  datum.partner_share_bps == 0 && datum.partner_address == None
+}
+
+test policy_datum_v12_with_partner() {
+  let datum =
+    PolicyDatum {
+      policy_id: #"aabb",
+      insured: #"0011223344556677889900112233445566778899001122334455667788",
+      strike_price: 350_000,
+      coverage_amount: 5_000_000_000,
+      premium_paid: 100_000_000,
+      start_time: 1_700_000_000_000,
+      expiry_time: 1_700_604_800_000,
+      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+      pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
+      pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
+      oracle_provider: AegisSelf,
+      partner_address: Some(team_address_preprod),
+      partner_share_bps: 2_000,
+    }
+  datum.partner_share_bps == 2_000
+}
+
+// ---------------------------------------------------------------------------
+// [v12.2] Indigo provider + NFT/script allowlist tests
+// ---------------------------------------------------------------------------
+
+test policy_datum_indigo_variant_constructs() {
+  // V12.2 adds Indigo as the 4th OracleProvider variant. A PolicyDatum
+  // bound to Indigo must construct cleanly with an Indigo canonical NFT.
+  let datum =
+    PolicyDatum {
+      policy_id: #"aabb",
+      insured: #"0011223344556677889900112233445566778899001122334455667788",
+      strike_price: 1_000_000,
+      coverage_amount: 10_000_000_000,
+      premium_paid: 100_000_000,
+      start_time: 1_700_000_000_000,
+      expiry_time: 1_700_604_800_000,
+      // iUSD preprod mock NFT (live Wave-4 mint).
+      oracle_nft: #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+      pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
+      pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
+      oracle_provider: Indigo,
+      partner_address: None,
+      partner_share_bps: 0,
+    }
+  let is_indigo =
+    when datum.oracle_provider is {
+      Indigo -> True
+      _ -> False
+    }
+  datum.strike_price == 1_000_000 && is_indigo
+}
+
+test indigo_canonical_nfts_size_is_exactly_four() {
+  // V12.2 binds exactly 4 iAssets (iUSD, iBTC, iETH, iSOL). A 5th NFT
+  // entry without a validator redeploy would be an audit incident.
+  list.length(indigo_canonical_nfts) == 4
+}
+
+test indigo_oracle_script_hashes_size_matches_nft_count() {
+  // The two lists are paired by index — a length mismatch is structurally
+  // wrong (the parser's lookup would either crash or pair the wrong
+  // (NFT, script) entries). Static-size pin.
+  list.length(indigo_oracle_script_hashes) == list.length(indigo_canonical_nfts)
+}
+
+test indigo_accepts_iusd_preprod_nft() {
+  // iUSD preprod mock NFT (live Wave-4 mint tx d0de29b9...).
+  list.has(
+    indigo_canonical_nfts,
+    #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+  )
+}
+
+test indigo_accepts_ibtc_preprod_nft() {
+  // iBTC preprod mock NFT (live Wave-4 mint tx 0a923058...).
+  list.has(
+    indigo_canonical_nfts,
+    #"1e66200fca30b83d5937b67b896fa46f1adac98922555f9e791c1c83",
+  )
+}
+
+test indigo_accepts_ieth_preprod_nft() {
+  // iETH preprod mock NFT (live Wave-4 mint tx 146667ec...).
+  list.has(
+    indigo_canonical_nfts,
+    #"e81e84a5d34137bcbc2ba73f1b4e735ac0cc375f0bfeb5e98a397102",
+  )
+}
+
+test indigo_accepts_isol_preprod_nft() {
+  // iSOL preprod mock NFT (live Wave-4 mint tx cea3b933...).
+  list.has(
+    indigo_canonical_nfts,
+    #"875cea49cb6963ad462187f77dcc5b4d458a66d7eb9a646c2c5405a7",
+  )
+}
+
+test indigo_rejects_unknown_nft() {
+  // A non-canonical NFT must not appear in the allowlist.
+  !list.has(
+    indigo_canonical_nfts,
+    #"00112233445566778899001122334455667788990011223344556677",
+  )
+}
+
+test indigo_rejects_empty_nft() {
+  !list.has(indigo_canonical_nfts, #"")
+}
+
+test indigo_disjoint_from_aegis_self() {
+  // The Indigo and AegisSelf allowlists must be disjoint. An NFT in one
+  // MUST NOT be in the other. Defensive pin against accidental drift.
+  !list.has(
+    indigo_canonical_nfts,
+    #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
+  ) && !list.has(
+    aegis_self_canonical_nfts,
+    #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
+  )
+}
+
+test indigo_oracle_script_hash_first_entry_is_28_bytes() {
+  // All 4 entries must be 28-byte ByteArrays (Blake2b-224 script hashes).
+  when indigo_oracle_script_hashes is {
+    [first, ..] -> bytearray.length(first) == 28
+    [] -> False
+  }
+}
+
+test indigo_canonical_nft_first_entry_is_28_bytes() {
+  // Same defensive length pin for the NFT policy ids.
+  when indigo_canonical_nfts is {
+    [first, ..] -> bytearray.length(first) == 28
+    [] -> False
+  }
+}
+
+test aegis_self_canonical_nfts_unchanged_at_five_in_v12_2() {
+  // V12.2 explicitly keeps AegisSelf at 5 entries (the original Wave-1 plan
+  // to add iUSD was cancelled in Wave 1.5 when we pivoted to Indigo
+  // direct-bind). Pinning this length protects against accidental drift.
+  list.length(aegis_self_canonical_nfts) == 5
 }
