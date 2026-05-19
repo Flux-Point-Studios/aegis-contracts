@@ -16,7 +16,7 @@ use aegis/types.{
 use aegis/validation.{
   count_script_inputs, get_lower_bound, get_upper_bound, output_has_nft,
 }
-use cardano/address.{Address}
+use cardano/address.{Address, VerificationKey}
 // =============================================================================
 // Aegis Insurance Protocol - Pool Validator
 // Location: contracts/validators/pool.ak
@@ -520,6 +520,32 @@ fn output_to_address_at_least(
   )
 }
 
+/// [FIX R8-DRAIN-1] Reject `partner_address` aliasing with privileged
+/// addresses (team_address, pool address, policy_validator script
+/// credential). Without this guard, a hostile builder can set
+/// `partner_address = Some(team_address)` (or the pool's own address,
+/// or any script credential the user controls indirectly) and the team
+/// + partner output checks — two independent `list.any` calls over the
+/// same outputs list — become satisfiable by a SINGLE on-chain output.
+/// The team is short-changed by `partner_cut` per cycle, linear in
+/// premium, hitting Underwrite, BatchUnderwrite, and AcceptCancellation
+/// symmetrically. Round-8 red-team finding R8-DRAIN-1, MEDIUM severity,
+/// mainnet-blocking economic short-change.
+fn partner_address_not_aliased(
+  partner_address: Option<Address>,
+  team_address: Address,
+  pool_address: Address,
+  policy_script_hash: ByteArray,
+) -> Bool {
+  when partner_address is {
+    None -> True
+    Some(addr) ->
+      addr != team_address && addr != pool_address && addr.payment_credential != Script(
+        policy_script_hash,
+      )
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Pool Validator
 // ---------------------------------------------------------------------------
@@ -751,7 +777,18 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> required_donation == 0
           }
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && team_output_funded && partner_output_funded
+        // [FIX R8-DRAIN-1] Underwrite arm: reject partner_address aliasing
+        // with team_address / pool address / policy script. See the
+        // helper `partner_address_not_aliased` doc for severity rationale.
+        let partner_not_aliased =
+          partner_address_not_aliased(
+            new_partner_address,
+            team_address,
+            own_address,
+            policy_script_hash,
+          )
+
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded
       }
 
       // -----------------------------------------------------------------------
@@ -1064,6 +1101,22 @@ validator pool_validator(policy_script_hash: ByteArray) {
             },
           )
 
+        // [FIX R8-DRAIN-1] BatchUnderwrite arm: reject any per-policy
+        // partner_address that aliases team_address, the pool's own
+        // address, or the policy_validator script credential. The
+        // aliasing primitive would short-change the team by the
+        // aliased partner_cut on the aggregated output check.
+        let partner_addresses_not_aliased =
+          list.all(
+            batch_totals.partner_totals,
+            fn(entry) {
+              let addr = entry.1st
+              addr != team_address && addr != own_address && addr.payment_credential != Script(
+                policy_script_hash,
+              )
+            },
+          )
+
         // 13. [FIX A-021 / v12] Aggregate treasury cut against total_premium
         // (unchanged numerically from V11; the cut already represents the
         // protocol fee * the treasury share, both in bps, multiplied
@@ -1080,7 +1133,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> required_donation == 0
           }
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && team_output_funded && partner_outputs_funded && donation_ok
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok
       }
 
       // -----------------------------------------------------------------------
@@ -1317,7 +1370,21 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> required_donation == 0
           }
 
-        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && team_output_funded && partner_output_funded
+        // [FIX R8-DRAIN-1] AcceptCancellation arm: reject if the
+        // consumed policy_datum.partner_address aliases team_address /
+        // pool / policy_validator. Defense-in-depth: a V12.2+ Underwrite
+        // would have already rejected such a policy at creation time,
+        // but old V11 policies on chain weren't validated against this
+        // primitive and may carry hostile partner_addresses.
+        let partner_not_aliased =
+          partner_address_not_aliased(
+            policy_datum.partner_address,
+            team_address,
+            own_address,
+            policy_script_hash,
+          )
+
+        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded
       }
     }
   }
@@ -1330,6 +1397,95 @@ validator pool_validator(policy_script_hash: ByteArray) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// [FIX R8-DRAIN-1 regression] partner_address_not_aliased — Round-8
+// finding R8-DRAIN-1. Three regression tests covering each of the
+// three privileged addresses (team, pool, policy script).
+
+test partner_aliasing_none_passes() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  partner_address_not_aliased(None, team, pool, #"cc")
+}
+
+test partner_aliasing_to_team_fails() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  // Hostile partner_address == team_address must be rejected.
+  partner_address_not_aliased(Some(team), team, pool, #"cc") == False
+}
+
+test partner_aliasing_to_pool_fails() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  // Hostile partner_address == pool_address must be rejected.
+  partner_address_not_aliased(Some(pool), team, pool, #"cc") == False
+}
+
+test partner_aliasing_to_policy_script_fails() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  // Hostile partner_address with payment_credential == Script(policy_hash)
+  // must be rejected (regardless of stake credential).
+  let policy_addr =
+    Address {
+      payment_credential: Script(#"cc"),
+      stake_credential: None,
+    }
+  partner_address_not_aliased(Some(policy_addr), team, pool, #"cc") == False
+}
+
+test partner_aliasing_to_unrelated_passes() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  // Benign partner_address (different VKH) must pass.
+  let benign =
+    Address {
+      payment_credential: address.VerificationKey(#"dd"),
+      stake_credential: None,
+    }
+  partner_address_not_aliased(Some(benign), team, pool, #"cc")
+}
 
 test underwrite_coverage_check() {
   // Pool: 100 ADA total, 30 ADA active -> 70 ADA available
