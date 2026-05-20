@@ -1,0 +1,36 @@
+{
+  "_comment": "Negative fixture: builder withdraws so much liquidity that pool becomes insolvent (new_total < new_active). Should be rejected by `withdrawal_safe`.",
+  "_violates": "withdrawal_safe",
+  "old_pool_datum": {
+    "total_liquidity": 100000000000,
+    "active_coverage": 95000000000,
+    "lp_token_policy": 100,
+    "protocol_fee_bps": 200,
+    "pool_nft": 200,
+    "lp_supply": 100000000000
+  },
+  "new_pool_datum": {
+    "total_liquidity": 50000000000,
+    "active_coverage": 95000000000,
+    "lp_token_policy": 100,
+    "protocol_fee_bps": 200,
+    "pool_nft": 200,
+    "lp_supply": 50000000000
+  },
+  "redeemer": {
+    "amount": 50000000000
+  },
+  "own_input_lovelace": 100000000000,
+  "cont_output_lovelace": 50000000000,
+  "mint_lp_qty": -50000000000,
+  "consts": {
+    "team_address_id": 300,
+    "pool_address_id": 400,
+    "policy_script_hash": 500,
+    "min_utxo_lovelace": 2000000,
+    "min_premium": 2000000,
+    "partner_share_cap_bps": 2000,
+    "treasury_share_bps": 2500,
+    "protocol_fee_bps": 200
+  }
+}

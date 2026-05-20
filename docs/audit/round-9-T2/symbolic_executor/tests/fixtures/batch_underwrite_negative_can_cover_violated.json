@@ -1,0 +1,53 @@
+{
+  "_comment": "Negative fixture: batch claims more coverage than the pool can afford. total_coverage > old_total - old_active. Should be rejected by `can_cover`.",
+  "_violates": "can_cover",
+  "old_pool_datum": {
+    "total_liquidity": 100000000000,
+    "active_coverage": 95000000000,
+    "lp_token_policy": 100,
+    "protocol_fee_bps": 200,
+    "pool_nft": 200,
+    "lp_supply": 100000000000
+  },
+  "new_pool_datum": {
+    "total_liquidity": 102450000000,
+    "active_coverage": 120000000000,
+    "lp_token_policy": 100,
+    "protocol_fee_bps": 200,
+    "pool_nft": 200,
+    "lp_supply": 100000000000
+  },
+  "redeemer": {
+    "total_coverage": 25000000000,
+    "total_premium": 2500000000
+  },
+  "own_input_lovelace": 100000000000,
+  "cont_output_lovelace": 102450000000,
+  "team_output_lovelace": 50000000,
+  "own_pool_script_hash": 500,
+  "batch_totals": {
+    "cov_sum": 25000000000,
+    "prem_sum": 2500000000,
+    "fee_total_sum": 50000000,
+    "team_total": 50000000,
+    "partner_totals_sum": 0,
+    "funded_ok": 1,
+    "shares_ok": 1,
+    "partner_outputs_all_funded": 1,
+    "aliased_partner_present": 0
+  },
+  "treasury_donation": {
+    "is_some": 1,
+    "amount": 12500000
+  },
+  "consts": {
+    "team_address_id": 300,
+    "pool_address_id": 400,
+    "policy_script_hash": 500,
+    "min_utxo_lovelace": 2000000,
+    "min_premium": 2000000,
+    "partner_share_cap_bps": 2000,
+    "treasury_share_bps": 2500,
+    "protocol_fee_bps": 200
+  }
+}
