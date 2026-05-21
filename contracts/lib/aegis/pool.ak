@@ -103,7 +103,7 @@ pub fn verify_underwrite_datum(
 /// Verify that pool datum is updated correctly for a ProcessClaim operation.
 /// total_liquidity decreases by payout, active_coverage decreases by payout.
 ///
-/// [FIX A-005] Adds explicit non-negativity + payout-bounded-by-active checks.
+/// Adds explicit non-negativity + payout-bounded-by-active checks.
 /// Previously, with verify_claim_datum returning True for any matching arithmetic,
 /// the F-007 "solvency" check `new_total >= new_active` was tautologically satisfied
 /// (both fields decrement by the same payout, so the difference is unchanged from the
@@ -128,7 +128,7 @@ pub fn verify_claim_datum(
 }
 
 /// Verify that pool datum is updated correctly for AddLiquidity.
-/// [FIX A-003] Now also enforces lp_supply increments by exactly the LP
+/// Now also enforces lp_supply increments by exactly the LP
 /// quantity that calculate_lp_mint produces for this deposit.
 pub fn verify_add_liquidity_datum(
   old_total: Int,
@@ -144,7 +144,7 @@ pub fn verify_add_liquidity_datum(
 }
 
 /// Verify that pool datum is updated correctly for RemoveLiquidity.
-/// [FIX A-003] Caller passes the LP burn quantity; we verify the burn corresponds
+/// Caller passes the LP burn quantity; we verify the burn corresponds
 /// to the requested withdrawal `amount` and that lp_supply decrements accordingly.
 pub fn verify_remove_liquidity_datum(
   old_total: Int,
@@ -422,7 +422,7 @@ test verify_remove_liquidity_rejects_active_change() {
   ) == False
 }
 
-// [FIX A-003] verify_remove_liquidity_datum rejects mismatched LP burn / withdrawal.
+// verify_remove_liquidity_datum rejects mismatched LP burn / withdrawal.
 test verify_remove_liquidity_rejects_lp_burn_mismatch_a_003_fix() {
   // Pool: 1B total, 1B lp_supply. Burn only 1 LP → withdraw at most 1 ADA.
   // Attacker requests 200M withdrawal — must reject.

@@ -41,6 +41,7 @@ use aegis/oracle/types.{Price}
 use aegis/types as aegis_types
 use aiken/collection/dict
 use aiken/collection/list
+use aiken/option
 use cardano/address.{Script}
 use cardano/assets
 use cardano/transaction.{InlineDatum, Input, Output}
@@ -81,6 +82,42 @@ pub type IndigoOracleDatum {
 /// txs via Koios — mean refresh 35.5 min, expiry set 49 min ahead). Used
 /// to derive `observed_at` (Indigo doesn't publish a created_at field).
 /// In milliseconds.
+///
+/// **Approximation-robustness analysis (V12.2 PR #6 review).** This
+/// constant is approximate — Indigo's `opExpirationTime` is configurable
+/// per-iAsset and could drift. The Aegis freshness gates in policy.ak
+/// (Claim, BatchClaim, Cancel) are:
+///
+///   `tx_lower >= price.observed_at && tx_lower <= price.valid_until &&
+///    tx_upper <= price.valid_until`
+///
+/// `valid_until == datum.expiration` is **exact** (read directly from
+/// the Indigo OracleDatum). `observed_at` is approximate. If Indigo
+/// changes their lookahead:
+///
+///   * **Lookahead increases** (e.g., 60 min): our `observed_at` is
+///     closer to expiration than reality → `tx_lower >= observed_at`
+///     becomes STRICTER than intended → no security degradation
+///     (rejects some legitimate txs; would surface as user-facing
+///     errors before any value is at risk).
+///
+///   * **Lookahead decreases** (e.g., 30 min): our `observed_at` is
+///     earlier than reality → `tx_lower >= observed_at` becomes more
+///     permissive → an attacker could set `tx_lower` artificially
+///     early. However, this grants NO attack capability because:
+///       (a) the price in the datum is fixed (replay yields the same
+///           published price),
+///       (b) the load-bearing freshness check is `tx_upper <=
+///           valid_until`, which uses the exact datum value,
+///       (c) the Cardano node requires all reference_inputs to exist
+///           at tx inclusion time, so the oracle UTxO must have been
+///           published before the tx is processed regardless of
+///           tx_lower.
+///
+/// **Conclusion**: a drift in Indigo's lookahead does not require a
+/// validator hash rotation. The constant can be tuned in a non-breaking
+/// follow-up if Indigo's deployment ever surfaces a measurable drift.
+/// See V12.2 spec §3.4a and V12.2 PR #6 security review.
 pub const indigo_typical_lookahead_ms: Int = 49 * 60 * 1_000
 
 // ---------------------------------------------------------------------------
@@ -95,34 +132,12 @@ pub const indigo_typical_lookahead_ms: Int = 49 * 60 * 1_000
 ///
 /// Aiken-time complexity: O(n) over the canonical list, n=4 in V12.2.
 pub fn resolve_paired_script_hash(oracle_nft: ByteArray) -> Option<ByteArray> {
-  do_resolve_paired(
+  list.zip(
     aegis_types.indigo_canonical_nfts,
     aegis_types.indigo_oracle_script_hashes,
-    oracle_nft,
   )
-}
-
-fn do_resolve_paired(
-  nfts: List<ByteArray>,
-  hashes: List<ByteArray>,
-  target: ByteArray,
-) -> Option<ByteArray> {
-  when nfts is {
-    [] -> None
-    [nft, ..rest_nfts] ->
-      when hashes is {
-        // Defensive: should never happen if lists are same length, which is
-        // pinned by `indigo_oracle_script_hashes_size_matches_nft_count` in
-        // types.ak.
-        [] -> None
-        [hash, ..rest_hashes] ->
-          if nft == target {
-            Some(hash)
-          } else {
-            do_resolve_paired(rest_nfts, rest_hashes, target)
-          }
-      }
-  }
+    |> list.find(fn(pair) { pair.1st == oracle_nft })
+    |> option.map(fn(pair) { pair.2nd })
 }
 
 // ---------------------------------------------------------------------------
@@ -136,9 +151,10 @@ fn do_resolve_paired(
 ///
 /// Returns Bool so the caller can `expect` on it.
 fn single_token_of_policy(value: assets.Value, policy_id: ByteArray) -> Bool {
-  let tokens_under_policy = assets.tokens(value, policy_id)
   let total =
-    dict.foldr(tokens_under_policy, 0, fn(_name, qty, acc) { acc + qty })
+    assets.tokens(value, policy_id)
+      |> dict.values
+      |> list.foldr(0, fn(qty, acc) { qty + acc })
   total == 1
 }
 
@@ -155,24 +171,14 @@ fn find_feed_output(
   oracle_nft: ByteArray,
   expected_script_hash: ByteArray,
 ) -> Option<Output> {
-  when reference_inputs is {
-    [] -> None
-    [input, ..rest] -> {
-      let has_indigo_nft =
-        assets.policies(input.output.value)
-          |> list.has(oracle_nft)
-      let at_indigo_script =
-        when input.output.address.payment_credential is {
-          Script(h) -> h == expected_script_hash
-          _ -> False
-        }
-      if has_indigo_nft && at_indigo_script {
-        Some(input.output)
-      } else {
-        find_feed_output(rest, oracle_nft, expected_script_hash)
-      }
-    }
-  }
+  let oracle_credential = Script(expected_script_hash)
+  reference_inputs
+    |> list.find(
+        fn(input) {
+          list.has(assets.policies(input.output.value), oracle_nft) && input.output.address.payment_credential == oracle_credential
+        },
+      )
+    |> option.map(fn(input) { input.output })
 }
 
 /// Locate the canonical Indigo oracle UTxO for `oracle_nft` and decode its

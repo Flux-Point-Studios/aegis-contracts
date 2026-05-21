@@ -27,6 +27,7 @@ use aegis/oracle/charli3.{
 use aegis/oracle/types.{Price}
 use aegis/types as aegis_types
 use aiken/collection/list
+use aiken/option
 use cardano/address.{VerificationKey}
 use cardano/assets
 use cardano/transaction.{InlineDatum, Input, Output}
@@ -46,24 +47,15 @@ fn find_feed_output(
   reference_inputs: List<Input>,
   oracle_nft: ByteArray,
 ) -> Option<Output> {
-  when reference_inputs is {
-    [] -> None
-    [input, ..rest] -> {
-      let has_publisher_nft =
-        assets.policies(input.output.value)
-          |> list.has(oracle_nft)
-      let at_publisher_credential =
-        when input.output.address.payment_credential is {
-          VerificationKey(vkh) -> vkh == aegis_types.aegis_self_publisher_vkh
-          _ -> False
-        }
-      if has_publisher_nft && at_publisher_credential {
-        Some(input.output)
-      } else {
-        find_feed_output(rest, oracle_nft)
-      }
-    }
-  }
+  let publisher_credential =
+    VerificationKey(aegis_types.aegis_self_publisher_vkh)
+  reference_inputs
+    |> list.find(
+        fn(input) {
+          list.has(assets.policies(input.output.value), oracle_nft) && input.output.address.payment_credential == publisher_credential
+        },
+      )
+    |> option.map(fn(input) { input.output })
 }
 
 /// Locate the canonical feed UTxO and decode its inline datum as the

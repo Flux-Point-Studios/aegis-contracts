@@ -11,6 +11,7 @@ use aegis/types.{BurnLP, LPTokenRedeemer, MintLP}
 //          Interacts with: validators/pool.ak (must be consumed in tx).
 // =============================================================================
 
+use aiken/collection/dict
 use aiken/collection/list
 use aiken/crypto.{ScriptHash}
 use cardano/address.{Script}
@@ -39,21 +40,15 @@ validator lp_token_policy(pool_script_hash: ScriptHash) {
         },
       )
 
-    // [FIX F-005] Verify mint direction matches redeemer.
+    // Verify mint direction matches redeemer.
     // Without this, MintLP could be used with a negative mint (burn)
     // or BurnLP with a positive mint, breaking LP accounting.
     // Sum all token quantities under this policy to determine net direction.
     let mint_quantity =
-      assets.reduce(
-        mint,
+      dict.foldl(
+        assets.tokens(mint, policy_id),
         0,
-        fn(pid, _asset_name, qty, acc) {
-          if pid == policy_id {
-            acc + qty
-          } else {
-            acc
-          }
-        },
+        fn(_name, qty, acc) { acc + qty },
       )
 
     when redeemer is {

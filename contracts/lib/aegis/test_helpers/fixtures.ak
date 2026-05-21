@@ -32,7 +32,7 @@ pub const pool_script_hash: ScriptHash =
 pub const lp_token_policy_id: ByteArray =
   #"0402df9c420213421d894b00ee5b23391cb36dc3c2a436b48229c10a"
 
-/// [v6.0.2 / A-026-class fix] The canonical Charli3 ADA/USD NFT policy id
+/// The canonical Charli3 ADA/USD NFT policy id
 /// (matches `types.charli3_ada_usd_nft_policy`). Pre-fix, this fixture
 /// used an arbitrary 28-byte placeholder; the parser pin now requires the
 /// canonical value, so the fixture must round-trip with the real handle.
@@ -90,7 +90,7 @@ pub fn default_policy_datum() -> PolicyDatum {
     pool_script_hash,
     pool_nft: pool_nft_policy,
     oracle_provider: Charli3,
-    // [v12] Default fixtures are solo policies (no partner). Specific
+    // Default fixtures are solo policies (no partner). Specific
     // tests construct datums with `partner_address: Some(_)` via record
     // spread.
     partner_address: None,
@@ -118,7 +118,7 @@ pub fn synthetic_attack_policy_datum() -> PolicyDatum {
   }
 }
 
-/// [v6] Variant policy-datum builder: same as `default_policy_datum` but
+/// Variant policy-datum builder: same as `default_policy_datum` but
 /// bound to Orcfax instead of Charli3. The `oracle_nft` field carries an
 /// Orcfax FSP script hash (NOT an NFT policy id) — semantics branch on
 /// `oracle_provider`. Used by the v6 multi-provider security tests.
@@ -130,7 +130,7 @@ pub fn default_policy_datum_orcfax() -> PolicyDatum {
   }
 }
 
-/// [v6] Mock Orcfax FSP script hash used by tests. On preprod the live
+/// Mock Orcfax FSP script hash used by tests. On preprod the live
 /// deploy will pin this to the deployed mock validator's hash; on preview
 /// and mainnet it pins to the canonical Orcfax FSP hash. This test fixture
 /// uses an arbitrary deterministic byte string so test assertions are
@@ -138,18 +138,18 @@ pub fn default_policy_datum_orcfax() -> PolicyDatum {
 pub const orcfax_fsp_hash_test: ByteArray =
   #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230"
 
-/// [v6] Mock Orcfax FS validator/policy hash used by tests. In production
+/// Mock Orcfax FS validator/policy hash used by tests. In production
 /// this hash is dynamic — the consumer reads it from the FSP datum at
 /// claim time. The mock fixtures hardwire it for deterministic test inputs.
 pub const orcfax_fs_hash_test: ByteArray =
   #"193ee65211bb39193ee65211bb39193ee65211bb39193ee65211bb39"
 
-/// [v6] Test-only feed_id matching `orcfax_ada_usd_feed_id` — re-exposed
+/// Test-only feed_id matching `orcfax_ada_usd_feed_id` — re-exposed
 /// here so test cases can compare against a named constant rather than
 /// re-typing the hex.
 pub const orcfax_test_feed_id: ByteArray = orcfax_ada_usd_feed_id
 
-/// [v6] Build a mock Orcfax FSP UTxO whose inline datum is `bytes(fs_hash)`.
+/// Build a mock Orcfax FSP UTxO whose inline datum is `bytes(fs_hash)`.
 /// The FSP NFT (asset_name = `orcfax_fsp_asset_name`) lives under the FSP
 /// script's own hash policy. Mirrors the production Orcfax shape: the FSP
 /// datum is an opaque byte array whose value is the dynamic FS validator
@@ -170,7 +170,7 @@ pub fn orcfax_fsp_input(target_fs_hash: ByteArray) -> Input {
   )
 }
 
-/// [v6] Build a mock Orcfax FS UTxO carrying the FS NFT and a
+/// Build a mock Orcfax FS UTxO carrying the FS NFT and a
 /// `FsDat<Rational>` inline datum. The FS NFT policy equals the FS validator
 /// hash itself (Orcfax's design); the FS asset name is the empty bytestring
 /// (`orcfax_fs_asset_name`).
@@ -182,7 +182,7 @@ pub fn orcfax_fs_input(num: Int, denom: Int, created_at: Int) -> Input {
   orcfax_fs_input_with_feed(num, denom, created_at, orcfax_ada_usd_feed_id)
 }
 
-/// [v6] Same as `orcfax_fs_input` but accepts an explicit feed_id. Used by
+/// Same as `orcfax_fs_input` but accepts an explicit feed_id. Used by
 /// negative tests (wrong feed, ADA-USDM trailing-slash defense, etc.).
 pub fn orcfax_fs_input_with_feed(
   num: Int,
@@ -277,7 +277,7 @@ pub fn pkh_output(pkh: ByteArray, lovelace: Int) -> Output {
 }
 
 // ---------------------------------------------------------------------------
-// [FIX A-009] Stake-credential grafting fixtures.
+// Stake-credential grafting fixtures.
 // ---------------------------------------------------------------------------
 
 /// An output paid to `pkh` BUT with a stake credential — i.e. NOT an
@@ -304,7 +304,7 @@ pub const attacker_stake_pkh: ByteArray =
   #"badf00dbadf00dbadf00dbadf00dbadf00dbadf00dbadf00dbadf00d"
 
 // ---------------------------------------------------------------------------
-// [FIX A-012] Variant policy datum builders for batch oracle uniformity tests.
+// Variant policy datum builders for batch oracle uniformity tests.
 // ---------------------------------------------------------------------------
 
 /// A second oracle NFT policy, distinct from `oracle_nft_policy`. Used to
@@ -376,7 +376,7 @@ pub fn pool_input(
 
 pub fn oracle_ref_input(price: Int, timestamp: Int, expiry: Int) -> Input {
   let datum = create_oracle_datum(price, timestamp, expiry)
-  // [FIX A-016] The oracle finder now requires the input to be at the
+  // The oracle finder now requires the input to be at the
   // canonical Charli3 oracle script hash. Use that hash here so the
   // fixture round-trips (`sanity_oracle_lookup_works_with_canonical_fixture`).
   make_input(
