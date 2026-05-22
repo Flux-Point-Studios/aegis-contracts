@@ -130,7 +130,7 @@ type BatchFeeTotals {
   shares_ok: Bool,
 }
 
-/// [v12 §3.10 Merge a per-policy partner cut into the running floored
+/// §3.10 Merge a per-policy partner cut into the running floored
 /// totals list. If `addr` already has an entry, bump it; otherwise push a
 /// new entry. Aiken stdlib lacks a `Map<Address, Int>` constructor, so the
 /// aggregation uses a `List<(Address, Int)>` accumulator — address equality
@@ -156,7 +156,7 @@ fn accumulate_partner(
   }
 }
 
-/// [v12 §3.10 BatchUnderwrite walker. Iterates the tx outputs once and
+/// §3.10 BatchUnderwrite walker. Iterates the tx outputs once and
 /// returns a `BatchFeeTotals` carrying:
 ///   * `cov_sum` / `prem_sum` — aggregate coverage and premium from policy
 ///     outputs (must equal redeemer's total_coverage / total_premium).
@@ -223,7 +223,7 @@ fn batch_policies_match_totals_v12(
                   if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned {
                     let funded =
                       assets.lovelace_of(out.value) >= pdat.coverage_amount
-                    // [v12 §3.10 Per-policy partner_share_bps invariants.
+                    // §3.10 Per-policy partner_share_bps invariants.
                     let bps_in_bounds =
                       pdat.partner_share_bps >= 0 && pdat.partner_share_bps <= partner_share_cap_bps
                     let bps_consistency =
@@ -319,7 +319,7 @@ fn start_time_in_tx_range(
   start_time >= tx_lower && start_time <= tx_upper && expiry_time > start_time
 }
 
-/// [v12 §3.8 Locate the freshly-created policy output that matches the
+/// §3.8 Locate the freshly-created policy output that matches the
 /// Underwrite redeemer and surface its `(partner_address, partner_share_bps)`
 /// for the caller's team/partner output enforcement.
 ///
@@ -399,7 +399,7 @@ fn policy_output_matches_underwrite(
   }
 }
 
-/// [v12 §3.8 / D7] Predicate: does `outputs` contain at least one entry at
+/// §3.8 / D7] Predicate: does `outputs` contain at least one entry at
 /// `addr` carrying at least `required_lovelace`?
 ///
 /// The team/partner output check is a `list.any` with `>=` — the off-chain
@@ -507,7 +507,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
 
     when redeemer is {
       // -----------------------------------------------------------------------
-      // [v12 §3.8 UNDERWRITE: Reserve coverage for a new policy, collect
+      // §3.8 UNDERWRITE: Reserve coverage for a new policy, collect
       // premium, and route the 2% protocol fee to team_address (+ optional
       // partner_address per the new policy's PolicyDatum).
       //
@@ -586,7 +586,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth
 
-        // 8. [FIX A-004 / v12] An Underwrite tx MUST create exactly one
+        // 8. An Underwrite tx MUST create exactly one
         // policy output bound to THIS pool with matching coverage/premium.
         // V12 widens the helper's return type from Bool to
         // `Option<(Option<Address>, Int)>` so the partner fields of the new
@@ -608,13 +608,13 @@ validator pool_validator(policy_script_hash: ByteArray) {
             premium,
           )
 
-        // 9. [v12 §3.8 Cap check on partner_share_bps. Defense-in-depth
+        // 9. §3.8 Cap check on partner_share_bps. Defense-in-depth
         // alongside the canonical-datum pin in
         // `policy_output_matches_underwrite`.
         let partner_share_in_bounds =
           new_partner_share_bps >= 0 && new_partner_share_bps <= partner_share_cap_bps
 
-        // 10. [v12 §3.8 Partner-address consistency: nonzero share REQUIRES
+        // 10. §3.8 Partner-address consistency: nonzero share REQUIRES
         // Some(addr). A None address with positive share is rejected; a
         // None address with zero share is the solo path (no partner output
         // required).
@@ -870,7 +870,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
       }
 
       // -----------------------------------------------------------------------
-      // [v12 §3.10 BATCH UNDERWRITE: Create N policies in a single tx.
+      // §3.10 BATCH UNDERWRITE: Create N policies in a single tx.
       //
       // Per D10: in-scope for V12 (validator + backend; UI deferred). Each
       // policy in the batch carries its own (partner_address,
@@ -1015,7 +1015,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             },
           )
 
-        // 13. [FIX A-021 / v12] Aggregate treasury cut against total_premium
+        // 13. Aggregate treasury cut against total_premium
         // (unchanged numerically from V11; the cut already represents the
         // protocol fee * the treasury share, both in bps, multiplied
         // against the FULL premium).
@@ -1160,7 +1160,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 4. Compute the canonical refund (derived; not caller-controlled).
         let refund_amount = calculate_refund(policy_datum.premium_paid)
 
-        // 5. [v12 §3.9 Compute the cancellation_fee retention and split it
+        // 5. §3.9 Compute the cancellation_fee retention and split it
         // by the SAME 2%/partner split as Underwrite — but applied to the
         // 10% retention, NOT the original premium (Choice B2). Rationale:
         // the 2% protocol fee on the original premium was already extracted
@@ -1172,13 +1172,13 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // curve on cancels.
         let cancellation_fee = policy_datum.premium_paid - refund_amount
 
-        // 6. [v12 §3.9 Cap check on partner_share_bps from the policy
+        // 6. §3.9 Cap check on partner_share_bps from the policy
         // datum (set at Underwrite time, immutable for the policy's
         // lifetime). Cancel applies the SAME cap to the cancel-path split.
         let partner_share_in_bounds =
           policy_datum.partner_share_bps >= 0 && policy_datum.partner_share_bps <= partner_share_cap_bps
 
-        // 7. [v12 §3.9 Partner-address consistency: nonzero share REQUIRES
+        // 7. §3.9 Partner-address consistency: nonzero share REQUIRES
         // Some(addr). Mirror of the Underwrite-branch invariant.
         let partner_consistency =
           policy_datum.partner_address != None || policy_datum.partner_share_bps == 0
@@ -1250,7 +1250,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> True
           }
 
-        // 16. [FIX A-021 / v12 §3.9 Treasury cut on the cancellation fee.
+        // 16. §3.9 Treasury cut on the cancellation fee.
         // Numerically equivalent to V11's `floor(premium_paid * 1_000 *
         // treasury_share_bps / 1e8)`, re-expressed against `cancellation_fee`
         // for clarity (since cancellation_fee == premium_paid * 1_000 /

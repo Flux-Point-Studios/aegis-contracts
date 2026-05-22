@@ -501,7 +501,7 @@ test net_premium_v12_diverges_from_v12_2_on_small_premium() {
 }
 
 // ---------------------------------------------------------------------------
-// §8] Property-style invariant tests
+// §8 Property-style invariant tests
 // ---------------------------------------------------------------------------
 
 test invariant_1_premium_conservation_holds() {

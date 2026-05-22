@@ -84,7 +84,7 @@ pub fn find_output_to_address(
 /// (or, where stake-credential restrictions don't apply, `sum_lovelace_to_pkh`).
 /// If a future caller genuinely needs "find the first output to a PKH", they
 /// should write a purpose-specific helper rather than re-introducing this one.
-/// [FIX A-006 / A-013] Sum the lovelace across ALL outputs going to a given
+/// Sum the lovelace across ALL outputs going to a given
 /// payment key hash. This is the safe primitive for verifying that an insured
 /// (or refund recipient) has been paid AT LEAST a required amount: callers
 /// compare `sum_lovelace_to_pkh(...) >= required` rather than relying on

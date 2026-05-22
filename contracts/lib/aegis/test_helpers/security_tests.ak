@@ -1544,7 +1544,7 @@ test cancel_total_liquidity_decreases_by_refund_plus_team_plus_partner_cuts() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12 §3.10 BatchUnderwrite — per-policy floor + aggregated outputs.
+// §3.10 BatchUnderwrite — per-policy floor + aggregated outputs.
 //
 // The validator's new walker `batch_policies_match_totals_v12` returns a
 // `BatchFeeTotals` record:
