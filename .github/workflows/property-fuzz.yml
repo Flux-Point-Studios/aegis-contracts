@@ -1,0 +1,81 @@
+name: property-fuzz
+
+# Round-10 property-fuzz layer. Runs the Aiken-native property tests (Team A)
+# and the Python differential fuzzer (Team B) on a nightly cron plus every
+# push to main / staging. The fuzz suite complements the Z3 SMT proofs and
+# the symbolic executor; see redteam/V12.2_ROUND_10_PROPERTY_FUZZ.md.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  push:
+    branches: [main, staging]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  property-fuzz:
+    name: Aiken + Python property fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Aiken v1.1.22
+        uses: aiken-lang/setup-aiken@v1
+        with:
+          version: v1.1.22
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-xdist z3-solver hypothesis
+
+      - name: Aiken property tests (Team A)
+        working-directory: contracts
+        run: aiken check 2>&1 | tee ../aiken-fuzz.log
+
+      - name: Python differential fuzzer (Team B)
+        working-directory: redteam/symbolic_executor
+        run: pytest fuzz/ -v --slow --junitxml=../../python-fuzz.xml | tee ../../python-fuzz.log
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-fuzz-${{ github.run_id }}
+          path: |
+            aiken-fuzz.log
+            python-fuzz.log
+            python-fuzz.xml
+          retention-days: 14
+
+      - name: PR summary comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const tail = (p, n) => fs.existsSync(p)
+              ? fs.readFileSync(p, 'utf8').split('\n').slice(-n).join('\n')
+              : `(no ${p})`;
+            const ak = tail('aiken-fuzz.log', 10);
+            const py = tail('python-fuzz.log', 20);
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Round-10 property-fuzz\n\n**Aiken:**\n\`\`\`\n${ak}\n\`\`\`\n**Python:**\n\`\`\`\n${py}\n\`\`\``
+            });
