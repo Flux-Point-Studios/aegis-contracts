@@ -16,7 +16,7 @@ use aegis/types.{
 use aegis/validation.{
   count_script_inputs, get_lower_bound, get_upper_bound, output_has_nft,
 }
-use cardano/address.{Address}
+use cardano/address.{Address, VerificationKey}
 // =============================================================================
 // Aegis Insurance Protocol - Pool Validator
 // Location: contracts/validators/pool.ak
@@ -44,7 +44,7 @@ use cardano/transaction.{
 }
 
 // ---------------------------------------------------------------------------
-// [FIX A-004] Helper: locate a freshly created policy output whose datum
+// Helper: locate a freshly created policy output whose datum
 // matches the Underwrite redeemer parameters and points back to THIS pool.
 // ---------------------------------------------------------------------------
 
@@ -85,7 +85,7 @@ fn consumed_policies_total_to(
 }
 
 // ---------------------------------------------------------------------------
-// [v12.2 §3.7] BatchFeeTotals — aggregated walker output for BatchUnderwrite.
+// §3.7 BatchFeeTotals — aggregated walker output for BatchUnderwrite.
 //
 // The walker `batch_policies_match_totals_v12_2` (below) folds across the
 // tx outputs and produces this record. V12.2 collapses V12's two-tier
@@ -130,7 +130,7 @@ type BatchFeeTotals {
   shares_ok: Bool,
 }
 
-/// [v12 §3.10] Merge a per-policy partner cut into the running floored
+/// §3.10 Merge a per-policy partner cut into the running floored
 /// totals list. If `addr` already has an entry, bump it; otherwise push a
 /// new entry. Aiken stdlib lacks a `Map<Address, Int>` constructor, so the
 /// aggregation uses a `List<(Address, Int)>` accumulator — address equality
@@ -156,82 +156,7 @@ fn accumulate_partner(
   }
 }
 
-/// [v12 §3.10] Sum the lovelace across all aggregated partner cuts. Used
-/// to derive `total_net = total_premium - team_total_unfloored -
-/// sum_partner_cuts(partner_totals_unfloored)`.
-fn sum_partner_cuts(entries: List<(Address, Int)>) -> Int {
-  list.foldl(entries, 0, fn(entry, acc) { acc + entry.2nd })
-}
-
-fn batch_policies_match_totals(
-  outputs: List<Output>,
-  own_pool_hash: ByteArray,
-  own_pool_nft: ByteArray,
-  policy_script_hash: ByteArray,
-  validity_range: ValidityRange,
-  total_coverage: Int,
-  total_premium: Int,
-) -> Bool {
-  let triple =
-    list.foldl(
-      outputs,
-      (0, 0, True),
-      fn(out, acc) {
-        let (cov_acc, prem_acc, ok_acc) = acc
-        when out.address.payment_credential is {
-          // [FIX A-021] Script credential MUST match the parameterized
-          // policy_validator hash. The previous wildcard `Script(_)` allowed
-          // an attacker to route the new policy output to any script address
-          // (e.g., a mint-only policy's hash, an always-fail script, etc.),
-          // inflating active_coverage on the pool while making the policy
-          // permanently unspendable. Cost-to-damage ratio ~1:1 — the attacker
-          // paid `coverage + premium` for `coverage` worth of locked pool
-          // capacity.
-          Script(h) ->
-            if h == policy_script_hash {
-              when out.datum is {
-                InlineDatum(raw_pdat) -> {
-                  expect pdat: PolicyDatum = raw_pdat
-                  let time_ok =
-                    start_time_in_tx_range(
-                      pdat.start_time,
-                      pdat.expiry_time,
-                      validity_range,
-                    )
-                  // [v12 / A-026, A-027 generalised] `pdat.oracle_nft` must
-                  // be a canonical handle for the declared provider. For
-                  // AegisSelf this is membership in the V12 five-NFT
-                  // allowlist; for Charli3/Orcfax it's the single pinned
-                  // value (semantics unchanged). Defense-in-depth alongside
-                  // the per-parser `expect ... canonical` checks.
-                  let oracle_pinned =
-                    is_canonical_oracle_nft(pdat.oracle_provider, pdat.oracle_nft)
-                  if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned {
-                    let funded =
-                      assets.lovelace_of(out.value) >= pdat.coverage_amount
-                    (
-                      cov_acc + pdat.coverage_amount,
-                      prem_acc + pdat.premium_paid,
-                      ok_acc && funded,
-                    )
-                  } else {
-                    acc
-                  }
-                }
-                _ -> acc
-              }
-            } else {
-              acc
-            }
-          _ -> acc
-        }
-      },
-    )
-  let (cov_sum, prem_sum, funded_ok) = triple
-  cov_sum == total_coverage && prem_sum == total_premium && funded_ok
-}
-
-/// [v12 §3.10] BatchUnderwrite walker. Iterates the tx outputs once and
+/// §3.10 BatchUnderwrite walker. Iterates the tx outputs once and
 /// returns a `BatchFeeTotals` carrying:
 ///   * `cov_sum` / `prem_sum` — aggregate coverage and premium from policy
 ///     outputs (must equal redeemer's total_coverage / total_premium).
@@ -281,8 +206,6 @@ fn batch_policies_match_totals_v12(
       init,
       fn(out, acc) {
         when out.address.payment_credential is {
-          // [FIX A-021] Script credential MUST match the parameterized
-          // policy_validator hash. See `batch_policies_match_totals` doc.
           Script(h) ->
             if h == policy_script_hash {
               when out.datum is {
@@ -300,16 +223,13 @@ fn batch_policies_match_totals_v12(
                   if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned {
                     let funded =
                       assets.lovelace_of(out.value) >= pdat.coverage_amount
-                    // [v12 §3.10] Per-policy partner_share_bps invariants.
+                    // §3.10 Per-policy partner_share_bps invariants.
                     let bps_in_bounds =
                       pdat.partner_share_bps >= 0 && pdat.partner_share_bps <= partner_share_cap_bps
                     let bps_consistency =
-                      when pdat.partner_address is {
-                        Some(_) -> True
-                        None -> pdat.partner_share_bps == 0
-                      }
+                      pdat.partner_address != None || pdat.partner_share_bps == 0
                     let this_shares_ok = bps_in_bounds && bps_consistency
-                    // [v12.2 §3.7] Per-policy Hybrid fee math:
+                    // §3.7 Per-policy Hybrid fee math:
                     //   fee_total_i = max(min_utxo, premium_i * fee_bps / 10_000)
                     //   (team_cut_i, partner_cut_i) = split with silent absorb
                     // The split helper's contract guarantees
@@ -327,7 +247,7 @@ fn batch_policies_match_totals_v12(
                         pdat.partner_share_bps,
                         min_utxo_lovelace,
                       )
-                    // [v12.2 §3.7] partner_totals only accumulates entries
+                    // §3.7 partner_totals only accumulates entries
                     // where partner_cut_i > 0. The silent-absorb path
                     // (partner_cut_i == 0) contributes nothing to
                     // partner_totals AND nothing to partner_totals_sum.
@@ -378,7 +298,7 @@ fn batch_policies_match_totals_v12(
   }
 }
 
-/// [FIX A-015] Verify the policy datum's start_time falls within the
+/// Verify the policy datum's start_time falls within the
 /// transaction's validity range and expiry_time strictly follows.
 ///
 /// Without this, an attacker (or a careless builder) could create a
@@ -399,7 +319,7 @@ fn start_time_in_tx_range(
   start_time >= tx_lower && start_time <= tx_upper && expiry_time > start_time
 }
 
-/// [v12 §3.8] Locate the freshly-created policy output that matches the
+/// §3.8 Locate the freshly-created policy output that matches the
 /// Underwrite redeemer and surface its `(partner_address, partner_share_bps)`
 /// for the caller's team/partner output enforcement.
 ///
@@ -422,11 +342,11 @@ fn policy_output_matches_underwrite(
   coverage: Int,
   premium: Int,
 ) -> Option<(Option<Address>, Int)> {
-  // [FIX A-025] Walk the outputs counting matches and capturing the partner
+  // Walk the outputs counting matches and capturing the partner
   // fields of the (unique) matching one. The fold accumulator carries the
   // count plus the most-recent matching policy's partner fields. We only
   // return `Some(...)` when count == 1, so >1 matches degrade to None and
-  // fail the branch the same way 0 matches do. [v12] The previous Bool
+  // fail the branch the same way 0 matches do. The previous Bool
   // return type is widened to `Option<(Option<Address>, Int)>` so the
   // caller can apply the per-policy team/partner output checks without a
   // second walk over `outputs`.
@@ -479,25 +399,7 @@ fn policy_output_matches_underwrite(
   }
 }
 
-// ---------------------------------------------------------------------------
-// [v12 §3.8 / D7] Floor-pad helper. The per-output min-utxo floor is
-// `max(min_utxo_lovelace, percentage_cut)` — when the percentage-calculated
-// fee cut is below the 2-ADA min-utxo floor (small premiums, < 100 ADA at
-// the default 200 bps), the submitter's wallet pays the floor-pad subsidy.
-// The pool's `total_liquidity` and physical lovelace still grow by exactly
-// `net_premium = premium - team_cut - partner_cut` (NOT minus the floored
-// amounts) — the floor pad is exogenous to pool accounting, sourced from
-// submitter inputs the same way the Conway `treasury_donation` is.
-// ---------------------------------------------------------------------------
-fn floor_to_min_utxo(amount: Int) -> Int {
-  if amount > min_utxo_lovelace {
-    amount
-  } else {
-    min_utxo_lovelace
-  }
-}
-
-/// [v12 §3.8 / D7] Predicate: does `outputs` contain at least one entry at
+/// §3.8 / D7] Predicate: does `outputs` contain at least one entry at
 /// `addr` carrying at least `required_lovelace`?
 ///
 /// The team/partner output check is a `list.any` with `>=` — the off-chain
@@ -520,14 +422,39 @@ fn output_to_address_at_least(
   )
 }
 
+/// [FIX R8-DRAIN-1] Reject `partner_address` aliasing with privileged
+/// addresses (team_address, pool address, policy_validator script
+/// credential). Without this guard, a hostile builder can set
+/// `partner_address = Some(team_address)` (or the pool's own address,
+/// or any script credential the user controls indirectly) and the team
+/// + partner output checks — two independent `list.any` calls over the
+/// same outputs list — become satisfiable by a SINGLE on-chain output.
+/// The team is short-changed by `partner_cut` per cycle, linear in
+/// premium, hitting Underwrite, BatchUnderwrite, and AcceptCancellation
+/// symmetrically.
+fn partner_address_not_aliased(
+  partner_address: Option<Address>,
+  team_address: Address,
+  pool_address: Address,
+  policy_script_hash: ByteArray,
+) -> Bool {
+  when partner_address is {
+    None -> True
+    Some(addr) ->
+      addr != team_address && addr != pool_address && addr.payment_credential != Script(
+        policy_script_hash,
+      )
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Pool Validator
 // ---------------------------------------------------------------------------
 
 /// Pool validator parameterized by the policy_validator's script hash.
 ///
-/// [FIX A-022] The parameter is consumed by `policy_output_matches_underwrite`
-/// and `batch_policies_match_totals` to require that newly-created policy
+/// The parameter is consumed by `policy_output_matches_underwrite`
+/// and `batch_policies_match_totals_v12` to require that newly-created policy
 /// outputs land at the canonical policy_validator address. Without this
 /// binding, an attacker could route the policy output to any script
 /// credential (e.g., a mint-only policy hash), permanently locking the
@@ -544,7 +471,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
     // Datum must be present
     expect Some(datum) = datum_opt
 
-    // [FIX A-021] Bind `treasury_donation` so the three fee-bearing branches
+    // Bind `treasury_donation` so the three fee-bearing branches
     // (Underwrite, BatchUnderwrite, AcceptCancellation) can enforce that the
     // Conway-era body field is at least the protocol-fee-derived cut. The
     // pool is a singleton (A-011), so this validator is the single point of
@@ -580,7 +507,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
 
     when redeemer is {
       // -----------------------------------------------------------------------
-      // [v12 §3.8] UNDERWRITE: Reserve coverage for a new policy, collect
+      // §3.8 UNDERWRITE: Reserve coverage for a new policy, collect
       // premium, and route the 2% protocol fee to team_address (+ optional
       // partner_address per the new policy's PolicyDatum).
       //
@@ -608,7 +535,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         expect InlineDatum(raw_new_datum) = cont_output.datum
         expect new_datum: PoolDatum = raw_new_datum
 
-        // [FIX A-024] Reject non-positive coverage. Aiken's integer
+        // Reject non-positive coverage. Aiken's integer
         // division floors toward negative infinity, so the prior
         // `is_ratio_acceptable` check (`coverage / premium <= 50`)
         // accepted negative coverage (e.g. `-5 / 2_000_000 = -1 <= 50`).
@@ -626,7 +553,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let can_cover =
           can_underwrite(datum.total_liquidity, datum.active_coverage, coverage)
 
-        // 4. [v12.2 §3.5] Compute fee_total with floor INSIDE the carve.
+        // 4. §3.5 Compute fee_total with floor INSIDE the carve.
         // Pool grows by `net_pool_growth = premium - fee_total`; the
         // fee_total leaves the pool to team/partner outputs.
         let fee_total =
@@ -650,7 +577,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
-        // 7. [v12.2 §3.5] Pool value grows by `net_pool_growth`, NOT by
+        // 7. §3.5 Pool value grows by `net_pool_growth`, NOT by
         // the full premium and NOT by V12's `net_premium`. The fee_total
         // leaves the pool to team/partner outputs; the floor is inside
         // fee_total so the pool gives back a slight discount on small
@@ -659,7 +586,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth
 
-        // 8. [FIX A-004 / v12] An Underwrite tx MUST create exactly one
+        // 8. An Underwrite tx MUST create exactly one
         // policy output bound to THIS pool with matching coverage/premium.
         // V12 widens the helper's return type from Bool to
         // `Option<(Option<Address>, Int)>` so the partner fields of the new
@@ -681,23 +608,20 @@ validator pool_validator(policy_script_hash: ByteArray) {
             premium,
           )
 
-        // 9. [v12 §3.8] Cap check on partner_share_bps. Defense-in-depth
+        // 9. §3.8 Cap check on partner_share_bps. Defense-in-depth
         // alongside the canonical-datum pin in
         // `policy_output_matches_underwrite`.
         let partner_share_in_bounds =
           new_partner_share_bps >= 0 && new_partner_share_bps <= partner_share_cap_bps
 
-        // 10. [v12 §3.8] Partner-address consistency: nonzero share REQUIRES
+        // 10. §3.8 Partner-address consistency: nonzero share REQUIRES
         // Some(addr). A None address with positive share is rejected; a
         // None address with zero share is the solo path (no partner output
         // required).
         let partner_consistency =
-          when new_partner_address is {
-            Some(_) -> True
-            None -> new_partner_share_bps == 0
-          }
+          new_partner_address != None || new_partner_share_bps == 0
 
-        // 11. [v12.2 §3.5] Compute the (team_cut, partner_cut) split with
+        // 11. §3.5 Compute the (team_cut, partner_cut) split with
         // silent partner_cut absorb. team_cut absorbs sub-floor partner_cut.
         let (team_cut, partner_cut) =
           calculate_protocol_fee_split(
@@ -706,7 +630,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             min_utxo_lovelace,
           )
 
-        // 12. [v12.2 §3.5] Team output check. Threshold IS `team_cut`
+        // 12. §3.5 Team output check. Threshold IS `team_cut`
         // (no floor_to_min_utxo wrapper). team_cut >= min_utxo_lovelace
         // is guaranteed by the silent-absorb invariant (V12.2 spec
         // §8.1.4): either partner_cut == 0 → team == fee_total >=
@@ -715,7 +639,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let team_output_funded =
           output_to_address_at_least(outputs, team_address, team_cut)
 
-        // 13. [v12.2 §3.5] Partner output check with silent absorb. When
+        // 13. §3.5 Partner output check with silent absorb. When
         // partner_cut == 0 (sub-floor → absorbed by team), the partner
         // output is OMITTED entirely — even if partner_address is
         // Some(_), no on-chain output to partner_address is required.
@@ -733,7 +657,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> True
           }
 
-        // 14. [FIX A-021] The Conway-era treasury_donation must be at least
+        // 14. The Conway-era treasury_donation must be at least
         // the protocol-fee-derived cut. Sourced from the submitter's wallet
         // inputs (NOT from the premium that flows to the pool), so the
         // strict V12 value check on the pool continuation is unaffected.
@@ -751,7 +675,18 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> required_donation == 0
           }
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && team_output_funded && partner_output_funded
+        // [FIX R8-DRAIN-1] Underwrite arm: reject partner_address aliasing
+        // with team_address / pool address / policy script. See the
+        // helper `partner_address_not_aliased` doc for severity rationale.
+        let partner_not_aliased =
+          partner_address_not_aliased(
+            new_partner_address,
+            team_address,
+            own_address,
+            policy_script_hash,
+          )
+
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded
       }
 
       // -----------------------------------------------------------------------
@@ -767,13 +702,13 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 2. Verify payout is positive
         let payout_positive = payout > 0
 
-        // [FIX A-001] Find the consumed policy UTxO and read its datum.
+        // Find the consumed policy UTxO and read its datum.
         // Verify (a) the policy targets THIS pool, (b) its coverage matches
         // the requested payout. Without these checks, anyone can submit ANY
         // policy UTxO (including a self-constructed synthetic policy) and
         // request an arbitrarily large payout.
         //
-        // [v6.0.2 / L-006 fix] Resolve the policy script credential via
+        // Resolve the policy script credential via
         // the validator's parameterized `policy_script_hash` rather than a
         // redeemer-supplied field. Pre-fix, an attacker could submit
         // `ProcessClaim { policy_script: <attacker_hash> }` referencing a
@@ -796,7 +731,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
           )
         expect InlineDatum(raw_policy_datum) = policy_input.output.datum
         expect policy_datum: PolicyDatum = raw_policy_datum
-        // [FIX F-004 + A-001] Policy must point at THIS pool AND payout must
+        // Policy must point at THIS pool AND payout must
         // equal the policy's declared coverage. Both bindings prevent the
         // single-tx pool drain attack described in A-001.
         let policy_targets_this_pool =
@@ -819,14 +754,14 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
-        // 5. [FIX A-007] Pool value must DECREASE by exactly `payout`.
+        // 5. Pool value must DECREASE by exactly `payout`.
         // Previously used `>=`, which permitted the pool to retain extra value
         // (the difference being unaccounted-for in the datum, rendering pool
         // accounting drift-prone).
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) - payout
 
-        // [FIX F-007 / A-005] Solvency is now enforced inside verify_claim_datum
+        // Solvency is now enforced inside verify_claim_datum
         // (which requires payout ≤ old_active and new_active ≥ 0). The previous
         // `new_total >= new_active` check was tautological because both fields
         // decrement by the same payout.
@@ -849,7 +784,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 2. Verify amount is positive
         let amount_positive = amount > 0
 
-        // 3. [FIX A-003] Verify datum update including lp_supply.
+        // 3. Verify datum update including lp_supply.
         let datum_ok =
           verify_add_liquidity_datum(
             datum.total_liquidity,
@@ -866,11 +801,11 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft
 
-        // 5. [FIX A-007] Pool value must EQUAL old + amount exactly.
+        // 5. Pool value must EQUAL old + amount exactly.
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + amount
 
-        // 6. [FIX A-003] LP mint quantity must EXACTLY MATCH the lp_supply
+        // 6. LP mint quantity must EXACTLY MATCH the lp_supply
         // delta in the new datum. This binds direction + magnitude in one
         // check: an attacker cannot mint with a Burn redeemer (covered by
         // verify_add_liquidity_datum requiring positive delta), nor mint
@@ -899,7 +834,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let withdrawal_safe =
           can_withdraw(datum.total_liquidity, datum.active_coverage, amount)
 
-        // 4. [FIX A-003] LP burn quantity is taken from the mint and must
+        // 4. LP burn quantity is taken from the mint and must
         // be the canonical match for the requested withdrawal amount.
         let mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
         let lp_burned_qty = -mint_qty
@@ -924,18 +859,18 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft
 
-        // 7. [FIX A-002] Pool value must DECREASE by exactly `amount`.
+        // 7. Pool value must DECREASE by exactly `amount`.
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) - amount
 
-        // 8. [FIX A-003] Sanity: mint must be strictly negative (burn).
+        // 8. Sanity: mint must be strictly negative (burn).
         let direction_ok = mint_qty < 0
 
         amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok
       }
 
       // -----------------------------------------------------------------------
-      // [v12 §3.10] BATCH UNDERWRITE: Create N policies in a single tx.
+      // §3.10 BATCH UNDERWRITE: Create N policies in a single tx.
       //
       // Per D10: in-scope for V12 (validator + backend; UI deferred). Each
       // policy in the batch carries its own (partner_address,
@@ -964,7 +899,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         expect InlineDatum(raw_new_datum) = cont_output.datum
         expect new_datum: PoolDatum = raw_new_datum
 
-        // [FIX A-024] Same positivity guard as Underwrite. Without this,
+        // Same positivity guard as Underwrite. Without this,
         // a BatchUnderwrite with `total_coverage < 0` would shrink the
         // pool's active_coverage and corrupt accounting.
         let coverage_positive = total_coverage > 0
@@ -987,7 +922,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
-        // 5. [v12.2 §3.7] Walk policy outputs ONCE, aggregating per-policy
+        // 5. §3.7 Walk policy outputs ONCE, aggregating per-policy
         // fee_total_i (= max(min_utxo, premium_i × fee_bps / 10_000)) and
         // (team_cut_i, partner_cut_i) with silent absorb. Single
         // canonical sum set — no V12 floored/unfloored distinction.
@@ -1008,7 +943,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             datum.protocol_fee_bps,
           )
 
-        // 6. [v12.2 §3.7] Aggregate net pool growth = total_premium −
+        // 6. §3.7 Aggregate net pool growth = total_premium −
         // Σ fee_total_i. team_total + partner_totals_sum == fee_total_sum
         // by construction (split helper contract).
         let net_pool_growth = total_premium - batch_totals.fee_total_sum
@@ -1024,23 +959,23 @@ validator pool_validator(policy_script_hash: ByteArray) {
             total_coverage,
           )
 
-        // 8. [v12.2 §3.7] Pool value equality — grow by net_pool_growth.
+        // 8. §3.7 Pool value equality — grow by net_pool_growth.
         // The fee_total leaves the pool to team/partner outputs; the floor
         // is inside fee_total so the pool gives back a slight discount on
         // small premiums (LP absorbs the floor cost, V12.2 spec §10.1).
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth
 
-        // 9. [v12.2 §3.7] Funded check from `batch_totals`: coverage and
+        // 9. §3.7 Funded check from `batch_totals`: coverage and
         // premium sums match the redeemer; every policy output is at the
         // canonical policy script and carries >= its coverage in lovelace.
         let batch_policies_funded = batch_totals.funded_ok
 
-        // 10. [v12.2 §3.7] Per-policy partner_share_bps invariants folded
+        // 10. §3.7 Per-policy partner_share_bps invariants folded
         // into shares_ok by the walker.
         let shares_ok = batch_totals.shares_ok
 
-        // 11. [v12.2 §3.7] Team output check on the aggregated sum. Threshold
+        // 11. §3.7 Team output check on the aggregated sum. Threshold
         // is `team_total` exactly (no floor wrapper) — team_total is the
         // sum of per-policy team_cut_i (which includes silently-absorbed
         // partner cuts).
@@ -1051,7 +986,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             batch_totals.team_total,
           )
 
-        // 12. [v12.2 §3.7] Partner output check on each unique partner
+        // 12. §3.7 Partner output check on each unique partner
         // address. `partner_totals` only contains entries for policies
         // whose `partner_cut_i > 0` (silently-absorbed policies don't
         // contribute). Each entry has cut_sum >= min_utxo by construction
@@ -1064,7 +999,23 @@ validator pool_validator(policy_script_hash: ByteArray) {
             },
           )
 
-        // 13. [FIX A-021 / v12] Aggregate treasury cut against total_premium
+        // [FIX R8-DRAIN-1] BatchUnderwrite arm: reject any per-policy
+        // partner_address that aliases team_address, the pool's own
+        // address, or the policy_validator script credential. The
+        // aliasing primitive would short-change the team by the
+        // aliased partner_cut on the aggregated output check.
+        let partner_addresses_not_aliased =
+          list.all(
+            batch_totals.partner_totals,
+            fn(entry) {
+              let addr = entry.1st
+              addr != team_address && addr != own_address && addr.payment_credential != Script(
+                policy_script_hash,
+              )
+            },
+          )
+
+        // 13. Aggregate treasury cut against total_premium
         // (unchanged numerically from V11; the cut already represents the
         // protocol fee * the treasury share, both in bps, multiplied
         // against the FULL premium).
@@ -1080,7 +1031,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> required_donation == 0
           }
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && team_output_funded && partner_outputs_funded && donation_ok
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok
       }
 
       // -----------------------------------------------------------------------
@@ -1096,11 +1047,11 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 2. Verify total_returned is positive
         let returned_positive = total_returned > 0
 
-        // 3. [FIX A-001] Verify the consumed policies (a) come from the
+        // 3. Verify the consumed policies (a) come from the
         // canonical policy_validator (parameterized hash), (b) bind to
         // THIS pool, and (c) their lovelace sum equals total_returned.
         //
-        // [v6.0.2 / L-006 fix] The policy script credential is now sourced
+        // The policy script credential is now sourced
         // from the validator's `policy_script_hash` parameter, not a
         // redeemer-supplied field. Pre-fix, an attacker could substitute
         // their own permissive script.
@@ -1130,11 +1081,11 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
-        // 6. [FIX A-007] Pool value must EQUAL old + total_returned exactly.
+        // 6. Pool value must EQUAL old + total_returned exactly.
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + total_returned
 
-        // 7. [FIX A-005] Non-negativity (the old new_total >= new_active check
+        // 7. Non-negativity (the old new_total >= new_active check
         // was tautological because both fields decrement equally).
         let remains_non_negative =
           new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0 && total_returned <= datum.active_coverage
@@ -1143,7 +1094,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
       }
 
       // -----------------------------------------------------------------------
-      // [FIX A-020] ACCEPT CANCELLATION: Settle a Cancel-redeemed policy.
+      // ACCEPT CANCELLATION: Settle a Cancel-redeemed policy.
       //
       // Background: the A-008 fix forced `policy.Cancel` to route its residual
       // via `find_canonical_pool_output` (must carry pool_nft). The only UTxO
@@ -1180,7 +1131,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
 
         // 2. Locate the consumed Cancel-redeemed policy and parse its datum.
         //
-        // [v6.0.2 / L-006 fix] Resolve the policy script credential via
+        // Resolve the policy script credential via
         // the validator's `policy_script_hash` parameter rather than a
         // redeemer field. Same root cause as the ProcessClaim and
         // BatchExpireProcess fixes.
@@ -1209,7 +1160,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 4. Compute the canonical refund (derived; not caller-controlled).
         let refund_amount = calculate_refund(policy_datum.premium_paid)
 
-        // 5. [v12 §3.9] Compute the cancellation_fee retention and split it
+        // 5. §3.9 Compute the cancellation_fee retention and split it
         // by the SAME 2%/partner split as Underwrite — but applied to the
         // 10% retention, NOT the original premium (Choice B2). Rationale:
         // the 2% protocol fee on the original premium was already extracted
@@ -1221,21 +1172,18 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // curve on cancels.
         let cancellation_fee = policy_datum.premium_paid - refund_amount
 
-        // 6. [v12 §3.9] Cap check on partner_share_bps from the policy
+        // 6. §3.9 Cap check on partner_share_bps from the policy
         // datum (set at Underwrite time, immutable for the policy's
         // lifetime). Cancel applies the SAME cap to the cancel-path split.
         let partner_share_in_bounds =
           policy_datum.partner_share_bps >= 0 && policy_datum.partner_share_bps <= partner_share_cap_bps
 
-        // 7. [v12 §3.9] Partner-address consistency: nonzero share REQUIRES
+        // 7. §3.9 Partner-address consistency: nonzero share REQUIRES
         // Some(addr). Mirror of the Underwrite-branch invariant.
         let partner_consistency =
-          when policy_datum.partner_address is {
-            Some(_) -> True
-            None -> policy_datum.partner_share_bps == 0
-          }
+          policy_datum.partner_address != None || policy_datum.partner_share_bps == 0
 
-        // 8. [v12.2 §3.6] Apply Hybrid fee math to the cancellation_fee
+        // 8. §3.6 Apply Hybrid fee math to the cancellation_fee
         // retention. fee_total floors to min_utxo INSIDE the carve, so
         // the pool's value drops by exactly `fee_total_cancel` (not
         // raw_fee + exogenous pad).
@@ -1256,14 +1204,14 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let bounds_ok =
           refund_amount >= 0 && refund_amount <= datum.total_liquidity && policy_datum.coverage_amount <= datum.active_coverage
 
-        // 10. [v12.2 §3.6] Pool's value decreases by refund_amount AND
+        // 10. §3.6 Pool's value decreases by refund_amount AND
         // fee_total_cancel. team_cut + partner_cut sum exactly to
         // fee_total_cancel by helper contract; tracking fee_total here
         // makes the value invariant easier to audit.
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) - refund_amount - fee_total_cancel
 
-        // 11. [v12.2 §3.6] Datum: total_liquidity drops by refund +
+        // 11. §3.6 Datum: total_liquidity drops by refund +
         // fee_total_cancel (sum of team_cut + partner_cut by construction).
         // active_coverage drops by the consumed policy's coverage_amount.
         // lp_supply unchanged.
@@ -1279,13 +1227,13 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let remains_non_negative =
           new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0
 
-        // 14. [v12.2 §3.6] Team output check. Threshold = team_cut
+        // 14. §3.6 Team output check. Threshold = team_cut
         // exactly (no floor_to_min_utxo wrapper). team_cut >=
         // min_utxo_lovelace by the silent-absorb invariant.
         let team_output_funded =
           output_to_address_at_least(outputs, team_address, team_cut)
 
-        // 15. [v12.2 §3.6] Partner output check with silent absorb on
+        // 15. §3.6 Partner output check with silent absorb on
         // cancel. When partner_cut == 0 (sub-floor → absorbed), the
         // partner output is OMITTED entirely even if partner_address is
         // Some(_). PolicyDatum still records the partner attribution for
@@ -1302,7 +1250,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> True
           }
 
-        // 16. [FIX A-021 / v12 §3.9] Treasury cut on the cancellation fee.
+        // 16. §3.9 Treasury cut on the cancellation fee.
         // Numerically equivalent to V11's `floor(premium_paid * 1_000 *
         // treasury_share_bps / 1e8)`, re-expressed against `cancellation_fee`
         // for clarity (since cancellation_fee == premium_paid * 1_000 /
@@ -1317,7 +1265,21 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> required_donation == 0
           }
 
-        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && team_output_funded && partner_output_funded
+        // [FIX R8-DRAIN-1] AcceptCancellation arm: reject if the
+        // consumed policy_datum.partner_address aliases team_address /
+        // pool / policy_validator. Defense-in-depth: a V12.2+ Underwrite
+        // would have already rejected such a policy at creation time,
+        // but old V11 policies on chain weren't validated against this
+        // primitive and may carry hostile partner_addresses.
+        let partner_not_aliased =
+          partner_address_not_aliased(
+            policy_datum.partner_address,
+            team_address,
+            own_address,
+            policy_script_hash,
+          )
+
+        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded
       }
     }
   }
@@ -1330,6 +1292,95 @@ validator pool_validator(policy_script_hash: ByteArray) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// [FIX R8-DRAIN-1 regression] partner_address_not_aliased — Round-8
+// finding R8-DRAIN-1. Three regression tests covering each of the
+// three privileged addresses (team, pool, policy script).
+
+test partner_aliasing_none_passes() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  partner_address_not_aliased(None, team, pool, #"cc")
+}
+
+test partner_aliasing_to_team_fails() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  // Hostile partner_address == team_address must be rejected.
+  partner_address_not_aliased(Some(team), team, pool, #"cc") == False
+}
+
+test partner_aliasing_to_pool_fails() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  // Hostile partner_address == pool_address must be rejected.
+  partner_address_not_aliased(Some(pool), team, pool, #"cc") == False
+}
+
+test partner_aliasing_to_policy_script_fails() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  // Hostile partner_address with payment_credential == Script(policy_hash)
+  // must be rejected (regardless of stake credential).
+  let policy_addr =
+    Address {
+      payment_credential: Script(#"cc"),
+      stake_credential: None,
+    }
+  partner_address_not_aliased(Some(policy_addr), team, pool, #"cc") == False
+}
+
+test partner_aliasing_to_unrelated_passes() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: None,
+    }
+  // Benign partner_address (different VKH) must pass.
+  let benign =
+    Address {
+      payment_credential: address.VerificationKey(#"dd"),
+      stake_credential: None,
+    }
+  partner_address_not_aliased(Some(benign), team, pool, #"cc")
+}
 
 test underwrite_coverage_check() {
   // Pool: 100 ADA total, 30 ADA active -> 70 ADA available

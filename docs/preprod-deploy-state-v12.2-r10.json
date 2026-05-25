@@ -1,0 +1,81 @@
+{
+  "network": "preprod",
+  "previous_version": "configs/deploy-state.preprod.v12.2-R7.archive.json",
+  "steps": {
+    "init_pool": {
+      "bootstrap_lovelace": 100000000,
+      "lp_token_policy_hash": "412f4dc4f99fdaf69b38260c99bedca18148531a6f4e74b07e22d99f",
+      "pool_address": "addr_test1wplh6fjqcqhh0khxlx4sl4z7lcfuxdd98wrdn0rl0h9j5qq00dsc6",
+      "pool_nft_asset_hex": "41454749535f504f4f4c5f5631325f325f523130",
+      "pool_nft_policy_id": "d882b4d76d3486b0a49f9b10bac025d72117b5b9aef61a8be4387abb",
+      "pool_utxo_id": "71279ba00f5848caa3c225c26821a88b83b68ecad9aeb712e3c90092ed5cd5c3#0",
+      "pool_validator_hash": "7f7d2640c02f77dae6f9ab0fd45efe13c335a53b86d9bc7f7dcb2a00",
+      "protocol_fee_bps": 200,
+      "submitted_at": 1779659640,
+      "tx_hash": "71279ba00f5848caa3c225c26821a88b83b68ecad9aeb712e3c90092ed5cd5c3"
+    },
+    "mint_pool_nft": {
+      "asset_name_ascii": "AEGIS_POOL_V12_2_R10",
+      "asset_name_hex": "41454749535f504f4f4c5f5631325f325f523130",
+      "compiled_script_hex": "5901fd010100332229800aba2aba1aab9faab9eaab9dab9a9bae002488888896600264646644b30013370e900018039baa0018991991192cc0056600264660020026eb0c03c014896600200314a115980099baf3010300e3754602000202914a313300200230110014030807a2b30013370e900119199119801001000912cc00400600713233225980099b9100f0028acc004cdc78078014400600c808226600a00a602a0088080dd718078009bad30100013011001404064646600200200c44b3001001801c4c8cc896600266e4402400a2b30013371e01200510018032022899802802980b0022022375c60200026eacc044004c0480050110a5eb7bdb18052000899b8748008006294100a452820148a51899b880014800100a1919800800801912cc0040062900044c8cc88cc88cc008008004896600200310038994c004dd71809000cdd69809800ccc00c00cc0580092225980099b8f00800c899b800010028800a028180a000a026375660200066eb8c034004cc00c00cc044008c03c00500e1bab300b300c300c300c300c001375c601660126ea8008c020dd51805002459006180400098041804800980400098021baa0088a4d1365640084c126d879825820c2fba189d5250809474cc3e6c4e8f87f838c589f0b52a164d580d2a486059b9700004c01155441454749535f504f4f4c5f5631325f325f5231300001",
+      "init_utxo": "c2fba189d5250809474cc3e6c4e8f87f838c589f0b52a164d580d2a486059b97#0",
+      "operator_address": "addr_test1qrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t99zx9jlzjdkarq5v5n68e37hss6jgyuyutjn6dstg4evgwqfnsjd5",
+      "policy_id": "d882b4d76d3486b0a49f9b10bac025d72117b5b9aef61a8be4387abb",
+      "submitted_at": 1779659234,
+      "tx_hash": "803fb634cf66113e0de8751dda33f30fde505603a14475bc0745c5ca3c0c7f59"
+    },
+    "publish_refs": {
+      "results": [
+        {
+          "fee_ada": "0.4042",
+          "fee_lovelace": 404245,
+          "label": "policy_validator",
+          "ref_utxo_ada": "23.65",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "bb357318e1ab84486f6fa9ff20d27f4ccf4f2c74ad4e742286094954b06a6058#0",
+          "ref_utxo_lovelace": 23653360,
+          "script_address": "addr_test1wpeamxn8w20r4zjwwf56jcwp0yk4k26asau056n5lgh9tusm7qmsy",
+          "script_hash": "73dd9a67729e3a8a4e7269a961c1792d5b2b5d8778fa6a74fa2e55f2",
+          "script_size_bytes": 4956,
+          "submitted": true,
+          "submitted_at": 1779659327,
+          "title": "policy.policy_validator.spend",
+          "tx_hash": "bb357318e1ab84486f6fa9ff20d27f4ccf4f2c74ad4e742286094954b06a6058"
+        },
+        {
+          "fee_ada": "0.5754",
+          "fee_lovelace": 575361,
+          "label": "pool_validator",
+          "ref_utxo_ada": "40.41",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "614bd025b28a7fe71058d06bbf1f41b272ac297df162bdc32d8bb5f9503cc447#0",
+          "ref_utxo_lovelace": 40414950,
+          "script_address": "addr_test1wplh6fjqcqhh0khxlx4sl4z7lcfuxdd98wrdn0rl0h9j5qq00dsc6",
+          "script_hash": "7f7d2640c02f77dae6f9ab0fd45efe13c335a53b86d9bc7f7dcb2a00",
+          "script_size_bytes": 8845,
+          "submitted": true,
+          "submitted_at": 1779659419,
+          "title": "pool.pool_validator.spend",
+          "tx_hash": "614bd025b28a7fe71058d06bbf1f41b272ac297df162bdc32d8bb5f9503cc447"
+        },
+        {
+          "fee_ada": "0.2063",
+          "fee_lovelace": 206333,
+          "label": "lp_token_policy",
+          "ref_utxo_ada": "4.27",
+          "ref_utxo_address": "addr_test1vrhy5kgmerdzeefg2e3ujz3sht5wsce5w82jyme4k6n0t9q2y7nlr",
+          "ref_utxo_id": "7bba7c26700a355b8d095008776f74504886faadfe3165f8a5aa5fb2f195667b#0",
+          "ref_utxo_lovelace": 4266980,
+          "script_address": "addr_test1wpqj7nwylx0a4a5m8qnqexd7mjsczjznrfh5ua9s0c3dn8cthq8u7",
+          "script_hash": "412f4dc4f99fdaf69b38260c99bedca18148531a6f4e74b07e22d99f",
+          "script_size_bytes": 458,
+          "submitted": true,
+          "submitted_at": 1779659510,
+          "title": "lp_token.lp_token_policy.mint",
+          "tx_hash": "7bba7c26700a355b8d095008776f74504886faadfe3165f8a5aa5fb2f195667b"
+        }
+      ],
+      "updated_at": 1779659510
+    }
+  }
+}

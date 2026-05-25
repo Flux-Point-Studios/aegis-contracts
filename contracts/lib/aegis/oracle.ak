@@ -1,5 +1,5 @@
 // =============================================================================
-// Aegis Insurance Protocol - Oracle Top-Level Dispatcher (v6 multi-provider)
+// Aegis Insurance Protocol - Oracle Top-Level Dispatcher
 // Location: contracts/lib/aegis/oracle.ak
 // Summary: Provider-uniform top-level oracle dispatcher used by validators.
 //          The single function `resolve_oracle_price` matches on the policy
@@ -81,73 +81,28 @@ pub fn resolve_oracle_price(
     Charli3 -> charli3.resolve(reference_inputs, oracle_nft)
     Orcfax -> orcfax.resolve(reference_inputs, oracle_nft)
     AegisSelf -> aegis_self.resolve(reference_inputs, oracle_nft)
-    // [v12.2 commit 2.3] Indigo arm wired to oracle/indigo.ak::resolve.
+    // Indigo arm wired to oracle/indigo.ak::resolve.
     // Trust handshake: NFT canonical-membership + per-iAsset oracle script
     // credential pin + single-token-of-policy (see indigo.ak::find_feed_datum).
     Indigo -> indigo.resolve(reference_inputs, oracle_nft)
   }
 }
 
-/// [v12.2] Predicate: is the supplied `oracle_nft` a canonical handle for
-/// the supplied provider?
-///
-/// V12.2 soft-disables Charli3 and Orcfax (arms return False
-/// unconditionally) and adds the Indigo arm with a 4-element allowlist.
-///   * Charli3   -> False unconditionally (soft-disabled)
-///   * Orcfax    -> False unconditionally (soft-disabled)
+/// Predicate: is the supplied `oracle_nft` a canonical handle for the
+/// supplied provider?
 ///   * AegisSelf -> membership in `aegis_self_canonical_nfts`
-///                  (5 entries — unchanged from V12)
-///   * Indigo    -> membership in `indigo_canonical_nfts` (4 entries)
-///
-/// Rationale:
-///   * Charli3 is in distress (sale signal 2026-04-30 from CEO Robert
-///     Hever; see project_oracle_landscape_2026-05.md). Their preprod
-///     ADA/USD oracle has been intermittently stale; the V12 redundancy
-///     plan that envisioned Charli3 as the mainnet primary no longer
-///     holds.
-///   * Orcfax announced wind-down 2026-03-27 with sunset target
-///     2026-07-31. Continued reliance is unsafe past that date.
-///   * AegisSelf (Node-2 publisher) is vendor-survival-independent and
-///     covers 5 pairs (ADA/BTC/ETH/USDC/USDT). V12 already shipped
-///     AegisSelf as the routing default for every dApp build path; V12.2
-///     formalises that AegisSelf is one of two allowed providers.
-///   * Indigo on-chain price oracle is the second allowed V12.2 provider
-///     — 4 iAssets directly bound (iUSD/iBTC/iETH/iSOL). The script-
-///     credential pin lives in the parser (`oracle/indigo.ak::find_feed_output`),
-///     pairing the NFT to its iAsset's parameterized oracle script address.
-///
-/// **Why soft-disable rather than hard-remove the Charli3/Orcfax variants.**
-/// V11 policies on preprod (4 stranded test policies) are still claimable
-/// via CLI against the V11 validator hash and carry
-/// `oracle_provider: Charli3`. Soft-disable preserves decoder symmetry —
-/// datums still parse, the validator just rejects them at the Underwrite-
-/// time canonical-handle check. Equivalent functional outcome (no new
-/// policies), cleaner backwards-compat.
-///
-/// **Reactivation path.** Flipping either arm back to its V12 equality
-/// check is a one-line redeploy. The dead resolvers in
-/// `oracle/charli3.ak` and `oracle/orcfax.ak` are kept in tree (with
-/// deprecation marker) so the reverse path is just a constant change here
-/// — no resolver rewrite needed.
-///
-/// **Imports of `charli3_ada_usd_nft_policy` and `orcfax_fsp_script_hash`**
-/// stay because the V12.2 tests below reference them; they're not in the
-/// arm bodies any more, but the audit-grade approach is to keep the
-/// references in tree.
+///   * Indigo    -> membership in `indigo_canonical_nfts`; per-iAsset
+///     script-credential pin lives in `oracle/indigo.ak::find_feed_output`
+///   * Charli3 / Orcfax -> not supported (resolvers retained in tree so
+///     V11 datums remain CBOR-decodable for off-chain analytics).
 pub fn is_canonical_oracle_nft(
   provider: OracleProvider,
   oracle_nft: ByteArray,
 ) -> Bool {
   when provider is {
-    // [v12.2] Soft-disabled. New policies cannot bind to Charli3 under V12.2.
     Charli3 -> False
-    // [v12.2] Soft-disabled. Same as Charli3.
     Orcfax -> False
     AegisSelf -> list.has(aegis_self_canonical_nfts, oracle_nft)
-    // [v12.2 NEW] Indigo on-chain oracle binding. 4 iAssets pinned via the
-    // canonical NFT list. The script-credential pin lives in the parser
-    // (oracle/indigo.ak::find_feed_output), pairing the NFT to its
-    // iAsset's parameterized oracle script address.
     Indigo -> list.has(indigo_canonical_nfts, oracle_nft)
   }
 }
@@ -205,7 +160,7 @@ pub fn create_oracle_datum(
 // ---------------------------------------------------------------------------
 
 test dispatcher_charli3_branch_compiles() {
-  // [v12.2] Sanity: the `when provider is { Charli3 | Orcfax | AegisSelf |
+  // Sanity: the `when provider is { Charli3 | Orcfax | AegisSelf |
   // Indigo }` shape exhaustively matches the OracleProvider sum type.
   // Compilation of this file IS the assertion; this test pins the property
   // as a regression check against accidentally adding a non-exhaustive `_`
@@ -240,7 +195,7 @@ test dispatcher_aegis_self_branch_compiles() {
 }
 
 test dispatcher_indigo_branch_compiles() {
-  // [v12.2] Fourth provider exhaustivity pin.
+  // Fourth provider exhaustivity pin.
   let provider: OracleProvider = Indigo
   when provider is {
     Charli3 -> False
@@ -259,7 +214,7 @@ test dispatcher_v5_compat_create_and_read() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12.2] is_canonical_oracle_nft soft-disable + Indigo arm tests
+// is_canonical_oracle_nft soft-disable + Indigo arm tests
 // ---------------------------------------------------------------------------
 
 test is_canonical_rejects_charli3_under_v12_2() {

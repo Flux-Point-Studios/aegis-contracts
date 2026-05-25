@@ -25,7 +25,7 @@ pub fn is_above_minimum(premium: Int) -> Bool {
 /// Maximum ratio is 50x (coverage cannot be more than 50x the premium).
 /// This prevents extremely leveraged policies that could drain the pool.
 ///
-/// [FIX A-014] Use multiplication-style comparison instead of integer
+/// Use multiplication-style comparison instead of integer
 /// division. The previous `coverage / premium <= 50` truncated, allowing
 /// `coverage = premium * 50 + 1` to slip through (e.g., premium=2 ADA,
 /// coverage=100.000001 ADA → `100_000_001 / 2_000_000 = 50` truncated,
@@ -59,7 +59,7 @@ pub fn calculate_protocol_fee(premium: Int, fee_bps: Int) -> Int {
   premium * fee_bps / 10_000
 }
 
-/// [v12.2] Compute the floored fee_total: `max(min_utxo_lovelace, raw_fee)`.
+/// Compute the floored fee_total: `max(min_utxo_lovelace, raw_fee)`.
 ///
 /// V12.2's "Hybrid Fee" rule moves the 2-ADA min-utxo floor INSIDE the
 /// carve, so the pool's value reduction equals exactly `fee_total` (not
@@ -79,7 +79,7 @@ pub fn calculate_fee_total(
   math.max(min_utxo_lovelace, calculate_protocol_fee(premium, fee_bps))
 }
 
-/// [v12.2] Compute the net pool growth: `premium − calculate_fee_total(...)`.
+/// Compute the net pool growth: `premium − calculate_fee_total(...)`.
 ///
 /// This is the lovelace delta the pool's continuation UTxO grows by on an
 /// Underwrite tx (and the negative of what it decreases by on the cancel-
@@ -93,7 +93,7 @@ pub fn calculate_net_pool_growth(
   premium - calculate_fee_total(premium, fee_bps, min_utxo_lovelace)
 }
 
-/// [v12.2] DEPRECATED — V12.2 validators use `calculate_net_pool_growth`
+/// DEPRECATED — V12.2 validators use `calculate_net_pool_growth`
 /// instead. V11/V12 callers continue to read this for legacy analytics;
 /// the function stays compiled so cross-version code paths keep working.
 /// V11/V12 semantics: `premium − raw_fee` (no floor).
@@ -125,7 +125,7 @@ pub fn calculate_treasury_cut(
   premium * protocol_fee_bps / 10_000 * treasury_share_bps / 10_000
 }
 
-/// [v12.2] Split a `fee_total` into team and partner cuts with silent
+/// Split a `fee_total` into team and partner cuts with silent
 /// partner_cut absorb.
 ///
 /// Returns `(team_cut, partner_cut)` such that:
@@ -286,7 +286,7 @@ test ratio_boundary_exactly_at_max() {
 }
 
 // [F-008] Integer division truncation: 100_000_001 / 2_000_000 = 50 (not 50.0000005)
-// [FIX A-014] After multiplication-style comparison, the 1-lovelace-over
+// After multiplication-style comparison, the 1-lovelace-over
 // case is now correctly REJECTED. Previously the truncation
 // `100_000_001 / 2_000_000 = 50` slipped through; the new check
 // `100_000_001 <= 2_000_000 * 50 = 100_000_000` evaluates False.
@@ -305,7 +305,7 @@ test ratio_clearly_over_max() {
   is_premium_adequate(2_000_000, 102_000_000) == False
 }
 
-// [FIX A-014] Confirm the multiplication form rejects ALL fractional
+// Confirm the multiplication form rejects ALL fractional
 // over-coverage cases, not just the documented 1-lovelace edge.
 test ratio_post_a014_rejects_fractional_overshoot() {
   // premium = 2_000_001, coverage = 100_000_100
@@ -388,7 +388,7 @@ test treasury_cut_matches_fee_times_share() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12.2] Hybrid Fee Tests
+// Hybrid Fee Tests
 // V12 used `(premium, fee_bps, partner_share_bps)`; V12.2 takes the floored
 // `fee_total` directly + `min_utxo_lovelace` for the silent absorb rule.
 // ---------------------------------------------------------------------------
@@ -501,7 +501,7 @@ test net_premium_v12_diverges_from_v12_2_on_small_premium() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12.2 §8] Property-style invariant tests
+// §8 Property-style invariant tests
 // ---------------------------------------------------------------------------
 
 test invariant_1_premium_conservation_holds() {

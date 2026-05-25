@@ -771,18 +771,14 @@ test green_a_021_process_claim_donation_not_required() {
 }
 
 // ---------------------------------------------------------------------------
-// A-022 — Policy output script credential bound to policy_validator hash.
+// Policy output script credential bound to policy_validator hash.
 //
-// Live red-team on the v1-treasury preprod deploy proved that
-// `policy_output_matches_underwrite` accepted ANY `Script(_)` credential.
-// An attacker routed the policy output to the lp_token mint policy hash
-// (a script with no spend purpose), permanently locking pool capacity at
-// near-1:1 cost — see preprod tx
-// `c32d7a858bbe6d5c6ca29a502c063bcf4104072e1909dd63e20c092ccc57d973`. The
-// fix parameterizes pool_validator with `policy_script_hash` and binds
-// `Script(h) -> h == policy_script_hash` in both
-// `policy_output_matches_underwrite` and `batch_policies_match_totals`.
-// The tests below exercise the script-hash gate at the helper level.
+// `policy_output_matches_underwrite` and `batch_policies_match_totals` both
+// require `Script(h) -> h == policy_script_hash`. Without that pin a policy
+// output routed to any other script credential (e.g. the lp_token mint
+// policy hash) would permanently lock pool capacity, since no spend purpose
+// exists at the wrong script. The pool_validator is parameterized by
+// `policy_script_hash` and the tests below exercise the gate.
 // ---------------------------------------------------------------------------
 
 test green_a_022_correct_policy_script_hash_accepted() {
@@ -825,18 +821,15 @@ test green_a_022_pool_continuation_skipped_no_taillist_halt() {
 }
 
 // ---------------------------------------------------------------------------
-// A-024 — Negative coverage in Underwrite redeemer.
+// Negative coverage in Underwrite redeemer.
 //
-// Live red-team on v2-a022 demonstrated `is_ratio_acceptable` accepts
-// negative coverage because Aiken's integer division floors toward
-// negative infinity (e.g. `-5_000_000 / 2_000_000 = -3 <= 50` is True).
-// `verify_underwrite_datum` then permits `new_active = old_active +
-// coverage` with `coverage < 0`, shrinking active_coverage. Live
-// exploit: tx 01a1067cd496a31f069e0355717fe2ab1c4ebd5b2e0eb8ba1632a179cf04459a
-// reduced pool active_coverage by 5 ADA on a 2 ADA premium.
-//
-// Fix: `coverage_positive = coverage > 0` AND `premium_positive =
-// premium > 0` ANDed into Underwrite + BatchUnderwrite return exprs.
+// `is_ratio_acceptable` admits negative coverage because Aiken's integer
+// division floors toward negative infinity (e.g. `-5_000_000 / 2_000_000
+// = -3 <= 50`). `verify_underwrite_datum` would then permit `new_active =
+// old_active + coverage` with `coverage < 0`, shrinking active_coverage.
+// Underwrite + BatchUnderwrite return exprs AND in
+// `coverage_positive = coverage > 0` AND `premium_positive = premium > 0`
+// to close the surface.
 // ---------------------------------------------------------------------------
 
 test green_a_024_negative_coverage_rejected() {
@@ -954,7 +947,7 @@ test green_a_016_oracle_at_wrong_address_rejected() {
 // ---------------------------------------------------------------------------
 // A-025 — Multi-policy single-Underwrite under-accounting via list.any.
 //
-// Round-3 live red-team demonstrated that `policy_output_matches_underwrite`
+// `policy_output_matches_underwrite`
 // returned True on the first matching policy output regardless of how many
 // matching outputs followed. tx b1400c64...846ece02cd6f0a1 created 3
 // legitimate policy outputs (each with valid datum + funded coverage) in a
@@ -1104,7 +1097,7 @@ test green_v6_a012_mixed_providers_batch_rejected() {
 }
 
 test green_v7_a012_aegis_self_uniform_batch_accepted() {
-  // [v7] Two AegisSelf-bound policies with the same publisher NFT in
+  // Two AegisSelf-bound policies with the same publisher NFT in
   // oracle_nft must pass the A-012 uniformity check. Mirrors the
   // (Charli3, Charli3) and (Orcfax, Orcfax) positive cases above so the
   // test suite covers all three same-pair branches the validator accepts.
@@ -1175,7 +1168,7 @@ test green_v6_policy_datum_has_11_fields_post_migration() {
       Charli3 -> True
       Orcfax -> True
       AegisSelf -> True
-      // [v12.2] Indigo arm added as 4th provider variant.
+      // Indigo arm added as 4th provider variant.
       Indigo -> True
     }
   // Sanity: the other 10 fields are still present and reachable.
@@ -1189,7 +1182,7 @@ test green_v6_policy_datum_has_11_fields_post_migration() {
 // ---------------------------------------------------------------------------
 
 test green_v6_orcfax_resolver_round_trip_happy_path() fail {
-  // [v12.2] This test exercised the V6 Orcfax happy path. Under V12.2 the
+  // This test exercised the V6 Orcfax happy path. Under V12.2 the
   // Orcfax `resolve` function aborts via the leading `fail @"v12.2: ..."`
   // so any reach into the resolver triggers the abort. The `fail` test
   // marker inverts the assertion: the test now passes IFF the resolver
@@ -1205,7 +1198,7 @@ test green_v6_orcfax_resolver_round_trip_happy_path() fail {
 }
 
 test green_v7_orcfax_resolver_freshness_uses_70min_window() fail {
-  // [v12.2] Same as above. The 70-min freshness window constant remains
+  // Same as above. The 70-min freshness window constant remains
   // in tree (still imported by tests + analytics) but the resolver path
   // is gated by the soft-disable `fail`. The `fail` test marker inverts
   // the assertion.
@@ -1224,7 +1217,7 @@ test green_v6_orcfax_feed_id_constant_matches_ada_usd() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12] Underwrite branch — team_output / partner_output enforcement (§3.8)
+// Underwrite branch — team_output / partner_output enforcement (§3.8)
 //
 // Mirror the validator's invariants at the helper level. The pool validator's
 // Underwrite branch now requires three new things beyond V11:
@@ -1240,7 +1233,7 @@ test green_v6_orcfax_feed_id_constant_matches_ada_usd() {
 // ---------------------------------------------------------------------------
 
 test underwrite_with_no_partner_routes_full_2pct_to_team() {
-  // [v12.2] 100 ADA premium → raw_fee = 2 ADA = floor → fee_total = 2 ADA.
+  // 100 ADA premium → raw_fee = 2 ADA = floor → fee_total = 2 ADA.
   // No partner → team = 2 ADA, partner = 0.
   let fee_total = 2_000_000
   let (team, partner) = calculate_protocol_fee_split(fee_total, 0, 2_000_000)
@@ -1248,7 +1241,7 @@ test underwrite_with_no_partner_routes_full_2pct_to_team() {
 }
 
 test underwrite_with_partner_at_max_split() {
-  // [v12.2] 100 ADA premium, fee_total = 2 ADA, partner @ 20% cap.
+  // 100 ADA premium, fee_total = 2 ADA, partner @ 20% cap.
   //   partner_cut_raw = 0.4 ADA (below floor) → silent absorb → 0.
   //   team_cut = 2 ADA (absorbs partner's would-be share).
   let fee_total = 2_000_000
@@ -1258,7 +1251,7 @@ test underwrite_with_partner_at_max_split() {
 }
 
 test underwrite_with_partner_at_0_share() {
-  // [v12.2] partner_share_bps = 0. Same numeric result as solo.
+  // partner_share_bps = 0. Same numeric result as solo.
   let fee_total = 2_000_000
   let (team, partner) = calculate_protocol_fee_split(fee_total, 0, 2_000_000)
   team == 2_000_000 && partner == 0
@@ -1371,7 +1364,7 @@ test underwrite_fails_when_partner_output_short() {
 }
 
 test underwrite_fails_when_floor_not_satisfied_for_small_premium() {
-  // [v12.2] V12 modelled team_cut as raw_fee (1 ADA on 50 ADA premium @
+  // V12 modelled team_cut as raw_fee (1 ADA on 50 ADA premium @
   // 2%) and floored at the OUTPUT layer (required = max(min_utxo, team_cut)
   // = 2 ADA), with the submitter padding 1 ADA.
   //
@@ -1397,7 +1390,7 @@ test underwrite_fails_when_floor_not_satisfied_for_small_premium() {
 }
 
 test underwrite_with_premium_at_exact_floor() {
-  // [v12.2] 100 ADA premium: fee_total = 2 ADA, team_cut = 2 ADA (solo).
+  // 100 ADA premium: fee_total = 2 ADA, team_cut = 2 ADA (solo).
   let premium = 100_000_000
   let fee_total = calculate_fee_total(premium, 200, min_utxo_lovelace)
   let (team_cut, _) =
@@ -1415,7 +1408,7 @@ test underwrite_with_premium_at_exact_floor() {
 }
 
 test underwrite_with_premium_above_floor() {
-  // [v12.2] 200 ADA premium: fee_total = 4 ADA, team_cut = 4 ADA (solo).
+  // 200 ADA premium: fee_total = 4 ADA, team_cut = 4 ADA (solo).
   let premium = 200_000_000
   let fee_total = calculate_fee_total(premium, 200, min_utxo_lovelace)
   let (team_cut, _) =
@@ -1445,7 +1438,7 @@ test underwrite_pool_continuation_grows_by_net_premium_not_premium() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12] AcceptCancellation branch — B2 split on cancellation_fee retention
+// AcceptCancellation branch — B2 split on cancellation_fee retention
 // (§3.9). The cancel-time cut applies to the 10% retention only, not the
 // full premium. Per 100-ADA premium:
 //   * cancellation_fee = 10 ADA
@@ -1457,7 +1450,7 @@ test underwrite_pool_continuation_grows_by_net_premium_not_premium() {
 // ---------------------------------------------------------------------------
 
 test cancel_with_no_partner_routes_2pct_of_cancellation_fee_to_team() {
-  // [v12.2 wave-2.4 interim] 100 ADA premium → cancellation_fee = 10 ADA
+  // 100 ADA premium → cancellation_fee = 10 ADA
   // → raw_fee_cancel = 0.2 ADA. Wave 2.4 passes raw_fee as fee_total.
   let premium = 100_000_000
   let cancellation_fee = premium * 1_000 / 10_000
@@ -1468,7 +1461,7 @@ test cancel_with_no_partner_routes_2pct_of_cancellation_fee_to_team() {
 }
 
 test cancel_with_partner_splits_retention_per_share_bps() {
-  // [v12.2 wave-2.4 interim] partner @ 20% cap of the 0.2-ADA raw cancel
+  // partner @ 20% cap of the 0.2-ADA raw cancel
   // cut. Silent-absorb rule: partner_cut_raw = 0.04 < 2 ADA min_utxo →
   // partner = 0, team gets the full 0.2 ADA.
   let premium = 100_000_000
@@ -1520,7 +1513,7 @@ test cancel_fails_when_partner_output_short_and_partner_set() {
 }
 
 test cancel_pool_value_decreases_by_refund_plus_team_plus_partner_cuts() {
-  // [v12.2 wave-2.4 interim] V12 invariant: cont == old - refund -
+  // V12 invariant: cont == old - refund -
   // team_cut - partner_cut. Wave 2.4 preserves V12 numerics by passing
   // raw_fee as fee_total.
   let premium = 100_000_000
@@ -1536,7 +1529,7 @@ test cancel_pool_value_decreases_by_refund_plus_team_plus_partner_cuts() {
 }
 
 test cancel_total_liquidity_decreases_by_refund_plus_team_plus_partner_cuts() {
-  // [v12.2 wave-2.4 interim] Mirrors pool-value test against
+  // Mirrors pool-value test against
   // total_liquidity.
   let premium = 100_000_000
   let refund = premium - premium * 1_000 / 10_000
@@ -1551,7 +1544,7 @@ test cancel_total_liquidity_decreases_by_refund_plus_team_plus_partner_cuts() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12 §3.10] BatchUnderwrite — per-policy floor + aggregated outputs.
+// §3.10 BatchUnderwrite — per-policy floor + aggregated outputs.
 //
 // The validator's new walker `batch_policies_match_totals_v12` returns a
 // `BatchFeeTotals` record:
@@ -1624,7 +1617,7 @@ test batch_underwrite_mixed_partner_and_no_partner() {
 }
 
 test batch_underwrite_large_batch_with_no_floor_padding() {
-  // [v12.2 wave-2.4 interim] 5 policies, 500-ADA premiums, all solo.
+  // 5 policies, 500-ADA premiums, all solo.
   // raw_fee_i = 10 ADA each (above floor). Wave 2.4 passes raw_fee as
   // fee_total.
   let premium = 500_000_000
@@ -1820,7 +1813,7 @@ test batch_underwrite_5_policy_walkthrough_total_net_490_ada() {
 }
 
 // ---------------------------------------------------------------------------
-// [V12.2 Round-7 red-team] R7-A — AcceptCancellation of a min-premium policy
+// R7-A — AcceptCancellation of a min-premium policy
 // drains the LP at ~3.8 ADA per round-trip.
 //
 // Attack vector. An attacker creates a policy with premium = min_premium
@@ -1877,7 +1870,7 @@ test redteam_round_7_r7_a_attacker_burn_below_lp_loss() {
 }
 
 // ---------------------------------------------------------------------------
-// [V12.2 Round-7 red-team] R7-B — BatchClaim with 2+ Indigo policies is
+// R7-B — BatchClaim with 2+ Indigo policies is
 // rejected by the validator due to a non-exhaustive switch in
 // `policy.ak::batch_oracles_uniform`. The `when (sent_provider, this_provider)
 // is { ... }` lists (Charli3, Charli3), (Orcfax, Orcfax), and (AegisSelf,
@@ -1897,7 +1890,7 @@ test redteam_round_7_r7_a_attacker_burn_below_lp_loss() {
 // ---------------------------------------------------------------------------
 
 test redteam_round_7_r7_b_batch_oracles_uniform_accepts_indigo_pair() {
-  // [v12.2 R7-B FIX] After adding `(Indigo, Indigo) -> True` to the
+  // After adding `(Indigo, Indigo) -> True` to the
   // switch in `validators/policy.ak::batch_oracles_uniform`, two Indigo
   // policies in a BatchClaim now correctly resolve to `same_provider =
   // True` instead of falling through to the wildcard False arm. The
@@ -1953,7 +1946,7 @@ test redteam_round_7_r7_b_batch_oracles_uniform_accepts_aegis_self_pair() {
 }
 
 // ---------------------------------------------------------------------------
-// [V12.2 Round-7 red-team] R7-C — Soft-disabled Orcfax with no in-tree
+// R7-C — Soft-disabled Orcfax with no in-tree
 // blocking constant. The V12.2 spec §11.1 auditor checklist explicitly
 // pins `orcfax_fsp_script_hash` (the active-network constant). Verify that
 // the constant is still in tree, is_canonical_oracle_nft returns False for

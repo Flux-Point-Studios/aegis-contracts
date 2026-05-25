@@ -58,19 +58,12 @@ pub fn find_output_to_script(
   outputs: List<Output>,
   script_hash: ScriptHash,
 ) -> Option<Output> {
-  when outputs is {
-    [] -> None
-    [output, ..rest] ->
-      when output.address.payment_credential is {
-        Script(hash) ->
-          if hash == script_hash {
-            Some(output)
-          } else {
-            find_output_to_script(rest, script_hash)
-          }
-        _ -> find_output_to_script(rest, script_hash)
-      }
-  }
+  list.find(
+    outputs,
+    fn(output) {
+      output.address.payment_credential == Script(script_hash)
+    },
+  )
 }
 
 /// Find the first output going to a specific address.
@@ -78,18 +71,10 @@ pub fn find_output_to_address(
   outputs: List<Output>,
   target: Address,
 ) -> Option<Output> {
-  when outputs is {
-    [] -> None
-    [output, ..rest] ->
-      if output.address == target {
-        Some(output)
-      } else {
-        find_output_to_address(rest, target)
-      }
-  }
+  list.find(outputs, fn(output) { output.address == target })
 }
 
-/// [FIX A-013] The legacy `find_output_to_pkh` helper has been removed.
+/// The legacy `find_output_to_pkh` helper has been removed.
 /// Its greedy first-match semantic was the root of two findings:
 ///   * A-006 — a single payout output satisfied multiple same-insured policies.
 ///   * A-013 — a hostile prefix output (e.g., a 2-ADA decoy) caused the helper
@@ -99,7 +84,7 @@ pub fn find_output_to_address(
 /// (or, where stake-credential restrictions don't apply, `sum_lovelace_to_pkh`).
 /// If a future caller genuinely needs "find the first output to a PKH", they
 /// should write a purpose-specific helper rather than re-introducing this one.
-/// [FIX A-006 / A-013] Sum the lovelace across ALL outputs going to a given
+/// Sum the lovelace across ALL outputs going to a given
 /// payment key hash. This is the safe primitive for verifying that an insured
 /// (or refund recipient) has been paid AT LEAST a required amount: callers
 /// compare `sum_lovelace_to_pkh(...) >= required` rather than relying on
@@ -119,20 +104,16 @@ pub fn sum_lovelace_to_pkh(
     outputs,
     0,
     fn(out, acc) {
-      when out.address.payment_credential is {
-        VerificationKey(hash) ->
-          if hash == pkh {
-            acc + assets.lovelace_of(out.value)
-          } else {
-            acc
-          }
-        _ -> acc
+      if out.address.payment_credential == VerificationKey(pkh) {
+        acc + assets.lovelace_of(out.value)
+      } else {
+        acc
       }
     },
   )
 }
 
-/// [FIX A-009] Aggregate lovelace across outputs whose address is an
+/// Aggregate lovelace across outputs whose address is an
 /// **enterprise** address controlled by `pkh` — i.e., `payment_credential`
 /// is the insured's verification key AND `stake_credential` is `None`.
 ///
@@ -157,14 +138,10 @@ pub fn sum_lovelace_to_enterprise_pkh(
     outputs,
     0,
     fn(out, acc) {
-      when out.address.payment_credential is {
-        VerificationKey(hash) ->
-          if hash == pkh && out.address.stake_credential == None {
-            acc + assets.lovelace_of(out.value)
-          } else {
-            acc
-          }
-        _ -> acc
+      if out.address.payment_credential == VerificationKey(pkh) && out.address.stake_credential == None {
+        acc + assets.lovelace_of(out.value)
+      } else {
+        acc
       }
     },
   )
@@ -182,14 +159,10 @@ pub fn count_script_inputs(inputs: List<Input>, script_hash: ScriptHash) -> Int 
     inputs,
     0,
     fn(input, acc) {
-      when input.output.address.payment_credential is {
-        Script(hash) ->
-          if hash == script_hash {
-            acc + 1
-          } else {
-            acc
-          }
-        _ -> acc
+      if input.output.address.payment_credential == Script(script_hash) {
+        acc + 1
+      } else {
+        acc
       }
     },
   )
@@ -210,7 +183,7 @@ pub fn output_has_nft(output: Output, nft_policy: ByteArray) -> Bool {
     |> list.has(nft_policy)
 }
 
-/// [FIX A-008] Find the first output going to a specific script hash AND
+/// Find the first output going to a specific script hash AND
 /// carrying the canonical NFT. This is the safe primitive for routing residuals
 /// to "the real pool", as opposed to ANY UTxO at the pool address.
 pub fn find_canonical_pool_output(
@@ -218,19 +191,15 @@ pub fn find_canonical_pool_output(
   script_hash: ScriptHash,
   pool_nft: ByteArray,
 ) -> Option<Output> {
-  when outputs is {
-    [] -> None
-    [output, ..rest] ->
-      when output.address.payment_credential is {
-        Script(hash) ->
-          if hash == script_hash && output_has_nft(output, pool_nft) {
-            Some(output)
-          } else {
-            find_canonical_pool_output(rest, script_hash, pool_nft)
-          }
-        _ -> find_canonical_pool_output(rest, script_hash, pool_nft)
-      }
-  }
+  list.find(
+    outputs,
+    fn(output) {
+      output.address.payment_credential == Script(script_hash) && output_has_nft(
+        output,
+        pool_nft,
+      )
+    },
+  )
 }
 
 // ---------------------------------------------------------------------------

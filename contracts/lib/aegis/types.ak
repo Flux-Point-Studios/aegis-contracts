@@ -30,7 +30,7 @@ pub type ScriptHash =
 // Oracle Provider Tag (Aegis v6)
 // ---------------------------------------------------------------------------
 
-/// [v7] Oracle provider tag. Aegis v7 supports three providers — Charli3
+/// Oracle provider tag. Aegis v7 supports three providers — Charli3
 /// (mainnet primary), Orcfax (redundant secondary; provider winding down
 /// 2026-07-31), and AegisSelf (Aegis-published feed; vendor-survival-
 /// independent fallback). Sum-type semantics give us compile-time
@@ -71,7 +71,7 @@ pub type OracleProvider {
   /// policies, the `oracle_nft` field below carries the FSP script hash
   /// (NOT the NFT policy id) — see `aegis/oracle/orcfax` for the parser.
   Orcfax
-  /// [v7 NEW] Aegis-self. We publish ADA/USD ourselves at a UTxO under a
+  /// Aegis-self. We publish ADA/USD ourselves at a UTxO under a
   /// one-shot-minted NFT (AEGIS_PRICE_FEED_V1) at the publisher wallet's
   /// payment credential. Same Charli3-compatible CBOR datum format as
   /// `Charli3` so we reuse the parser; the trust handshake pins both NFT
@@ -79,7 +79,7 @@ pub type OracleProvider {
   /// constant `aegis_self_publisher_vkh`). Vendor-survival-independent —
   /// keeps Aegis claimable even if Charli3 dissolves and Orcfax sunsets.
   AegisSelf
-  /// [v12.2 NEW] Indigo on-chain price oracle. Constructor index 3. 4
+  /// Indigo on-chain price oracle. Constructor index 3. 4
   /// iAssets directly bound (iUSD, iBTC, iETH, iSOL) via
   /// `indigo_canonical_nfts` + `indigo_oracle_script_hashes` (paired by
   /// index). Resolver: `oracle/indigo.ak`. Trust handshake: NFT pin +
@@ -95,7 +95,7 @@ pub type OracleProvider {
 /// The datum stored in each insurance policy UTxO.
 /// Contains all terms of the insurance contract.
 ///
-/// [v6 schema] PolicyDatum has 11 positional fields. The new
+/// PolicyDatum has 11 positional fields. The new
 /// `oracle_provider` tag is APPENDED to the end of the schema so existing
 /// v5 (10-field) policies remain forensically decodable; their datums simply
 /// fail the v6 `expect pdat: PolicyDatum = raw_pdat` check, which is the
@@ -130,13 +130,13 @@ pub type PolicyDatum {
   oracle_nft: ByteArray,
   /// Payment script hash of the pool validator for returning funds
   pool_script_hash: ScriptHash,
-  /// [FIX A-008] NFT identifying the canonical pool. Used by Claim/Expire/Cancel
+  /// NFT identifying the canonical pool. Used by Claim/Expire/Cancel
   /// to verify that the residual is sent to the REAL pool UTxO (one carrying
   /// `pool_nft`), not just any UTxO at `pool_script_hash`. Without this binding
   /// an attacker could route policy residuals to a stuck UTxO at the pool address
   /// that the pool validator can't subsequently spend.
   pool_nft: ByteArray,
-  /// [v6 NEW] Oracle provider tag. Selects the parser (and trust handshake)
+  /// Oracle provider tag. Selects the parser (and trust handshake)
   /// used at Claim/BatchClaim/Cancel time. Aegis v6 ships `Charli3` (default
   /// primary) and `Orcfax` (redundant secondary) so a single oracle outage,
   /// deprecation, or governance breakdown cannot brick the protocol. Pinned
@@ -144,7 +144,7 @@ pub type PolicyDatum {
   /// ensures the trust handshake the insured agreed to at premium-payment
   /// time is the same one enforced at claim time.
   oracle_provider: OracleProvider,
-  /// [v12 NEW] Optional partner address that receives a share of the 2%
+  /// Optional partner address that receives a share of the 2%
   /// protocol fee. Set at policy-creation time and immutable. None means
   /// the entire protocol fee flows to `team_address` (solo policy); Some(addr)
   /// requires `partner_share_bps > 0` and routes `partner_cut` to that
@@ -156,7 +156,7 @@ pub type PolicyDatum {
   /// control); the protocol incurs no risk. Partner registry / lookup is
   /// a frontend UX concern (post-V12 follow-up).
   partner_address: Option<Address>,
-  /// [v12 NEW] Partner share of the protocol fee in basis points of the
+  /// Partner share of the protocol fee in basis points of the
   /// fee (NOT of the premium). 0..=2000 (capped by validator at
   /// `partner_share_cap_bps`). Set at policy-creation time and immutable.
   ///
@@ -187,7 +187,7 @@ pub type PoolDatum {
   protocol_fee_bps: Int,
   /// NFT identifying this unique pool UTxO
   pool_nft: ByteArray,
-  /// [FIX A-003] Outstanding aLP token supply.
+  /// Outstanding aLP token supply.
   /// Tracked on-chain so the pool validator can verify the exact mint or
   /// burn quantity matches `calculate_lp_mint` / `calculate_withdrawal`,
   /// preventing direction-flip attacks (mint during Remove, burn during Add).
@@ -225,7 +225,7 @@ pub type PoolRedeemer {
     /// Premium collected in lovelace
     premium: Int,
   }
-  /// Process a claim payout from the pool. [v6.0.2 / L-006 fix] The
+  /// Process a claim payout from the pool. The
   /// `policy_script` redeemer field has been removed — the validator now
   /// resolves the policy script credential via the pool_validator's
   /// compile-time `policy_script_hash` parameter, closing the surface
@@ -252,21 +252,19 @@ pub type PoolRedeemer {
     /// Total premium collected across all policies
     total_premium: Int,
   }
-  /// Process batch-expire: return expired policy funds to pool. [v6.0.2 /
-  /// L-006 fix] `policy_script` removed; validator uses the parameterized
-  /// `policy_script_hash`.
+  /// Process batch-expire: return expired policy funds to pool.
   BatchExpireProcess {
     /// Total lovelace being returned from expired policies
     total_returned: Int,
   }
-  /// [FIX A-020] Process a cancellation. Consumes a Cancel-redeemed policy,
+  /// Process a cancellation. Consumes a Cancel-redeemed policy,
   /// sends the canonical refund (90% of premium) to the insured, decrements
   /// `active_coverage` by the consumed policy's coverage, and retains the
   /// 10% cancellation fee in the pool. The refund magnitude is derived
   /// on-chain from the consumed policy's `premium_paid` (NOT a caller-
   /// controlled amount), so an over-refund cannot drain the pool.
   ///
-  /// [v6.0.2 / L-006 fix] `policy_script` removed; validator uses the
+  /// `policy_script` removed; validator uses the
   /// parameterized `policy_script_hash`.
   AcceptCancellation
 }
@@ -289,20 +287,14 @@ pub type LPTokenRedeemer {
 
 /// Minimum premium in lovelace.
 ///
-/// [v12.2 Round-7 R7-A] Per-network value to neutralise the cancel-cycle
+/// Per-network value to neutralise the cancel-cycle
 /// LP drain attack at the floor threshold.
 ///
-///   PREPROD: 2_000_000 (= 2 ADA, current). Dev-convenient — exercises the
-///            full fee_total floor path so red-team tests stay reproducible.
-///            R7-A is bounded by tiny TVL on preprod so the asymmetric
-///            drain ratio doesn't matter for testing.
-///
+///   PREPROD: 2_000_000 (= 2 ADA). Dev-convenient — exercises the full
+///            fee_total floor path.
 ///   MAINNET: 100_000_000 (= 100 ADA). Threshold where `raw_fee = premium ×
-///            200 / 10_000 ≥ min_utxo`, so the Hybrid fee_total floor
-///            stops kicking in and the cancel-cycle asymmetry vanishes.
-///            See V12.2 spec §10.X / red-team report R7-A. The mainnet
-///            deploy must substitute this constant by commenting out the
-///            preprod line and uncommenting the mainnet line below.
+///            200 / 10_000 ≥ min_utxo`, so the Hybrid fee_total floor stops
+///            kicking in and the cancel-cycle asymmetry vanishes.
 pub const min_premium: Int = 2_000_000
 // MAINNET: pub const min_premium: Int = 100_000_000
 
@@ -334,7 +326,7 @@ pub const min_utxo_lovelace: Int = 2_000_000
 /// into an extraction vector via datum mutation.
 pub const treasury_share_bps: Int = 2_500
 
-/// [FIX A-016] Canonical Charli3 oracle script hash on Cardano preprod.
+/// Canonical Charli3 oracle script hash on Cardano preprod.
 /// `find_oracle_datum` validates that the reference input carrying the
 /// Charli3 NFT is at THIS specific script address — preventing forged
 /// oracle data via attacker-deployed UTxOs that hold a stolen or moved
@@ -346,7 +338,7 @@ pub const treasury_share_bps: Int = 2_500
 pub const charli3_oracle_script_hash: ByteArray =
   #"221ee21e9607f766e1e1223248f67320014825169a1d98eb34c6f658"
 
-/// [v6.0.2 / A-026-class fix] Charli3 ADA/USD oracle NFT policy id.
+/// Charli3 ADA/USD oracle NFT policy id.
 ///
 /// Pinned at compile time alongside `charli3_oracle_script_hash` so the
 /// trust handshake is BOTH legs of the address+NFT pair, not just the
@@ -366,7 +358,7 @@ pub const charli3_ada_usd_nft_policy: ByteArray =
 // Orcfax Feed Source Pointer (FSP) Hashes (Aegis v6)
 // ---------------------------------------------------------------------------
 
-/// [v6] Orcfax Feed Source Pointer (FSP) script hash on Cardano preview.
+/// Orcfax Feed Source Pointer (FSP) script hash on Cardano preview.
 ///
 /// Orcfax uses a two-layer indirection unlike Charli3's single canonical UTxO:
 ///   * **FSP** ("FactStatementPointer") is a STABLE UTxO whose inline datum is
@@ -390,13 +382,13 @@ pub const charli3_ada_usd_nft_policy: ByteArray =
 pub const orcfax_fsp_script_hash_preview: ByteArray =
   #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230"
 
-/// [v6] Orcfax FSP script hash on Cardano mainnet (for future mainnet deploy).
+/// Orcfax FSP script hash on Cardano mainnet (for future mainnet deploy).
 ///
 /// Source: <https://docs.orcfax.io/consume>.
 pub const orcfax_fsp_script_hash_mainnet: ByteArray =
   #"8793893b5dda6a513ba63c80e9d7b2d4f108060c11979bfc7d863ff0"
 
-/// [v6] Orcfax CER/ADA-USD feed identifier as raw UTF-8 bytes.
+/// Orcfax CER/ADA-USD feed identifier as raw UTF-8 bytes.
 ///
 /// Hex `4345522f4144412d5553442f` decodes to the ASCII string
 /// `"CER/ADA-USD/"`. The trailing `/` is **mandatory** per Orcfax's
@@ -406,19 +398,19 @@ pub const orcfax_fsp_script_hash_mainnet: ByteArray =
 /// (e.g., `CER/ADA-USD/3/`) is forward-compatible without an Aegis redeploy.
 pub const orcfax_ada_usd_feed_id: ByteArray = #"4345522f4144412d5553442f"
 
-/// [v6] Orcfax FS NFT asset name. Per Orcfax's `lib/orcfax/tokens.ak` the FS
+/// Orcfax FS NFT asset name. Per Orcfax's `lib/orcfax/tokens.ak` the FS
 /// asset name is the empty bytestring (`""`) — the FS NFT is uniquely
 /// identified by its policy id (= the FS validator hash) alone. This is
 /// distinct from Charli3 which uses a labeled `#"4f5241434c45"` ("ORACLE")
 /// asset name on its NFT.
 pub const orcfax_fs_asset_name: ByteArray = #""
 
-/// [v6] Orcfax FSP NFT asset name (CIP-67 reference NFT label `000de140`
+/// Orcfax FSP NFT asset name (CIP-67 reference NFT label `000de140`
 /// concatenated with the empty `fsp_label`). Per Orcfax's
 /// `lib/orcfax/tokens.ak`: `fsp_vali = #"000de140" <> fsp_label = ""`.
 pub const orcfax_fsp_asset_name: ByteArray = #"000de140"
 
-/// [v7] Orcfax freshness window in POSIX milliseconds (70 min).
+/// Orcfax freshness window in POSIX milliseconds (70 min).
 ///
 /// Orcfax's `FsDat<Rational>` carries NO `expiry` field — the only timestamp
 /// is `created_at`. Freshness is the consumer's responsibility, enforced via
@@ -434,7 +426,7 @@ pub const orcfax_fsp_asset_name: ByteArray = #"000de140"
 /// observed and absorbs ledger lower-bound padding.
 pub const orcfax_freshness_window_ms: Int = 70 * 60 * 1_000
 
-/// [v6.0.2 / A-027 fix] Active-network Orcfax FSP script hash.
+/// Active-network Orcfax FSP script hash.
 ///
 /// Set per build target. Pre-fix, the Orcfax parser took the FSP hash as a
 /// caller-supplied argument (sourced from `PolicyDatum.oracle_nft`) and
@@ -455,7 +447,7 @@ pub const orcfax_fsp_script_hash: ByteArray =
 // Aegis-self Publisher Constants (Aegis v7)
 // ---------------------------------------------------------------------------
 
-/// [v7] Aegis-self publisher payment-key-hash (= the VKH that signs all
+/// Aegis-self publisher payment-key-hash (= the VKH that signs all
 /// publish txs). Derived from the publisher mnemonic at
 /// `D:/wallet/publisher_mnemonic.txt` via path `m/1852'/1815'/0'/0/0`.
 ///
@@ -519,7 +511,7 @@ pub const aegis_self_canonical_nfts: List<ByteArray> =
 // Indigo On-chain Oracle Bindings (Aegis v12.2)
 // ---------------------------------------------------------------------------
 
-/// [v12.2 NEW] Indigo canonical oracle NFT policy ids — 4 entries, one per
+/// Indigo canonical oracle NFT policy ids — 4 entries, one per
 /// supported iAsset (iUSD, iBTC, iETH, iSOL).
 ///
 /// **Per-iAsset binding.** `PolicyDatum.oracle_nft` is frozen at Underwrite
@@ -547,63 +539,33 @@ pub const aegis_self_canonical_nfts: List<ByteArray> =
 pub const indigo_canonical_nfts: List<ByteArray> =
   [
     // **PREPROD BLOCK (active for V12.2 preprod deploy — Wave 4 mints):**
-    // 0 = iUSD preprod mock NFT policy id (mint tx d0de29b9...)
+    // 0 = iUSD
     #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
-    // 1 = iBTC preprod mock NFT policy id (mint tx 0a923058...)
+    // 1 = iBTC
     #"1e66200fca30b83d5937b67b896fa46f1adac98922555f9e791c1c83",
-    // 2 = iETH preprod mock NFT policy id (mint tx 146667ec...)
+    // 2 = iETH
     #"e81e84a5d34137bcbc2ba73f1b4e735ac0cc375f0bfeb5e98a397102",
-    // 3 = iSOL preprod mock NFT policy id (mint tx cea3b933...)
+    // 3 = iSOL
     #"875cea49cb6963ad462187f77dcc5b4d458a66d7eb9a646c2c5405a7",
-    //
-    // **MAINNET BLOCK (commented out until mainnet promotion):**
-    // #"e3455f2715338b454fb853442f72dc03b98396854f97510027fe22ff",  // iUSD
-    // #"408f13b240f57c3473b5727a68a88c50c1b6bb15c0c10912008dc59e",  // iBTC
-    // #"6c9497ffd7e8baf86c3c0d6fcd43c524daa49ad5fceba26d715468e9",  // iETH
-    // #"107992fe118ef6ae341ae0996f355124e03a8fccdcade60692175df2",  // iSOL
   ]
 
-/// [v12.2 NEW] Indigo per-iAsset oracle script credentials — 4 entries,
-/// paired by index with `indigo_canonical_nfts`.
-///
-/// **Mainnet values** (commented out below; validated Wave 1.5 via Koios):
-///   0 = `1042576d1de963437bd4bb50dcd91459756e6812b7c06dd543a332c8` (iUSD)
-///   1 = `d27ad3ed7b073018d429e57c2f8d1f52445aa241e280e6da149a91b4` (iBTC)
-///   2 = `f350350cd40d0d8e8744f2c6cad54a0abc9d51f107f57fb95c181a3f` (iETH)
-///   3 = `e3c50817e0fbaab03e4411249cfcb22aa004844e9ad86ca4d76524bc` (iSOL)
-///
-/// **Preprod values** are a single shared mock-script hash deployed
-/// Wave 4 (compiled out-of-tree as a 3-line always-succeeds Aiken
-/// validator; bech32 form
-/// `addr_test1wrf8enqnl26m0q5cfg73lxf4xxtu5x5phcrfjs0lcqp7uagh2hm3k`).
-/// On preprod we use ONE shared mock script for all 4 iAssets (vs
-/// Indigo's 4 distinct hashes on mainnet — see V12.2 spec §5b). That
-/// preprod simplification reduces dev-loop cost without weakening the
-/// parser's invariants — the script-credential pin still enforces
-/// "UTxO must be at the canonical script address," it just happens
-/// that the 4 canonical preprod addresses are the same address. The 4
-/// list entries thus all carry the same hash.
+/// Indigo per-iAsset oracle script credentials — 4 entries, paired by index
+/// with `indigo_canonical_nfts`. All preprod entries point at the operator
+/// mock script (one shared address) since preprod does not run Indigo's
+/// 4-distinct-script topology.
 pub const indigo_oracle_script_hashes: List<ByteArray> =
   [
-    // **PREPROD BLOCK (active for V12.2 preprod deploy — Wave 4 mock):**
-    // All 4 entries point at the operator mock script (one shared address).
     #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
     #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
     #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
     #"d27ccc13fab5b782984a3d1f99353197ca1a81be069941ffc003ee75",
-    //
-    // **MAINNET BLOCK (commented out until mainnet promotion):**
-    // #"1042576d1de963437bd4bb50dcd91459756e6812b7c06dd543a332c8",  // iUSD
-    // #"d27ad3ed7b073018d429e57c2f8d1f52445aa241e280e6da149a91b4",  // iBTC
-    // #"f350350cd40d0d8e8744f2c6cad54a0abc9d51f107f57fb95c181a3f",  // iETH
-    // #"e3c50817e0fbaab03e4411249cfcb22aa004844e9ad86ca4d76524bc",  // iSOL
   ]
 
 // ---------------------------------------------------------------------------
 // Protocol Fee Routing (Aegis v12)
 // ---------------------------------------------------------------------------
 
-/// [v12] Team wallet address (preprod) that receives the team's share of the
+/// Team wallet address (preprod) that receives the team's share of the
 /// 2% protocol fee on every Underwrite / BatchUnderwrite / AcceptCancellation
 /// tx. Compile-time pinned per network — rotation = new validator hash =
 /// new deploy.
@@ -629,7 +591,7 @@ pub const team_address_preprod: Address =
         #"757f0678d8b83f9a1373a38cb9800d0f862951305b4d221e69bccab2",
       )
 
-/// [v12] Team wallet address (mainnet).
+/// Team wallet address (mainnet).
 ///
 /// Bech32: `addr1q9s6m9d8yedfcf53yhq5j5zsg0s58wpzamwexrxpfelgz2wgk0s9l9fqc93tyc8zu4z7hp9dlska2kew9trdg8nscjcq3sk5s3`
 /// (Flux Point Studios team wallet). Decodes to payment VKH
@@ -643,7 +605,7 @@ pub const team_address_mainnet: Address =
         #"c8b3e05f9520c162b260e2e545eb84adfc2dd55b2e2ac6d41e70c4b0",
       )
 
-/// [v12] Active-network team address. Set per build target.
+/// Active-network team address. Set per build target.
 ///
 /// Currently pinned to preprod; promoting to mainnet flips this to
 /// `team_address_mainnet` and rotates the validator hash. Same selection
@@ -651,7 +613,7 @@ pub const team_address_mainnet: Address =
 /// whose value is edited per build.
 pub const team_address: Address = team_address_preprod
 
-/// [v12] Maximum partner share of the protocol fee, in basis points of the
+/// Maximum partner share of the protocol fee, in basis points of the
 /// protocol fee (not of the premium). 2000 bps = 20% of the 2% protocol
 /// fee = 0.4% of the premium maximum to any partner. The validator rejects
 /// any `PolicyDatum.partner_share_bps > partner_share_cap_bps` at
@@ -751,7 +713,7 @@ test policy_datum_aegis_self_variant_constructs() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12] NFT allowlist tests
+// NFT allowlist tests
 // ---------------------------------------------------------------------------
 
 test allowlist_accepts_ada_usd() {
@@ -809,7 +771,7 @@ test allowlist_size_is_exactly_five() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12] Protocol-fee constant tests
+// Protocol-fee constant tests
 // ---------------------------------------------------------------------------
 
 test team_address_preprod_payment_credential_28_bytes() {
@@ -882,7 +844,7 @@ test policy_datum_v12_with_partner() {
 }
 
 // ---------------------------------------------------------------------------
-// [v12.2] Indigo provider + NFT/script allowlist tests
+// Indigo provider + NFT/script allowlist tests
 // ---------------------------------------------------------------------------
 
 test policy_datum_indigo_variant_constructs() {

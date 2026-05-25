@@ -1,0 +1,36 @@
+{
+  "_comment": "Negative fixture: builder requests proportional deposit but mints 10x the LP. Should be rejected by `lp_minted` (mint_qty != lp_supply_delta) or `datum_ok` (formula mismatch).",
+  "_violates": "datum_ok",
+  "old_pool_datum": {
+    "total_liquidity": 100000000000,
+    "active_coverage": 10000000000,
+    "lp_token_policy": 100,
+    "protocol_fee_bps": 200,
+    "pool_nft": 200,
+    "lp_supply": 100000000000
+  },
+  "new_pool_datum": {
+    "total_liquidity": 100500000000,
+    "active_coverage": 10000000000,
+    "lp_token_policy": 100,
+    "protocol_fee_bps": 200,
+    "pool_nft": 200,
+    "lp_supply": 105000000000
+  },
+  "redeemer": {
+    "amount": 500000000
+  },
+  "own_input_lovelace": 100000000000,
+  "cont_output_lovelace": 100500000000,
+  "mint_lp_qty": 5000000000,
+  "consts": {
+    "team_address_id": 300,
+    "pool_address_id": 400,
+    "policy_script_hash": 500,
+    "min_utxo_lovelace": 2000000,
+    "min_premium": 2000000,
+    "partner_share_cap_bps": 2000,
+    "treasury_share_bps": 2500,
+    "protocol_fee_bps": 200
+  }
+}

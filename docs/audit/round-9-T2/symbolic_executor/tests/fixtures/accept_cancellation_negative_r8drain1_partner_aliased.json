@@ -1,0 +1,55 @@
+{
+  "_comment": "Negative fixture: R8-DRAIN-1 batch arm equivalent. Cancel on a policy whose partner_address aliases team_address. Should be rejected by `partner_not_aliased`.",
+  "_violates": "partner_not_aliased",
+  "old_pool_datum": {
+    "total_liquidity": 100000000000,
+    "active_coverage": 10000000000,
+    "lp_token_policy": 100,
+    "protocol_fee_bps": 200,
+    "pool_nft": 200,
+    "lp_supply": 100000000000
+  },
+  "new_pool_datum": {
+    "total_liquidity": 99548000000,
+    "active_coverage": 5000000000,
+    "lp_token_policy": 100,
+    "protocol_fee_bps": 200,
+    "pool_nft": 200,
+    "lp_supply": 100000000000
+  },
+  "consumed_policy_datum": {
+    "policy_id": 1001,
+    "insured": 1002,
+    "strike_price": 350000,
+    "coverage_amount": 5000000000,
+    "premium_paid": 500000000,
+    "start_time": 1700000300000,
+    "expiry_time": 1700604800000,
+    "oracle_nft": 1003,
+    "pool_script_hash": 500,
+    "pool_nft": 200,
+    "oracle_provider": 0,
+    "partner_address_is_some": 1,
+    "partner_address_id": 300,
+    "partner_share_bps": 1500
+  },
+  "own_input_lovelace": 100000000000,
+  "cont_output_lovelace": 99548000000,
+  "team_output_lovelace": 2000000,
+  "partner_output_lovelace": 0,
+  "own_pool_script_hash": 500,
+  "treasury_donation": {
+    "is_some": 1,
+    "amount": 250000
+  },
+  "consts": {
+    "team_address_id": 300,
+    "pool_address_id": 400,
+    "policy_script_hash": 500,
+    "min_utxo_lovelace": 2000000,
+    "min_premium": 2000000,
+    "partner_share_cap_bps": 2000,
+    "treasury_share_bps": 2500,
+    "protocol_fee_bps": 200
+  }
+}

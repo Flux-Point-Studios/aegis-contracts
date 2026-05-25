@@ -30,80 +30,32 @@ use cardano/address.{Script}
 use cardano/assets
 use cardano/transaction.{InlineDatum, Input, OutputReference, Transaction}
 
-// ---------------------------------------------------------------------------
-// [FIX A-012, generalized for v6] Helper: every policy UTxO consumed at this
-// validator address must declare the SAME (oracle_provider, oracle_nft)
-// pair. Without this guard, a single BatchClaim tx could consume policies
-// bound to different oracle feeds (e.g. ADA/USD and DJED/USD) OR — new in
-// v6 — different oracle providers (Charli3 + Orcfax). Each policy would
-// independently resolve its own oracle from reference_inputs and the tx
-// would pass — but the resulting cross-feed / cross-provider interactions
-// are hard to reason about and constitute permanent grease for future bugs
-// (most directly: they intersect the "same insured + multiple outputs"
-// surface that A-006 partially closes).
-//
-// v6 generalization: in v5 this checked uniformity only on `oracle_nft`. In
-// v6 the (provider, nft) pair is the structural identity of an oracle
-// binding because Orcfax and Charli3 use the same byte width for their
-// respective handles (both are 28-byte script/policy hashes), and a
-// hypothetical collision on the byte sequence between, say, a Charli3 NFT
-// policy id and an Orcfax FSP hash MUST not be allowed to bridge the two
-// providers in one batch.
-//
-// Strategy: walk the inputs, find every input at `own_script_hash`, and
-// fold into a state of (sentinel, all_equal). If all consumed policies share
-// one (provider, nft) pair, the result is `True`. The empty-batch case (no
-// policy inputs at all) is treated as `True` because the surrounding
-// validator already enforces `count_script_inputs >= 1`.
-// ---------------------------------------------------------------------------
+// Every policy UTxO consumed at this validator must declare the same
+// (oracle_provider, oracle_nft) pair, so a BatchClaim cannot mix feeds.
 
 fn batch_oracles_uniform(
   inputs: List<Input>,
   own_script_hash: ByteArray,
 ) -> Bool {
-  let sentinel_init: (OracleProvider, ByteArray) = (Charli3, #"")
-  let result =
+  let (_, all_equal) =
     list.foldl(
       inputs,
-      (sentinel_init, True, False),
+      (None, True),
       fn(input, acc) {
-        let (sentinel, ok, seen) = acc
+        let (sentinel, ok) = acc
         when input.output.address.payment_credential is {
           Script(h) ->
             if h == own_script_hash {
               when input.output.datum is {
                 InlineDatum(raw_pdat) -> {
                   expect pdat: PolicyDatum = raw_pdat
-                  let pair: (OracleProvider, ByteArray) =
-                    (pdat.oracle_provider, pdat.oracle_nft)
-                  if !seen {
-                    (pair, ok, True)
-                  } else {
-                    let (sent_provider, sent_nft) = sentinel
-                    let (this_provider, this_nft) = pair
-                    let same_provider =
-                      // [v12.2 Round-7 R7-B] Indigo added as 4th arm.
-                      // Original V12 switch listed only the 3 prior
-                      // providers; an Indigo BatchClaim fell through
-                      // to `_ -> False` and the entire batch tx
-                      // rejected. Single-policy Indigo claim was
-                      // unaffected — the `seen` sentinel guard skips
-                      // the equality check for the first element.
-                      when (sent_provider, this_provider) is {
-                        (Charli3, Charli3) -> True
-                        (Orcfax, Orcfax) -> True
-                        (AegisSelf, AegisSelf) -> True
-                        (Indigo, Indigo) -> True
-                        _ -> False
-                      }
-                    (
-                      sentinel,
-                      ok && same_provider && this_nft == sent_nft,
-                      True,
-                    )
+                  let pair = (pdat.oracle_provider, pdat.oracle_nft)
+                  when sentinel is {
+                    None -> (Some(pair), ok)
+                    Some(s) -> (sentinel, ok && pair == s)
                   }
                 }
-                _ -> (sentinel, False, seen)
+                _ -> (sentinel, False)
               }
             } else {
               acc
@@ -112,7 +64,6 @@ fn batch_oracles_uniform(
         }
       },
     )
-  let (_, all_equal, _) = result
   all_equal
 }
 
@@ -154,21 +105,12 @@ validator policy_validator {
       // CLAIM: Oracle price <= strike price -> payout to insured
       // -----------------------------------------------------------------------
       Claim -> {
-        // [FIX F-001] Prevent double satisfaction: only one policy UTxO from
-        // this script may be consumed per transaction
+        // Prevent double satisfaction: only one policy UTxO from this
+        // script may be consumed per transaction.
         let single_policy_input =
           count_script_inputs(inputs, own_script_hash) == 1
 
-        // 1. [v6] Resolve the oracle price via the provider-uniform
-        // dispatcher. Internally this matches on `datum.oracle_provider`
-        // and dispatches to either `oracle/charli3.resolve` (which finds
-        // the canonical Charli3 UTxO and parses its GenericData map) or
-        // `oracle/orcfax.resolve` (which walks the FSP -> FS pointer
-        // indirection and parses the FsDat<Rational>). Returns the
-        // provider-uniform Price record. The trust handshake (canonical
-        // address binding for Charli3 — A-016 — and FSP/FS dual-binding
-        // for Orcfax) lives inside each parser; this branch just consumes
-        // the resulting record.
+        // Resolve the oracle price via the provider-uniform dispatcher.
         let price =
           resolve_oracle_price(
             reference_inputs,
@@ -176,41 +118,28 @@ validator policy_validator {
             datum.oracle_nft,
           )
 
-        // 2. Verify oracle price <= strike price (crash detected). Both
-        // providers normalize to the protocol-wide 1e6 scale.
+        // Crash detected: oracle price at or below the strike.
         let price_below_strike = price.value <= datum.strike_price
 
-        // 3. Verify oracle data is fresh.
-        // For Charli3, valid_until is the publisher-set expiry from the datum.
-        // For Orcfax, valid_until is `created_at + orcfax_freshness_window_ms`
-        // computed inside the Orcfax parser.
-        // [v6.0.1 fix] BOTH legs of the validity range must be inside the
-        // freshness window, otherwise an attacker could submit a tx with
-        // tx_lower fresh but tx_upper hours later, and the chain would
-        // include the tx after the price has actually staled.
-        // [v6.0.2 / L-003 fix] Also require `tx_lower >= price.observed_at`
-        // — closes the surface where a tx is built fresh, withheld, and
-        // replayed after a publisher correction; without this, the only
-        // anchor was `valid_until` (a publisher-controlled future time),
-        // not the time the reading was actually committed on-chain.
+        // Both validity-range legs must sit inside the freshness window,
+        // and tx_lower must be at or after the observed_at of the reading.
         let tx_lower = get_lower_bound(validity_range)
         let tx_upper = get_upper_bound(validity_range)
         let oracle_fresh =
           tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
 
-        // 4. Verify transaction is within the policy period
+        // Transaction must sit inside the policy period.
         let within_start = tx_lower >= datum.start_time
         let within_expiry = tx_upper <= datum.expiry_time
 
-        // 5. [FIX A-006/A-009/A-013] Verify aggregate payout to insured is
-        // sufficient AND every payout output is an enterprise address.
+        // Aggregate payout to insured must be sufficient, and every payout
+        // output must be an enterprise address.
         let payout_valid =
           sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= datum.coverage_amount
 
-        // [FIX F-002] Verify remainder ALWAYS goes to pool with correct value.
+        // Residual must go to the canonical pool (must carry pool_nft).
         let policy_utxo_lovelace = assets.lovelace_of(own_value)
         let expected_remainder = policy_utxo_lovelace - datum.coverage_amount
-        // [FIX A-008] Route residual to the CANONICAL pool (must carry pool_nft).
         let pool_output =
           find_canonical_pool_output(
             outputs,
@@ -234,14 +163,12 @@ validator policy_validator {
       // BATCH CLAIM: Multiple policies claimed in one transaction
       // -----------------------------------------------------------------------
       BatchClaim -> {
-        let batch_size = count_script_inputs(inputs, own_script_hash)
-        let has_policies = batch_size >= 1
+        let has_policies = count_script_inputs(inputs, own_script_hash) >= 1
 
-        // [FIX A-012, generalized for v6] All consumed policies must share
-        // the same (oracle_provider, oracle_nft) pair.
+        // All consumed policies must share the same
+        // (oracle_provider, oracle_nft) pair.
         let oracle_uniform = batch_oracles_uniform(inputs, own_script_hash)
 
-        // [v6] Oracle checks via the provider-uniform dispatcher.
         let price =
           resolve_oracle_price(
             reference_inputs,
@@ -249,25 +176,20 @@ validator policy_validator {
             datum.oracle_nft,
           )
         let price_below_strike = price.value <= datum.strike_price
-        // [v6.0.1 fix] Both validity-range legs must be inside the freshness
-        // window — otherwise an attacker could spend a stale price by
-        // submitting a tx with tx_lower fresh but tx_upper much later.
-        // [v6.0.2 / L-003 fix] Also require `tx_lower >= price.observed_at`
-        // to close tx-withhold-and-replay-after-correction.
+
+        // Same freshness rule as Claim.
         let tx_lower = get_lower_bound(validity_range)
         let tx_upper = get_upper_bound(validity_range)
         let oracle_fresh =
           tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
 
-        // Time bounds
         let within_start = tx_lower >= datum.start_time
         let within_expiry = tx_upper <= datum.expiry_time
 
-        // [FIX A-006/A-009] Aggregate enterprise-output check.
         let payout_valid =
           sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= datum.coverage_amount
 
-        // Pool remainder (same logic as Claim)
+        // Pool remainder (same logic as Claim).
         let policy_utxo_lovelace = assets.lovelace_of(own_value)
         let expected_remainder = policy_utxo_lovelace - datum.coverage_amount
         let pool_output =
@@ -317,8 +239,7 @@ validator policy_validator {
       // BATCH EXPIRE: Multiple expired policies reclaimed in one transaction
       // -----------------------------------------------------------------------
       BatchExpire -> {
-        let batch_size = count_script_inputs(inputs, own_script_hash)
-        let has_policies = batch_size >= 1
+        let has_policies = count_script_inputs(inputs, own_script_hash) >= 1
 
         let tx_lower = get_lower_bound(validity_range)
         let is_expired = tx_lower > datum.expiry_time
@@ -344,23 +265,15 @@ validator policy_validator {
       // CANCEL: Early cancellation within the allowed window
       // -----------------------------------------------------------------------
       Cancel -> {
-        // 1. Verify signed by the insured party
         let signed_by_insured =
           must_be_signed_by(extra_signatories, datum.insured)
 
-        // 2. Verify within cancellation window
         let tx_upper = get_upper_bound(validity_range)
         let within_window = tx_upper <= datum.start_time + cancellation_window
 
-        // 3. [FIX A-010] Reject Cancel if the policy is currently
-        // in-the-money. Without this guard the insured can wait inside the
-        // 1-hour cancellation window for the oracle to print, then choose:
-        //   * if price <= strike (ITM)  -> Claim for full coverage,
-        //   * if price >  strike (OTM)  -> Cancel for 90% premium back.
-        // That free optionality on top of the parametric trigger is value
-        // the underwriter never priced in. [v6] Resolve via the provider-
-        // uniform dispatcher so the in-the-money guard works identically
-        // for Charli3 and Orcfax policies.
+        // Reject Cancel if the policy is in-the-money. Otherwise the
+        // insured gets free optionality across the cancellation window:
+        // Claim if ITM, Cancel if OTM.
         let price =
           resolve_oracle_price(
             reference_inputs,
@@ -368,26 +281,17 @@ validator policy_validator {
             datum.oracle_nft,
           )
         let tx_lower = get_lower_bound(validity_range)
-        // [v6.0.1 fix] Both validity-range legs must be inside the freshness
-        // window — symmetric with Claim/BatchClaim so a Cancel can't replay
-        // a stale price by widening the validity range.
-        // [v6.0.2 / L-003 fix] Also require `tx_lower >= price.observed_at`
-        // — symmetric with Claim/BatchClaim, closes the same withhold-
-        // and-replay surface for Cancel.
+        // Same freshness rule as Claim.
         let oracle_fresh =
           tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
-        // Note: Claim uses `oracle_price <= strike_price` to trigger payout,
-        // so the symmetric in-the-money guard here is `oracle_price > strike`.
         let not_in_the_money = price.value > datum.strike_price
 
-        // 4. Calculate refund amount (premium - 10% cancellation fee)
         let refund_amount = calculate_refund(datum.premium_paid)
 
-        // 5. [FIX A-009/A-013] Aggregate enterprise refund check.
         let refund_valid =
           sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= refund_amount
 
-        // 6. Verify remainder goes to pool (premium_paid - refund + coverage)
+        // Remainder must go to the pool (premium_paid - refund + coverage).
         let policy_utxo_lovelace = assets.lovelace_of(own_value)
         let expected_pool_amount = policy_utxo_lovelace - refund_amount
         let pool_output =
@@ -469,13 +373,11 @@ test cancel_window_expired() {
 // Security Tests: Policy Validator Edge Cases
 // ---------------------------------------------------------------------------
 
-// [F-001] Double satisfaction: verify single-input constraint logic
 test double_satisfaction_two_inputs_fail_check() {
   let count = 2
   count != 1
 }
 
-// [F-002] Remainder bypass
 test claim_remainder_logic() {
   let policy_utxo_lovelace = 7_000_000_000
   let coverage = 5_000_000_000

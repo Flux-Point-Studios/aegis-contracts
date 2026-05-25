@@ -1,5 +1,5 @@
 // =============================================================================
-// Aegis Insurance Protocol - Orcfax Oracle Resolver (v6 multi-provider)
+// Aegis Insurance Protocol - Orcfax Oracle Resolver
 // Location: contracts/lib/aegis/oracle/orcfax.ak
 // Summary: Orcfax V1 implementation of the provider-uniform
 //          `aegis/oracle/types.Price` shape. Walks the FSP -> FS pointer
@@ -24,19 +24,9 @@
 // guaranteed to be identical. If upstream rotates the schema, we update
 // here in lockstep with their release notes.
 //
-// [v12.2 DEPRECATED 2026-05-12 — provider soft-disabled per oracle landscape
-// crisis. Orcfax announced wind-down 2026-03-27 with sunset target
-// 2026-07-31 and the active V12.2 validator's `is_canonical_oracle_nft`
-// returns False for the Orcfax arm. This resolver is kept in tree for:
-//   1. backwards-compat: V11 policies that already carry
-//      `oracle_provider: Orcfax` need their datums to remain CBOR-decodable
-//      for off-chain analytics.
-//   2. reactivation path: if a community Orcfax fork emerges or the
-//      sunset is delayed, this resolver is the unchanged entry point.
-// Direct call attempts under V12.2 abort via the leading `fail` in
-// `resolve` below. The dispatcher's Orcfax arm in `oracle.ak::resolve_oracle_price`
-// still routes here, so the `fail` is the defense-in-depth second layer
-// after the validator's canonical-handle rejection at Underwrite time.]
+// Orcfax is not an enabled provider; the resolver remains in tree so legacy
+// datums carrying `oracle_provider: Orcfax` decode for off-chain analytics.
+// Calls into `resolve` fail at runtime.
 // =============================================================================
 
 use aegis/oracle/types.{Price}
@@ -213,7 +203,7 @@ pub fn resolve_with_feed(
   fsp_hash: ByteArray,
   feed_id_prefix: ByteArray,
 ) -> Price {
-  // [v6.0.2 / A-027 fix] Pin `fsp_hash` to the canonical Orcfax FSP
+  // Pin `fsp_hash` to the canonical Orcfax FSP
   // script hash for the active network. Pre-fix, the FSP script
   // credential was pinned to the same caller-supplied value, letting an
   // attacker deploy a permissive FSP+FS pair under their own hash and
@@ -254,26 +244,8 @@ pub fn resolve_with_feed(
 /// ADA/USD pairing). When/if Aegis adds a non-ADA insured asset, callers
 /// would invoke `resolve_with_feed` directly with the appropriate prefix
 /// and a corresponding `oracle_nft` (FSP hash) per policy datum.
-pub fn resolve(reference_inputs: List<Input>, fsp_hash: ByteArray) -> Price {
-  // [v12.2] Soft-disabled. Same posture as oracle/charli3.ak::resolve.
-  // The validator's `is_canonical_oracle_nft` gate at Underwrite time
-  // should already have rejected any policy bound to Orcfax; this `fail`
-  // closes the surface where the resolver is reached anyway (e.g., via
-  // an unexpected code path or a stranded V11 policy force-imported into
-  // V12.2 validator code).
-  //
-  // Reactivation = remove this `fail` + flip the Orcfax arm of
-  // `is_canonical_oracle_nft` back to its V12 equality form.
-  fail @"v12.2: Orcfax provider soft-disabled. Use AegisSelf or Indigo."
-
-  // Original V12 body — preserved below as unreachable dead code so the
-  // reactivation diff is a pure deletion of the `fail` above.
-  // ---------------------------------------------------------------
-  // resolve_with_feed(
-  //   reference_inputs,
-  //   fsp_hash,
-  //   aegis_types.orcfax_ada_usd_feed_id,
-  // )
+pub fn resolve(_reference_inputs: List<Input>, _fsp_hash: ByteArray) -> Price {
+  fail @"Orcfax provider not enabled."
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +326,7 @@ test rational_to_scaled_high_precision_orcfax_example() {
 }
 
 test orcfax_freshness_window_is_70_minutes() {
-  // [v7] Widened from 30 min to 70 min — see types.ak::orcfax_freshness_window_ms
+  // Widened from 30 min to 70 min — see types.ak::orcfax_freshness_window_ms
   // doc comment for the 1h-heartbeat empirical justification.
   aegis_types.orcfax_freshness_window_ms == 70 * 60 * 1_000
 }

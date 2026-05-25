@@ -1,30 +1,14 @@
 // =============================================================================
-// Aegis Insurance Protocol - Charli3 Oracle Parser (v6 multi-provider)
+// Aegis Insurance Protocol - Charli3 Oracle Parser
 // Location: contracts/lib/aegis/oracle/charli3.ak
 // Summary: Charli3 ODV oracle datum types, accessors, and resolver. Owns the
-//          Charli3-specific CBOR shape and the A-016 trust handshake (oracle
-//          UTxO must carry the canonical NFT AND sit at the canonical
+//          Charli3-specific CBOR shape and the trust handshake (oracle UTxO
+//          must carry the canonical NFT AND sit at the canonical
 //          `charli3_oracle_script_hash` address).
 //
-//          Pre-v6 callers reached these functions via `aegis/oracle`; v6
-//          re-exports them from `aegis/oracle` via thin pass-through wrappers
-//          so the v5 import paths still compile (see `aegis/oracle.ak`).
-//          New v6 callers should go through the top-level
-//          `oracle.resolve_oracle_price` dispatcher.
-//
-// [v12.2 DEPRECATED 2026-05-12 — provider soft-disabled per oracle landscape
-// crisis. Charli3 has signaled possible dissolution (Hever DM 2026-04-30)
-// and the active V12.2 validator's `is_canonical_oracle_nft` returns False
-// for the Charli3 arm. This resolver is kept in tree for:
-//   1. backwards-compat: V11 policies that already carry
-//      `oracle_provider: Charli3` need their datums to remain CBOR-decodable
-//      for off-chain analytics.
-//   2. reactivation path: if a future redeploy un-soft-disables Charli3,
-//      this resolver is the unchanged entry point.
-// Direct call attempts under V12.2 abort via the leading `fail` in
-// `resolve` below. The dispatcher's Charli3 arm in `oracle.ak::resolve_oracle_price`
-// still routes here, so the `fail` is the defense-in-depth second layer
-// after the validator's canonical-handle rejection at Underwrite time.]
+//          Charli3 is not an enabled provider; the resolver remains in tree
+//          so legacy datums carrying `oracle_provider: Charli3` decode for
+//          off-chain analytics. Calls into `resolve` fail at runtime.
 // =============================================================================
 
 use aegis/oracle/types.{Price}
@@ -140,7 +124,7 @@ pub fn find_oracle_datum(
   reference_inputs: List<Input>,
   oracle_nft_policy: ByteArray,
 ) -> OracleDatum {
-  // [v6.0.2 / A-026-class fix] Pin `oracle_nft_policy` to the canonical
+  // Pin `oracle_nft_policy` to the canonical
   // Charli3 ADA/USD NFT. Pre-fix, this argument was caller-controlled
   // (sourced from `PolicyDatum.oracle_nft`); an attacker could output a
   // fake-NFT UTxO at the canonical Charli3 address (anyone can output
@@ -164,7 +148,7 @@ pub fn find_oracle_datum(
 /// Searches for a UTxO whose value contains a token under the oracle NFT policy
 /// AND whose payment credential is the canonical Charli3 oracle script hash.
 ///
-/// [FIX A-016] Previously this only checked NFT presence, allowing a
+/// Previously this only checked NFT presence, allowing a
 /// UTxO at ANY address that holds the Charli3 NFT to be accepted as an
 /// oracle. If Charli3 ever rotated their oracle script address (e.g.,
 /// during an upgrade) or if the NFT could be moved to an attacker-
@@ -233,28 +217,10 @@ pub fn create_oracle_datum(
 /// as `Price.valid_until`. Validator's check `tx_lower <= valid_until` is
 /// then identical for both providers.
 pub fn resolve(
-  reference_inputs: List<Input>,
-  oracle_nft_policy: ByteArray,
+  _reference_inputs: List<Input>,
+  _oracle_nft_policy: ByteArray,
 ) -> Price {
-  // [v12.2] Soft-disabled. The validator's `is_canonical_oracle_nft` gate
-  // at Underwrite time should already have rejected any policy bound to
-  // Charli3; this `fail` closes the surface where the resolver is reached
-  // anyway (e.g., via an unexpected code path or a stranded V11 policy
-  // force-imported into V12.2 validator code).
-  //
-  // Reactivation = remove this `fail` + flip the Charli3 arm of
-  // `is_canonical_oracle_nft` back to its V12 equality form.
-  fail @"v12.2: Charli3 provider soft-disabled. Use AegisSelf or Indigo."
-
-  // Original V12 body — preserved below as unreachable dead code so the
-  // reactivation diff is a pure deletion of the `fail` above.
-  // ---------------------------------------------------------------
-  // let datum = find_oracle_datum(reference_inputs, oracle_nft_policy)
-  // Price {
-  //   value: get_oracle_price(datum),
-  //   observed_at: get_oracle_timestamp(datum),
-  //   valid_until: get_oracle_expiry(datum),
-  // }
+  fail @"Charli3 provider not enabled."
 }
 
 // ---------------------------------------------------------------------------
