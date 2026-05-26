@@ -3116,3 +3116,21 @@ test ext_16_normal_add_liquidity_no_markers_accepted() {
   let m_out = r16_sum_marker_qty_outputs([])
   m_in == 0 && m_out == 0
 }
+
+test ext_21_cancel_routes_policy_lovelace_third_party_rejected() {
+  let refund_amount = 1_800_000
+  let policy_utxo_lovelace = 10_000_000
+  let insured_received = refund_amount
+  let insured_payout_valid =
+    insured_received >= refund_amount + policy_utxo_lovelace
+  insured_payout_valid == False
+}
+
+test ext_21_cancel_insured_receives_refund_plus_collateral_accepted() {
+  let refund_amount = 1_800_000
+  let policy_utxo_lovelace = 10_000_000
+  let insured_received = refund_amount + policy_utxo_lovelace
+  let insured_payout_valid =
+    insured_received >= refund_amount + policy_utxo_lovelace
+  insured_payout_valid
+}

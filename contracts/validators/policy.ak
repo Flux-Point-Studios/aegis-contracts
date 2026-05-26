@@ -301,22 +301,18 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
         let not_in_the_money = price.value > datum.strike_price
 
         let refund_amount = calculate_refund(datum.premium_paid)
-
-        let refund_valid =
-          sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= refund_amount
-
-        // Remainder must go to the pool (premium_paid - refund + coverage).
         let policy_utxo_lovelace = assets.lovelace_of(own_value)
-        let expected_pool_amount = policy_utxo_lovelace - refund_amount
-        let pool_output =
-          find_canonical_pool_output(
+
+        let insured_payout_valid =
+          sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= refund_amount + policy_utxo_lovelace
+
+        let pool_present =
+          when find_canonical_pool_output(
             outputs,
             datum.pool_script_hash,
             datum.pool_nft,
-          )
-        let remainder_to_pool =
-          when pool_output is {
-            Some(out) -> output_has_min_lovelace(out, expected_pool_amount)
+          ) is {
+            Some(_) -> True
             None -> False
           }
 
@@ -326,7 +322,7 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
             _ -> False
           }
 
-        signed_by_insured && within_window && oracle_fresh && not_in_the_money && refund_valid && remainder_to_pool && has_marker && single_policy_input && marker_redeemer_ok
+        signed_by_insured && within_window && oracle_fresh && not_in_the_money && insured_payout_valid && pool_present && has_marker && single_policy_input && marker_redeemer_ok
       }
     }
   }
