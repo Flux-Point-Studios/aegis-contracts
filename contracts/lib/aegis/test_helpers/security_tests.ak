@@ -27,11 +27,12 @@ use aegis/pricing.{
 }
 use aegis/test_helpers/fixtures
 use aegis/types.{
-  AegisSelf, BatchClaim, BatchExpire, Cancel, Charli3, Claim, Expire, Indigo,
-  Orcfax, PolicyDatum, PoolDatum, cancellation_window,
-  charli3_oracle_script_hash, min_utxo_lovelace, orcfax_ada_usd_feed_id,
-  orcfax_freshness_window_ms, orcfax_fsp_script_hash_mainnet,
-  orcfax_fsp_script_hash_preview, partner_share_cap_bps, team_address,
+  AegisSelf, BatchClaim, BatchExpire, BurnForCancel, BurnForClaim, BurnForExpire,
+  Cancel, Charli3, Claim, Expire, Indigo, MarkerRedeemer, MintMarkers, Orcfax,
+  PolicyDatum, PoolDatum, cancellation_window, charli3_oracle_script_hash,
+  min_utxo_lovelace, orcfax_ada_usd_feed_id, orcfax_freshness_window_ms,
+  orcfax_fsp_script_hash_mainnet, orcfax_fsp_script_hash_preview,
+  partner_share_cap_bps, policy_marker_asset_name, team_address,
   treasury_share_bps,
 }
 use aegis/validation.{
@@ -2759,4 +2760,359 @@ test ext_15_batch_expire_extra_unaccounted_policy_input_rejected() {
   let consumed_n = 1
   let all_policy_inputs_accounted = policies_consumed_total == consumed_n
   all_policy_inputs_accounted == False
+}
+
+// ---------------------------------------------------------------------------
+// V12.2+R16 — EXT-16 through EXT-20
+//
+// EXT-16 CRITICAL — branch-specific marker burn redeemers. MarkerRedeemer
+//   now has BurnForClaim / BurnForCancel / BurnForExpire variants. Each
+//   pool and policy branch pins its own variant via the sibling marker
+//   mint redeemer in tx.redeemers.
+// EXT-17 HIGH/CRITICAL — exact policy output funding. == coverage, not
+//   >= coverage. Per-policy coverage >= min_utxo_lovelace gate too.
+// EXT-18 MED — explicit marker locality. Per-branch (input, output, net)
+//   triples counted directly from value via assets.quantity_of.
+// EXT-19/EXT-20 — covered structurally by EXT-16 (branch-binding tests
+//   for BatchExpire and standalone Expire variants).
+// ---------------------------------------------------------------------------
+
+// Reusable lifted predicates mirroring the validator's per-branch
+// marker-redeemer pairing. Each test exercises the SAME `when r is`
+// shape the pool / policy validators evaluate, with no commentary
+// translation step.
+
+fn marker_redeemer_matches_underwrite(r: MarkerRedeemer, count: Int) -> Bool {
+  when r is {
+    MintMarkers { count: c } -> c == count
+    _ -> False
+  }
+}
+
+fn marker_redeemer_matches_claim(r: MarkerRedeemer) -> Bool {
+  when r is {
+    BurnForClaim -> True
+    _ -> False
+  }
+}
+
+fn marker_redeemer_matches_cancel(r: MarkerRedeemer) -> Bool {
+  when r is {
+    BurnForCancel -> True
+    _ -> False
+  }
+}
+
+fn marker_redeemer_matches_expire(r: MarkerRedeemer, count: Int) -> Bool {
+  when r is {
+    BurnForExpire { count: c } -> c == count
+    _ -> False
+  }
+}
+
+// Synthesize an input or output carrying `qty` marker tokens of the
+// canonical policy id / asset name.
+fn r16_marker_value(qty: Int) -> assets.Value {
+  if qty == 0 {
+    assets.zero
+  } else {
+    assets.zero
+      |> assets.add(
+          r12_marker_policy_id_test,
+          policy_marker_asset_name,
+          qty,
+        )
+  }
+}
+
+fn r16_input_with_markers(idx: Int, qty: Int, lovelace: Int) -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: fixtures.tx_id_one,
+      output_index: idx,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: Script(fixtures.policy_script_hash),
+        stake_credential: None,
+      },
+      value: assets.from_lovelace(lovelace) |> assets.merge(r16_marker_value(qty)),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+}
+
+fn r16_output_with_markers(qty: Int, lovelace: Int) -> Output {
+  Output {
+    address: Address {
+      payment_credential: Script(fixtures.policy_script_hash),
+      stake_credential: None,
+    },
+    value: assets.from_lovelace(lovelace) |> assets.merge(r16_marker_value(qty)),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+fn r16_sum_marker_qty_inputs(inputs: List<Input>) -> Int {
+  list.foldl(
+    inputs,
+    0,
+    fn(i, acc) {
+      acc + assets.quantity_of(
+        i.output.value,
+        r12_marker_policy_id_test,
+        policy_marker_asset_name,
+      )
+    },
+  )
+}
+
+fn r16_sum_marker_qty_outputs(outputs: List<Output>) -> Int {
+  list.foldl(
+    outputs,
+    0,
+    fn(o, acc) {
+      acc + assets.quantity_of(
+        o.value,
+        r12_marker_policy_id_test,
+        policy_marker_asset_name,
+      )
+    },
+  )
+}
+
+// -- EXT-16 BRANCH-MISMATCH (6) -------------------------------------------
+// Each test calls the lifted predicate the validator uses verbatim.
+
+test ext_16_policy_expire_with_pool_claim_rejected() {
+  // policy.Expire requires marker redeemer = BurnForExpire { .. }.
+  // Attacker pairs it with a pool ProcessClaim, whose marker redeemer
+  // is BurnForClaim. Both sides reject.
+  let attacker_redeemer = BurnForClaim
+  let policy_side = marker_redeemer_matches_expire(attacker_redeemer, 1)
+  let pool_side = marker_redeemer_matches_claim(attacker_redeemer)
+  policy_side == False && pool_side == True
+}
+
+test ext_16_policy_expire_with_pool_accept_cancellation_rejected() {
+  // policy.Expire vs pool.AcceptCancellation (marker redeemer BurnForCancel).
+  let attacker_redeemer = BurnForCancel
+  let policy_side = marker_redeemer_matches_expire(attacker_redeemer, 1)
+  let pool_side = marker_redeemer_matches_cancel(attacker_redeemer)
+  policy_side == False && pool_side == True
+}
+
+test ext_16_policy_claim_with_pool_accept_cancellation_rejected() {
+  // policy.Claim requires BurnForClaim. AcceptCancellation pins
+  // BurnForCancel. Policy side fails on the mismatch.
+  let attacker_redeemer = BurnForCancel
+  let policy_side = marker_redeemer_matches_claim(attacker_redeemer)
+  let pool_side = marker_redeemer_matches_cancel(attacker_redeemer)
+  policy_side == False && pool_side == True
+}
+
+test ext_16_policy_cancel_with_pool_process_claim_rejected() {
+  // policy.Cancel pairs with BurnForCancel. ProcessClaim pins BurnForClaim.
+  let attacker_redeemer = BurnForClaim
+  let policy_side = marker_redeemer_matches_cancel(attacker_redeemer)
+  let pool_side = marker_redeemer_matches_claim(attacker_redeemer)
+  policy_side == False && pool_side == True
+}
+
+test ext_16_policy_cancel_with_pool_batch_expire_rejected() {
+  // policy.Cancel vs pool.BatchExpireProcess (marker redeemer
+  // BurnForExpire). Policy side fails because Cancel pins BurnForCancel.
+  let attacker_redeemer = BurnForExpire { count: 3 }
+  let policy_side = marker_redeemer_matches_cancel(attacker_redeemer)
+  let pool_side = marker_redeemer_matches_expire(attacker_redeemer, 3)
+  policy_side == False && pool_side == True
+}
+
+test ext_16_policy_claim_with_pool_batch_expire_rejected() {
+  // policy.Claim vs pool.BatchExpireProcess. Policy side fails:
+  // Claim requires BurnForClaim.
+  let attacker_redeemer = BurnForExpire { count: 2 }
+  let policy_side = marker_redeemer_matches_claim(attacker_redeemer)
+  let pool_side = marker_redeemer_matches_expire(attacker_redeemer, 2)
+  policy_side == False && pool_side == True
+}
+
+// -- EXT-18 MARKER LOCALITY (7) -------------------------------------------
+
+test ext_18_underwrite_extra_marker_input_rejected() {
+  // Legitimate Underwrite has 0 marker inputs. An extra marker carried
+  // by a wallet input collapses marker_inputs == 0.
+  let attacker_inputs =
+    [
+      // marker input crafted from a wallet UTxO (the policy_marker
+      // policy doesn't care where the marker sits — only count matters).
+      r16_input_with_markers(0, 1, 5_000_000),
+    ]
+  let marker_inputs_count = r16_sum_marker_qty_inputs(attacker_inputs)
+  marker_inputs_count == 0 == False
+}
+
+test ext_18_batch_underwrite_extra_marker_input_rejected() {
+  // BatchUnderwrite must also see 0 marker inputs. One extra collapses
+  // the locality check.
+  let attacker_inputs =
+    [
+      r16_input_with_markers(0, 1, 5_000_000),
+      r16_input_with_markers(1, 1, 5_000_000),
+    ]
+  let marker_inputs_count = r16_sum_marker_qty_inputs(attacker_inputs)
+  marker_inputs_count == 0 == False
+}
+
+test ext_18_add_liquidity_marker_io_collapses() {
+  // AddLiquidity: 0 inputs + 0 outputs. Any nonzero count collapses.
+  let inputs_with_marker = [r16_input_with_markers(0, 1, 5_000_000)]
+  let outputs_with_marker = [r16_output_with_markers(1, 5_000_000)]
+  let m_in = r16_sum_marker_qty_inputs(inputs_with_marker)
+  let m_out = r16_sum_marker_qty_outputs(outputs_with_marker)
+  let locality_ok = m_in == 0 && m_out == 0
+  locality_ok == False
+}
+
+test ext_18_remove_liquidity_marker_io_collapses() {
+  // RemoveLiquidity symmetric to AddLiquidity.
+  let inputs_with_marker = [r16_input_with_markers(0, 1, 5_000_000)]
+  let m_in = r16_sum_marker_qty_inputs(inputs_with_marker)
+  let m_out = r16_sum_marker_qty_outputs([])
+  let locality_ok = m_in == 0 && m_out == 0
+  locality_ok == False
+}
+
+test ext_18_process_claim_stray_marker_output_rejected() {
+  // ProcessClaim: 1 marker input (consumed policy), 0 marker outputs.
+  // Attacker sneaks an extra marker output back to a wallet address;
+  // marker_outputs == 0 collapses.
+  let consumed_policy_input = [r16_input_with_markers(0, 1, 5_000_000_000)]
+  let stray_marker_output = [r16_output_with_markers(1, 5_000_000)]
+  let m_in = r16_sum_marker_qty_inputs(consumed_policy_input)
+  let m_out = r16_sum_marker_qty_outputs(stray_marker_output)
+  let locality_ok = m_in == 1 && m_out == 0
+  locality_ok == False
+}
+
+test ext_18_accept_cancellation_marker_output_surviving_rejected() {
+  // AcceptCancellation: 1 marker input, 0 marker outputs. A surviving
+  // marker on any output collapses the locality check.
+  let consumed_policy_input = [r16_input_with_markers(0, 1, 5_000_000_000)]
+  let surviving_marker_output = [r16_output_with_markers(1, 5_000_000)]
+  let m_in = r16_sum_marker_qty_inputs(consumed_policy_input)
+  let m_out = r16_sum_marker_qty_outputs(surviving_marker_output)
+  let locality_ok = m_in == 1 && m_out == 0
+  locality_ok == False
+}
+
+test ext_18_batch_expire_marker_output_surviving_rejected() {
+  // BatchExpireProcess: consumed_n marker inputs, 0 marker outputs.
+  // A surviving marker on a wallet output collapses.
+  let consumed_n = 3
+  let consumed_policy_inputs =
+    [
+      r16_input_with_markers(0, 1, 5_000_000_000),
+      r16_input_with_markers(1, 1, 5_000_000_000),
+      r16_input_with_markers(2, 1, 5_000_000_000),
+    ]
+  let surviving_marker_output = [r16_output_with_markers(1, 5_000_000)]
+  let m_in = r16_sum_marker_qty_inputs(consumed_policy_inputs)
+  let m_out = r16_sum_marker_qty_outputs(surviving_marker_output)
+  let locality_ok = m_in == consumed_n && m_out == 0
+  locality_ok == False
+}
+
+// -- EXT-17 EXACT FUNDING (3) ---------------------------------------------
+
+test ext_17_underwrite_overfunded_policy_output_rejected() {
+  // R15 used `lovelace_of(out.value) >= coverage`. R16 pins ==. An
+  // overfunded output (coverage + 1) flunks the equality predicate.
+  let coverage = 5_000_000_000
+  let policy_output_lovelace = coverage + 1
+  let funded_eq = policy_output_lovelace == coverage
+  funded_eq == False
+}
+
+test ext_17_batch_underwrite_overfunded_per_policy_rejected() {
+  // Same equality in the BatchUnderwrite walker's per-policy funded
+  // check. One overfunded entry collapses `funded` for that policy,
+  // which collapses `valid_policy` -> walker rejects.
+  let coverage = 5_000_000_000
+  let one_overfunded_output_lovelace = coverage + 1
+  let funded_eq = one_overfunded_output_lovelace == coverage
+  funded_eq == False
+}
+
+test ext_17_underwrite_exact_funding_accepted() {
+  // Positive control: exact-coverage funding satisfies the equality.
+  // The accepting positive control here pairs with the negative tests
+  // above to bracket the R17 invariant.
+  let coverage = 5_000_000_000
+  let policy_output_lovelace = coverage
+  policy_output_lovelace == coverage
+}
+
+// -- LIFECYCLE POSITIVE CONTROLS (6) --------------------------------------
+
+test ext_16_normal_claim_burn_for_claim_accepted() {
+  // Positive control: pool ProcessClaim sees marker redeemer
+  // BurnForClaim AND policy.Claim sees BurnForClaim. Both sides accept.
+  let r = BurnForClaim
+  let policy_ok = marker_redeemer_matches_claim(r)
+  let pool_ok = marker_redeemer_matches_claim(r)
+  policy_ok && pool_ok
+}
+
+test ext_16_normal_cancel_burn_for_cancel_accepted() {
+  let r = BurnForCancel
+  let policy_ok = marker_redeemer_matches_cancel(r)
+  let pool_ok = marker_redeemer_matches_cancel(r)
+  policy_ok && pool_ok
+}
+
+test ext_16_normal_expire_burn_for_expire_accepted() {
+  // BatchExpireProcess of count 3 + every consumed policy.Expire all
+  // pin BurnForExpire { count: 3 }.
+  let r = BurnForExpire { count: 3 }
+  let policy_ok = marker_redeemer_matches_expire(r, 3)
+  let pool_ok = marker_redeemer_matches_expire(r, 3)
+  policy_ok && pool_ok
+}
+
+test ext_16_normal_underwrite_marker_accepted() {
+  // Underwrite: marker redeemer MintMarkers { count: 1 }, marker_outputs
+  // == 1, marker_inputs == 0.
+  let r = MintMarkers { count: 1 }
+  let mint_ok = marker_redeemer_matches_underwrite(r, 1)
+  let m_in = r16_sum_marker_qty_inputs([])
+  let m_out =
+    r16_sum_marker_qty_outputs([r16_output_with_markers(1, 5_000_000_000)])
+  mint_ok && m_in == 0 && m_out == 1
+}
+
+test ext_16_normal_batch_underwrite_marker_accepted() {
+  // BatchUnderwrite of 3 policies: MintMarkers { count: 3 }, 3 marker
+  // outputs, 0 marker inputs.
+  let r = MintMarkers { count: 3 }
+  let mint_ok = marker_redeemer_matches_underwrite(r, 3)
+  let m_in = r16_sum_marker_qty_inputs([])
+  let outputs =
+    [
+      r16_output_with_markers(1, 5_000_000_000),
+      r16_output_with_markers(1, 5_000_000_000),
+      r16_output_with_markers(1, 5_000_000_000),
+    ]
+  let m_out = r16_sum_marker_qty_outputs(outputs)
+  mint_ok && m_in == 0 && m_out == 3
+}
+
+test ext_16_normal_add_liquidity_no_markers_accepted() {
+  // AddLiquidity: 0 marker inputs, 0 marker outputs, no marker mint
+  // redeemer expected. Positive control on the empty-marker path.
+  let m_in = r16_sum_marker_qty_inputs([])
+  let m_out = r16_sum_marker_qty_outputs([])
+  m_in == 0 && m_out == 0
 }

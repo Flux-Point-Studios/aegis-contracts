@@ -310,9 +310,19 @@ pub type MarkerRedeemer {
   /// validator must be co-spent. `count` must equal the number of new
   /// policy outputs and the total quantity minted under this policy.
   MintMarkers { count: Int }
-  /// Burn one or more markers. The pool validator must be co-spent.
-  /// Net mint quantity must be strictly negative.
-  BurnMarkers
+  /// Burn exactly 1 marker — paired with pool.ProcessClaim +
+  /// policy.Claim. Branch-specific so the pool and policy validators
+  /// can both pin the burn redeemer to their own lifecycle and refuse
+  /// burn-arm crossings.
+  BurnForClaim
+  /// Burn exactly 1 marker — paired with pool.AcceptCancellation +
+  /// policy.Cancel.
+  BurnForCancel
+  /// Burn N markers — paired with pool.BatchExpireProcess +
+  /// policy.Expire / policy.BatchExpire. `count` must equal the
+  /// number of consumed policy inputs and the absolute net burn
+  /// quantity.
+  BurnForExpire { count: Int }
 }
 
 /// Canonical asset name for the policy marker token: ASCII

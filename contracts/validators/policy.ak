@@ -1,15 +1,16 @@
 use aegis/oracle.{resolve_oracle_price}
 use aegis/pricing.{calculate_refund}
 use aegis/types.{
-  AegisSelf, BatchClaim, BatchExpire, Cancel, Charli3, Claim, Expire, Indigo,
-  OracleProvider, Orcfax, PolicyDatum, PolicyRedeemer, cancellation_window,
-  policy_marker_asset_name,
+  AegisSelf, BatchClaim, BatchExpire, BurnForCancel, BurnForClaim, BurnForExpire,
+  Cancel, Charli3, Claim, Expire, Indigo, MarkerRedeemer, OracleProvider, Orcfax,
+  PolicyDatum, PolicyRedeemer, cancellation_window, policy_marker_asset_name,
 }
 use aegis/validation.{
   count_script_inputs, find_canonical_pool_output, get_lower_bound,
   get_upper_bound, must_be_signed_by, output_has_min_lovelace,
   sum_lovelace_to_enterprise_pkh,
 }
+use aiken/collection/pairs
 // =============================================================================
 // Aegis Insurance Protocol - Policy Validator
 // Location: contracts/validators/policy.ak
@@ -29,7 +30,9 @@ use aegis/validation.{
 use aiken/collection/list
 use cardano/address.{Script}
 use cardano/assets
-use cardano/transaction.{InlineDatum, Input, OutputReference, Transaction}
+use cardano/transaction.{
+  InlineDatum, Input, Mint, OutputReference, Transaction,
+}
 
 // Every policy UTxO consumed at this validator must declare the same
 // (oracle_provider, oracle_nft) pair, so a BatchClaim cannot mix feeds.
@@ -99,8 +102,16 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
       outputs,
       validity_range,
       extra_signatories,
+      redeemers,
       ..
     } = self
+
+    // EXT-16 sibling-redeemer pairing on the policy side: the marker
+    // mint redeemer dictates which spend variant is permitted. Read
+    // once at the top so each branch can pin its own lifecycle.
+    expect Some(raw_marker_redeemer) =
+      pairs.get_first(redeemers, Mint(policy_marker_policy_id))
+    expect marker_redeemer: MarkerRedeemer = raw_marker_redeemer
 
     // Find own input to determine script hash and value
     expect Some(self_input) =
@@ -180,7 +191,13 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
             None -> False
           }
 
-        single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_present && has_marker
+        let marker_redeemer_ok =
+          when marker_redeemer is {
+            BurnForClaim -> True
+            _ -> False
+          }
+
+        single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_present && has_marker && marker_redeemer_ok
       }
 
       // -----------------------------------------------------------------------
@@ -209,7 +226,13 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
             None -> False
           }
 
-        is_expired && funds_to_pool && has_marker
+        let marker_redeemer_ok =
+          when marker_redeemer is {
+            BurnForExpire { .. } -> True
+            _ -> False
+          }
+
+        is_expired && funds_to_pool && has_marker && marker_redeemer_ok
       }
 
       // -----------------------------------------------------------------------
@@ -235,7 +258,13 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
             None -> False
           }
 
-        has_policies && is_expired && funds_to_pool && has_marker
+        let marker_redeemer_ok =
+          when marker_redeemer is {
+            BurnForExpire { .. } -> True
+            _ -> False
+          }
+
+        has_policies && is_expired && funds_to_pool && has_marker && marker_redeemer_ok
       }
 
       // -----------------------------------------------------------------------
@@ -291,7 +320,13 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
             None -> False
           }
 
-        signed_by_insured && within_window && oracle_fresh && not_in_the_money && refund_valid && remainder_to_pool && has_marker && single_policy_input
+        let marker_redeemer_ok =
+          when marker_redeemer is {
+            BurnForCancel -> True
+            _ -> False
+          }
+
+        signed_by_insured && within_window && oracle_fresh && not_in_the_money && refund_valid && remainder_to_pool && has_marker && single_policy_input && marker_redeemer_ok
       }
     }
   }

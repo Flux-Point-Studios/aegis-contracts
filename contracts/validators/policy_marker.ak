@@ -1,6 +1,6 @@
 use aegis/types.{
-  BurnMarkers, MarkerRedeemer, MintMarkers, PolicyDatum,
-  policy_marker_asset_name,
+  BurnForCancel, BurnForClaim, BurnForExpire, MarkerRedeemer, MintMarkers,
+  PolicyDatum, policy_marker_asset_name,
 }
 use aegis/validation.{pool_is_consumed_via_nft}
 // =============================================================================
@@ -135,9 +135,23 @@ validator policy_marker(
       }
 
       // -------------------------------------------------------------------
-      // BURN MARKERS: pool co-spend authorises. Net mint must be < 0.
+      // BURN: single-marker burn paired with Claim lifecycle.
       // -------------------------------------------------------------------
-      BurnMarkers -> pool_is_consumed && names_ok && named_qty < 0
+      BurnForClaim -> pool_is_consumed && names_ok && named_qty == -1
+
+      // -------------------------------------------------------------------
+      // BURN: single-marker burn paired with Cancel lifecycle.
+      // -------------------------------------------------------------------
+      BurnForCancel -> pool_is_consumed && names_ok && named_qty == -1
+
+      // -------------------------------------------------------------------
+      // BURN: N-marker burn paired with Expire / BatchExpire lifecycle.
+      // -------------------------------------------------------------------
+      BurnForExpire { count } -> {
+        let count_positive = count > 0
+        let mint_matches_count = named_qty == -count
+        pool_is_consumed && names_ok && count_positive && mint_matches_count
+      }
     }
   }
 
@@ -154,15 +168,31 @@ test marker_redeemer_mint_construction() {
   let redeemer = MintMarkers { count: 3 }
   when redeemer is {
     MintMarkers { count } -> count == 3
-    BurnMarkers -> False
+    _ -> False
   }
 }
 
-test marker_redeemer_burn_construction() {
-  let redeemer = BurnMarkers
+test marker_redeemer_burn_for_claim_construction() {
+  let redeemer = BurnForClaim
   when redeemer is {
-    MintMarkers { .. } -> False
-    BurnMarkers -> True
+    BurnForClaim -> True
+    _ -> False
+  }
+}
+
+test marker_redeemer_burn_for_cancel_construction() {
+  let redeemer = BurnForCancel
+  when redeemer is {
+    BurnForCancel -> True
+    _ -> False
+  }
+}
+
+test marker_redeemer_burn_for_expire_construction() {
+  let redeemer = BurnForExpire { count: 4 }
+  when redeemer is {
+    BurnForExpire { count } -> count == 4
+    _ -> False
   }
 }
 
@@ -176,7 +206,9 @@ test marker_mint_count_must_be_positive() {
   count > 0 == False
 }
 
-test marker_burn_path_requires_negative_quantity() {
-  let net_qty = -1
-  net_qty < 0
+test marker_burn_for_expire_requires_matching_negative() {
+  // BurnForExpire { count: 3 } requires named_qty == -3.
+  let count = 3
+  let named_qty = -3
+  named_qty == -count
 }

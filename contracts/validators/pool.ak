@@ -9,6 +9,7 @@ use aegis/pricing.{
 }
 use aegis/types.{
   AcceptCancellation, AddLiquidity, BatchExpireProcess, BatchUnderwrite,
+  BurnForCancel, BurnForClaim, BurnForExpire, MarkerRedeemer, MintMarkers,
   PolicyDatum, PoolDatum, PoolRedeemer, ProcessClaim, RemoveLiquidity,
   Underwrite, min_utxo_lovelace, partner_share_cap_bps,
   policy_marker_asset_name, team_address, treasury_share_bps,
@@ -37,10 +38,12 @@ use cardano/address.{Address, VerificationKey}
 // =============================================================================
 
 use aiken/collection/list
+use aiken/collection/pairs
 use cardano/address.{Script}
 use cardano/assets
 use cardano/transaction.{
-  InlineDatum, Input, Output, OutputReference, Transaction, ValidityRange,
+  InlineDatum, Input, Mint, Output, OutputReference, Redeemer, ScriptPurpose,
+  Transaction, ValidityRange,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,14 +277,14 @@ fn batch_policies_match_totals_v12(
                   //     on ANY rejected policy output (closes the
                   //     mixed-batch marker-laundering attack).
                   let funded =
-                    assets.lovelace_of(out.value) >= pdat.coverage_amount
+                    assets.lovelace_of(out.value) == pdat.coverage_amount
                   let bps_in_bounds =
                     pdat.partner_share_bps >= 0 && pdat.partner_share_bps <= partner_share_cap_bps
                   let bps_consistency =
                     pdat.partner_address != None || pdat.partner_share_bps == 0
                   let this_shares_ok = bps_in_bounds && bps_consistency
                   let this_per_policy_terms_ok =
-                    pdat.coverage_amount > 0 && pdat.premium_paid > 0 && is_premium_adequate(
+                    pdat.coverage_amount >= min_utxo_lovelace && pdat.premium_paid > 0 && is_premium_adequate(
                       pdat.premium_paid,
                       pdat.coverage_amount,
                     )
@@ -469,7 +472,7 @@ fn policy_output_matches_underwrite(
                   let predicate =
                     pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && oracle_pinned && assets.lovelace_of(
                       out.value,
-                    ) >= coverage && start_time_in_tx_range(
+                    ) == coverage && start_time_in_tx_range(
                       pdat.start_time,
                       pdat.expiry_time,
                       validity_range,
@@ -545,6 +548,61 @@ fn partner_address_not_aliased(
   }
 }
 
+// Read the marker mint redeemer for `policy_marker_policy_id` from
+// the tx's `redeemers` pair-list. Returns the parsed `MarkerRedeemer`
+// or fails if absent / malformed.
+fn marker_mint_redeemer(
+  redeemers: Pairs<ScriptPurpose, Redeemer>,
+  policy_marker_policy_id: ByteArray,
+) -> MarkerRedeemer {
+  expect Some(raw) = pairs.get_first(redeemers, Mint(policy_marker_policy_id))
+  expect parsed: MarkerRedeemer = raw
+  parsed
+}
+
+// Count tokens `(policy_marker_policy_id, "AEGIS_POLICY")` carried by
+// `inputs`. Sum is over the consumed UTxO values, ignoring datum /
+// address — every marker the validator must see on the input side
+// MUST live at the policy validator address (other code paths
+// enforce that), so this is the locality counter for the input side.
+fn count_marker_tokens_in_inputs(
+  inputs: List<Input>,
+  policy_marker_policy_id: ByteArray,
+) -> Int {
+  list.foldl(
+    inputs,
+    0,
+    fn(i, acc) {
+      acc + assets.quantity_of(
+        i.output.value,
+        policy_marker_policy_id,
+        policy_marker_asset_name,
+      )
+    },
+  )
+}
+
+// Count tokens `(policy_marker_policy_id, "AEGIS_POLICY")` carried by
+// `outputs`. Aggregate across every output regardless of address —
+// EXT-18's locality invariant is that the count on each branch
+// matches the table (no stray marker outputs anywhere).
+fn count_marker_tokens_in_outputs(
+  outputs: List<Output>,
+  policy_marker_policy_id: ByteArray,
+) -> Int {
+  list.foldl(
+    outputs,
+    0,
+    fn(o, acc) {
+      acc + assets.quantity_of(
+        o.value,
+        policy_marker_policy_id,
+        policy_marker_asset_name,
+      )
+    },
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Pool Validator
 // ---------------------------------------------------------------------------
@@ -596,6 +654,7 @@ validator pool_validator(
       mint,
       treasury_donation,
       validity_range,
+      redeemers,
       ..
     } = self
 
@@ -658,6 +717,10 @@ validator pool_validator(
         // 01a1067cd496a31f069e0355717fe2ab1c4ebd5b2e0eb8ba1632a179cf04459a
         let coverage_positive = coverage > 0
         let premium_positive = premium > 0
+
+        // Reject coverage below min_utxo so exact-funding (== coverage)
+        // outputs still satisfy the min-utxo ledger rule.
+        let coverage_min_utxo = coverage >= min_utxo_lovelace
 
         // 2. Verify premium adequacy
         let premium_ok = is_premium_adequate(premium, coverage)
@@ -728,6 +791,22 @@ validator pool_validator(
             policy_marker_policy_id,
             policy_marker_asset_name,
           ) == 1
+
+        // EXT-16 sibling-redeemer pairing: the marker mint redeemer
+        // MUST be `MintMarkers { count: 1 }` on Underwrite.
+        let marker_redeemer_ok =
+          when marker_mint_redeemer(redeemers, policy_marker_policy_id) is {
+            MintMarkers { count } -> count == 1
+            _ -> False
+          }
+
+        // EXT-18 marker locality: 0 marker inputs, exactly 1 marker
+        // output anywhere in the tx (the matched policy output).
+        let marker_inputs =
+          count_marker_tokens_in_inputs(inputs, policy_marker_policy_id)
+        let marker_outputs =
+          count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
+        let marker_locality_ok = marker_inputs == 0 && marker_outputs == 1
 
         // 9. §3.8 Cap check on partner_share_bps. Defense-in-depth
         // alongside the canonical-datum pin in
@@ -810,7 +889,7 @@ validator pool_validator(
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && no_policy_inputs
+        coverage_positive && premium_positive && coverage_min_utxo && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -885,6 +964,22 @@ validator pool_validator(
             policy_marker_asset_name,
           ) == -1
 
+        // EXT-16 sibling-redeemer pairing: marker mint redeemer must
+        // be BurnForClaim on ProcessClaim.
+        let marker_redeemer_ok =
+          when marker_mint_redeemer(redeemers, policy_marker_policy_id) is {
+            BurnForClaim -> True
+            _ -> False
+          }
+
+        // EXT-18 marker locality: exactly 1 marker on the input side
+        // (the consumed policy) and 0 markers on the output side.
+        let marker_inputs =
+          count_marker_tokens_in_inputs(inputs, policy_marker_policy_id)
+        let marker_outputs =
+          count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
+        let marker_locality_ok = marker_inputs == 1 && marker_outputs == 0
+
         // 3. Verify datum update is correct
         let datum_ok =
           verify_claim_datum(
@@ -920,7 +1015,7 @@ validator pool_validator(
         let exactly_one_policy_input =
           count_script_inputs(inputs, policy_script_hash) == 1
 
-        payout_positive && policy_consumed && datum_ok && immutable_ok && value_ok && remains_non_negative && policy_has_marker && marker_burn_ok && exactly_one_policy_input
+        payout_positive && policy_consumed && datum_ok && immutable_ok && value_ok && remains_non_negative && policy_has_marker && marker_burn_ok && marker_redeemer_ok && marker_locality_ok && exactly_one_policy_input
       }
 
       // -----------------------------------------------------------------------
@@ -981,10 +1076,19 @@ validator pool_validator(
           )
         let marker_qty_zero = marker_qty == 0
 
+        // EXT-18 marker locality: AddLiquidity has 0 marker inputs and
+        // 0 marker outputs — no marker flows through the pool on LP
+        // deposit.
+        let marker_inputs =
+          count_marker_tokens_in_inputs(inputs, policy_marker_policy_id)
+        let marker_outputs =
+          count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
+        let marker_locality_ok = marker_inputs == 0 && marker_outputs == 0
+
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        amount_positive && datum_ok && immutable_ok && value_ok && lp_minted && marker_qty_zero && no_policy_inputs
+        amount_positive && datum_ok && immutable_ok && value_ok && lp_minted && marker_qty_zero && marker_locality_ok && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1049,10 +1153,17 @@ validator pool_validator(
           )
         let marker_qty_zero = marker_qty == 0
 
+        // EXT-18 marker locality: 0 marker inputs, 0 marker outputs.
+        let marker_inputs =
+          count_marker_tokens_in_inputs(inputs, policy_marker_policy_id)
+        let marker_outputs =
+          count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
+        let marker_locality_ok = marker_inputs == 0 && marker_outputs == 0
+
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero && no_policy_inputs
+        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero && marker_locality_ok && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1150,6 +1261,27 @@ validator pool_validator(
           )
         let marker_mint_ok = marker_qty == batch_totals.matched_policy_count
 
+        // EXT-16 sibling-redeemer pairing: marker mint redeemer must
+        // be MintMarkers { count == matched_policy_count }.
+        let marker_redeemer_ok =
+          when marker_mint_redeemer(redeemers, policy_marker_policy_id) is {
+            MintMarkers { count } ->
+              count == batch_totals.matched_policy_count
+            _ -> False
+          }
+
+        // EXT-18 marker locality: 0 marker inputs, exactly
+        // matched_policy_count marker outputs (one per accepted
+        // policy output). The "marker on the matched policy output"
+        // is enforced by the walker (per_policy_marker_ok); the
+        // aggregate output count caps stray marker leakage.
+        let marker_inputs =
+          count_marker_tokens_in_inputs(inputs, policy_marker_policy_id)
+        let marker_outputs =
+          count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
+        let marker_locality_ok =
+          marker_inputs == 0 && marker_outputs == batch_totals.matched_policy_count
+
         // 6. §3.7 Aggregate net pool growth = total_premium −
         // Σ fee_total_i. team_total + partner_totals_sum == fee_total_sum
         // by construction (split helper contract).
@@ -1230,7 +1362,7 @@ validator pool_validator(
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && batch_totals.all_policy_outputs_valid && no_policy_inputs
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && batch_totals.all_policy_outputs_valid && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1317,6 +1449,23 @@ validator pool_validator(
             policy_marker_asset_name,
           ) == -consumed_n
 
+        // EXT-16 sibling-redeemer pairing: marker mint redeemer must
+        // be BurnForExpire { count == consumed_n }.
+        let marker_redeemer_ok =
+          when marker_mint_redeemer(redeemers, policy_marker_policy_id) is {
+            BurnForExpire { count } -> count == consumed_n
+            _ -> False
+          }
+
+        // EXT-18 marker locality: exactly consumed_n marker inputs
+        // (one per consumed policy), 0 marker outputs.
+        let marker_inputs_total =
+          count_marker_tokens_in_inputs(inputs, policy_marker_policy_id)
+        let marker_outputs_total =
+          count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
+        let marker_locality_ok =
+          marker_inputs_total == consumed_n && marker_outputs_total == 0
+
         // 4. Verify datum: active_coverage decremented by total_returned,
         //    total_liquidity stays the same (expired policy funds were
         //    already counted in total_liquidity when underwritten)
@@ -1338,7 +1487,7 @@ validator pool_validator(
 
         let all_policy_inputs_accounted = policies_consumed_total == consumed_n
 
-        returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative && marker_burn_ok && all_policy_inputs_accounted
+        returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative && marker_burn_ok && marker_redeemer_ok && marker_locality_ok && all_policy_inputs_accounted
       }
 
       // -----------------------------------------------------------------------
@@ -1435,6 +1584,22 @@ validator pool_validator(
             policy_marker_policy_id,
             policy_marker_asset_name,
           ) == -1
+
+        // EXT-16 sibling-redeemer pairing: marker mint redeemer must
+        // be BurnForCancel on AcceptCancellation.
+        let marker_redeemer_ok =
+          when marker_mint_redeemer(redeemers, policy_marker_policy_id) is {
+            BurnForCancel -> True
+            _ -> False
+          }
+
+        // EXT-18 marker locality: exactly 1 marker input (the
+        // cancelled policy), 0 marker outputs.
+        let marker_inputs =
+          count_marker_tokens_in_inputs(inputs, policy_marker_policy_id)
+        let marker_outputs =
+          count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
+        let marker_locality_ok = marker_inputs == 1 && marker_outputs == 0
 
         // 4. Compute the canonical refund (derived; not caller-controlled).
         let refund_amount = calculate_refund(policy_datum.premium_paid)
@@ -1558,7 +1723,7 @@ validator pool_validator(
             policy_script_hash,
           )
 
-        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && single_policy_input && policy_has_marker && marker_burn_ok
+        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && single_policy_input && policy_has_marker && marker_burn_ok && marker_redeemer_ok && marker_locality_ok
       }
     }
   }
