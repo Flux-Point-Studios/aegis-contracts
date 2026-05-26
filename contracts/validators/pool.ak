@@ -435,6 +435,7 @@ fn policy_output_matches_underwrite(
   own_pool_hash: ByteArray,
   own_pool_nft: ByteArray,
   policy_script_hash: ByteArray,
+  policy_marker_policy_id: ByteArray,
   validity_range: ValidityRange,
   coverage: Int,
   premium: Int,
@@ -447,6 +448,17 @@ fn policy_output_matches_underwrite(
   // return type is widened to `Option<(Option<Address>, Int)>` so the
   // caller can apply the per-policy team/partner output checks without a
   // second walk over `outputs`.
+  //
+  // [V12.2+R14 / EXT-14] Marker presence is part of the SAME predicate
+  // as pool binding + coverage + premium + oracle + funding + time. The
+  // R12/R13 standalone `new_policy_marker_ok` (a weak `list.any` over
+  // outputs) is removed because it admitted a split-proof attack:
+  // attacker creates Output A (funded + correct datum, NO marker) AND
+  // Output B (marker + same coverage/premium but underfunded or
+  // future-dated). The strict predicate accepted A; the weak predicate
+  // accepted B; marker was minted but attached to the wrong (stranded)
+  // output. Folding marker presence into THIS predicate ensures the
+  // accepted output IS the marker-bearing one.
   let walk =
     list.foldl(
       outputs,
@@ -465,6 +477,12 @@ fn policy_output_matches_underwrite(
                   // single value. See `is_canonical_oracle_nft` in oracle.ak.
                   let oracle_pinned =
                     is_canonical_oracle_nft(pdat.oracle_provider, pdat.oracle_nft)
+                  let marker_on_this_output =
+                    assets.quantity_of(
+                      out.value,
+                      policy_marker_policy_id,
+                      policy_marker_asset_name,
+                    ) == 1
                   let predicate =
                     pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && oracle_pinned && assets.lovelace_of(
                       out.value,
@@ -472,7 +490,7 @@ fn policy_output_matches_underwrite(
                       pdat.start_time,
                       pdat.expiry_time,
                       validity_range,
-                    )
+                    ) && marker_on_this_output
                   if predicate {
                     (count_acc + 1, pdat.partner_address, pdat.partner_share_bps)
                   } else {
@@ -709,52 +727,33 @@ validator pool_validator(
             Script(h) -> h
             _ -> #""
           }
+        // [V12.2+R14 / EXT-14] Marker presence is now part of
+        // `policy_output_matches_underwrite`'s strict predicate (same
+        // walk, same output). The previous separate `new_policy_marker_ok`
+        // list.any check was a split-proof attack surface: it admitted
+        // tx-shapes where one output satisfied the strict predicate
+        // (funded + time-valid + correct datum, NO marker) and a DIFFERENT
+        // output satisfied the weaker marker predicate (marker present
+        // but underfunded or future-dated). Folding marker into the
+        // strict predicate guarantees the accepted output IS the
+        // marker-bearing one.
         expect Some((new_partner_address, new_partner_share_bps)) =
           policy_output_matches_underwrite(
             outputs,
             own_pool_hash,
             datum.pool_nft,
             policy_script_hash,
+            policy_marker_policy_id,
             validity_range,
             coverage,
             premium,
           )
 
-        // [V12.2+R12 / EXT-09] The single new policy output must hold
-        // exactly 1 marker (policy_marker_policy_id, "AEGIS_POLICY") and
-        // the tx mint must contain exactly +1 of that token. Anchors the
-        // policy UTxO's provenance to a real pool spend; synthetic
-        // policy UTxOs cannot acquire a marker because the marker
-        // minting policy delegates authority to the pool's spend logic.
-        let new_policy_marker_ok =
-          list.any(
-            outputs,
-            fn(out) {
-              when out.address.payment_credential is {
-                Script(h) ->
-                  if h == policy_script_hash {
-                    when out.datum is {
-                      InlineDatum(raw_pdat) -> {
-                        expect pdat: PolicyDatum = raw_pdat
-                        // Match the SAME policy output the underwrite
-                        // helper matched on (pool_nft + coverage + premium).
-                        // Any other policy output at this script is not the
-                        // Underwrite's new policy.
-                        pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == datum.pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && assets.quantity_of(
-                          out.value,
-                          policy_marker_policy_id,
-                          policy_marker_asset_name,
-                        ) == 1
-                      }
-                      _ -> False
-                    }
-                  } else {
-                    False
-                  }
-                _ -> False
-              }
-            },
-          )
+        // Marker total mint bound is still load-bearing: ensures exactly
+        // one marker token was created in this tx (Cardano ledger
+        // conservation means the +1 must land in some output; combined
+        // with `policy_output_matches_underwrite`'s per-output marker
+        // pin, that output is the matched policy UTxO).
         let marker_mint_ok =
           assets.quantity_of(
             mint,
@@ -840,7 +839,7 @@ validator pool_validator(
             policy_script_hash,
           )
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && new_policy_marker_ok && marker_mint_ok
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok
       }
 
       // -----------------------------------------------------------------------

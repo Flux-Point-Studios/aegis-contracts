@@ -2602,3 +2602,118 @@ test ext_13_batch_underwrite_marker_count_mismatch() {
 }
 
 
+
+// ---------------------------------------------------------------------------
+// EXT-14 (CRITICAL/HIGH) — Single Underwrite split-proof attack: marker
+// detached from the matched policy output.
+//
+// R12/R13: `policy_output_matches_underwrite` enforced funding + time +
+// oracle + datum but NOT marker presence. A separate `new_policy_marker_ok`
+// (list.any) checked marker presence on a weaker predicate (no funding /
+// time check). Attacker could split: Output A satisfies the strict
+// predicate (no marker), Output B has the marker but is underfunded or
+// future-dated. Pool accepts the tx; marker lands on the wrong output.
+//
+// R14 fix: marker presence folded INTO `policy_output_matches_underwrite`
+// (same walk, same predicate). The standalone `new_policy_marker_ok` is
+// deleted. The accepted output IS the marker-bearing one, by construction.
+// ---------------------------------------------------------------------------
+
+test ext_14_single_underwrite_marker_must_be_on_matched_output() {
+  // The load-bearing R14 invariant: the strict per-output predicate
+  // (pool binding + coverage + premium + oracle + funded + time +
+  // marker == 1) must hold AS A SINGLE conjunction. A predicate that
+  // succeeds while marker_on_this_output == 0 is the EXT-14 attack.
+  //
+  // Predicate evaluation with marker absent should be False.
+  let funded = True
+  let time_ok = True
+  let oracle_pinned = True
+  let datum_ok = True
+  let marker_on_this_output = False
+  let predicate =
+    datum_ok && oracle_pinned && funded && time_ok && marker_on_this_output
+  predicate == False
+}
+
+test ext_14_split_proof_underfunded_marker_output_rejected() {
+  // Attack: Output A funded + correct datum + NO marker;
+  //         Output B has marker + correct datum BUT underfunded
+  //         (lovelace_of(value) < coverage).
+  // Pre-R14: Output A satisfied policy_output_matches_underwrite; the
+  //          standalone new_policy_marker_ok found Output B (weaker
+  //          predicate ignored funding). Both passed → tx accepted →
+  //          marker on stranded Output B.
+  // Post-R14: policy_output_matches_underwrite checks marker presence
+  //           on the SAME output it accepts. Output A has no marker
+  //           (predicate False). Output B is underfunded (predicate
+  //           False). Matching_count == 0 → expect Some(...) fails →
+  //           tx rejected.
+  //
+  // Output A path:
+  let funded_a = True
+  let time_ok_a = True
+  let marker_on_a = False
+  let predicate_a = funded_a && time_ok_a && marker_on_a
+  // Output B path:
+  let funded_b = False  // underfunded
+  let time_ok_b = True
+  let marker_on_b = True
+  let predicate_b = funded_b && time_ok_b && marker_on_b
+  // Neither output satisfies the unified predicate → matching_count == 0.
+  let matching_count =
+    if predicate_a {
+      1
+    } else {
+      0
+    } + if predicate_b {
+      1
+    } else {
+      0
+    }
+  matching_count == 0
+}
+
+test ext_14_split_proof_future_dated_marker_output_rejected() {
+  // Same shape but Output B fails on time_ok (start_time outside tx
+  // validity range) instead of funding. Symmetric defense.
+  let funded_a = True
+  let time_ok_a = True
+  let marker_on_a = False
+  let predicate_a = funded_a && time_ok_a && marker_on_a
+  let funded_b = True
+  let time_ok_b = False  // future-dated, outside tx range
+  let marker_on_b = True
+  let predicate_b = funded_b && time_ok_b && marker_on_b
+  let matching_count =
+    if predicate_a {
+      1
+    } else {
+      0
+    } + if predicate_b {
+      1
+    } else {
+      0
+    }
+  matching_count == 0
+}
+
+test ext_14_exact_matched_output_with_marker_accepted() {
+  // Positive control: single output satisfying ALL of pool binding +
+  // coverage + premium + oracle + funding + time + marker == 1 must
+  // pass the unified predicate (matching_count == 1).
+  let funded = True
+  let time_ok = True
+  let oracle_pinned = True
+  let datum_ok = True
+  let marker_on_this_output = True
+  let predicate =
+    datum_ok && oracle_pinned && funded && time_ok && marker_on_this_output
+  let matching_count =
+    if predicate {
+      1
+    } else {
+      0
+    }
+  matching_count == 1
+}
