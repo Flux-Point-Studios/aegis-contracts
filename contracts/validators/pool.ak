@@ -128,6 +128,7 @@ type BatchFeeTotals {
   partner_totals: List<(Address, Int)>,
   partner_totals_sum: Int,
   shares_ok: Bool,
+  aliases_ok: Bool,
 }
 
 /// §3.10 Merge a per-policy partner cut into the running floored
@@ -188,6 +189,8 @@ fn batch_policies_match_totals_v12(
   total_coverage: Int,
   total_premium: Int,
   protocol_fee_bps: Int,
+  team_address: Address,
+  own_address: Address,
 ) -> BatchFeeTotals {
   let init =
     BatchFeeTotals {
@@ -199,6 +202,7 @@ fn batch_policies_match_totals_v12(
       partner_totals: [],
       partner_totals_sum: 0,
       shares_ok: True,
+      aliases_ok: True,
     }
   let totals =
     list.foldl(
@@ -267,6 +271,17 @@ fn batch_policies_match_totals_v12(
                       }
                     let new_partner_totals_sum =
                       acc.partner_totals_sum + partner_cut_i
+                    // Per-policy alias check covers silent-absorb policies
+                    // (partner_cut_i == 0) too, which never reach
+                    // partner_totals and would otherwise bypass the
+                    // post-fold list.all check.
+                    let this_alias_ok =
+                      partner_address_not_aliased(
+                        pdat.partner_address,
+                        team_address,
+                        own_address,
+                        policy_script_hash,
+                      )
                     BatchFeeTotals {
                       cov_sum: acc.cov_sum + pdat.coverage_amount,
                       prem_sum: acc.prem_sum + pdat.premium_paid,
@@ -276,6 +291,7 @@ fn batch_policies_match_totals_v12(
                       partner_totals: new_partner_totals,
                       partner_totals_sum: new_partner_totals_sum,
                       shares_ok: acc.shares_ok && this_shares_ok,
+                      aliases_ok: acc.aliases_ok && this_alias_ok,
                     }
                   } else {
                     acc
@@ -754,12 +770,16 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
-        // 5. Pool value must DECREASE by exactly `payout`.
-        // Previously used `>=`, which permitted the pool to retain extra value
-        // (the difference being unaccounted-for in the datum, rendering pool
-        // accounting drift-prone).
+        // 5. Pool value conservation. The consumed policy UTxO's full
+        // lovelace must land in the continuation, minus the payout to the
+        // insured. Equation:
+        //   cont == own + policy_lovelace - payout
+        // Total in: own + policy_lovelace. Total out: cont + payout.
+        // Change (= total_in - total_out) must be 0 — no leak path to
+        // collateral residual.
+        let policy_lovelace = assets.lovelace_of(policy_input.output.value)
         let value_ok =
-          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) - payout
+          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + policy_lovelace - payout
 
         // Solvency is now enforced inside verify_claim_datum
         // (which requires payout ≤ old_active and new_active ≥ 0). The previous
@@ -941,6 +961,8 @@ validator pool_validator(policy_script_hash: ByteArray) {
             total_coverage,
             total_premium,
             datum.protocol_fee_bps,
+            team_address,
+            own_address,
           )
 
         // 6. §3.7 Aggregate net pool growth = total_premium −
@@ -999,21 +1021,10 @@ validator pool_validator(policy_script_hash: ByteArray) {
             },
           )
 
-        // [FIX R8-DRAIN-1] BatchUnderwrite arm: reject any per-policy
-        // partner_address that aliases team_address, the pool's own
-        // address, or the policy_validator script credential. The
-        // aliasing primitive would short-change the team by the
-        // aliased partner_cut on the aggregated output check.
-        let partner_addresses_not_aliased =
-          list.all(
-            batch_totals.partner_totals,
-            fn(entry) {
-              let addr = entry.1st
-              addr != team_address && addr != own_address && addr.payment_credential != Script(
-                policy_script_hash,
-              )
-            },
-          )
+        // BatchUnderwrite alias guard. Sourced from the per-policy walker
+        // (covers silent-absorb policies whose partner_cut_i == 0 and
+        // therefore never enter partner_totals).
+        let partner_addresses_not_aliased = batch_totals.aliases_ok
 
         // 13. Aggregate treasury cut against total_premium
         // (unchanged numerically from V11; the cut already represents the

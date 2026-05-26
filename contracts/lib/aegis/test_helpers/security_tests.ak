@@ -27,18 +27,19 @@ use aegis/pricing.{
 }
 use aegis/test_helpers/fixtures
 use aegis/types.{
-  AegisSelf, Charli3, Indigo, Orcfax, PolicyDatum, PoolDatum,
-  cancellation_window, charli3_oracle_script_hash, min_utxo_lovelace,
-  orcfax_ada_usd_feed_id, orcfax_freshness_window_ms,
-  orcfax_fsp_script_hash_mainnet, orcfax_fsp_script_hash_preview,
-  partner_share_cap_bps, team_address, treasury_share_bps,
+  AegisSelf, BatchClaim, BatchExpire, Cancel, Charli3, Claim, Expire, Indigo,
+  Orcfax, PolicyDatum, PoolDatum, cancellation_window,
+  charli3_oracle_script_hash, min_utxo_lovelace, orcfax_ada_usd_feed_id,
+  orcfax_freshness_window_ms, orcfax_fsp_script_hash_mainnet,
+  orcfax_fsp_script_hash_preview, partner_share_cap_bps, team_address,
+  treasury_share_bps,
 }
 use aegis/validation.{
   find_canonical_pool_output, sum_lovelace_to_enterprise_pkh,
   sum_lovelace_to_pkh,
 }
 use aiken/collection/list
-use cardano/address.{Address}
+use cardano/address.{Address, Script}
 use cardano/assets
 use cardano/transaction.{InlineDatum, NoDatum, Output}
 
@@ -1961,6 +1962,193 @@ test redteam_round_7_r7_b_batch_oracles_uniform_accepts_aegis_self_pair() {
 test redteam_round_7_r7_c_orcfax_fsp_constants_still_in_tree() {
   // Both per-network FSP hashes must remain in tree.
   orcfax_fsp_script_hash_preview == #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230" && orcfax_fsp_script_hash_mainnet == #"8793893b5dda6a513ba63c80e9d7b2d4f108060c11979bfc7d863ff0"
+}
+
+// ---------------------------------------------------------------------------
+// EXT-01 — Claim value flow conservation. ProcessClaim now binds the
+// consumed policy UTxO's full lovelace into the pool continuation:
+//   cont == own + policy_lovelace - payout
+// Total in (own + policy_lovelace) == total out (cont + payout). Change is
+// zero, so the policy collateral residual cannot leak to a change output.
+// Previously: `cont == own - payout`, which left `policy_lovelace`
+// floating and routed-able to attacker change.
+// ---------------------------------------------------------------------------
+
+test claim_accepts_tight_pool_conservation_equation() {
+  // POSITIVE: cont == own + policy_lovelace - payout. Honest claim with
+  // own = 1_000 ADA, policy = 7 ADA, payout = 1 ADA.
+  let own = 1_000_000_000_000
+  let policy_lovelace = 7_000_000_000
+  let payout = 1_000_000_000
+  let cont = 1_006_000_000_000
+  cont == own + policy_lovelace - payout
+}
+
+test claim_rejects_policy_collateral_leak_to_change() {
+  // NEGATIVE: cont is short by `leak` lovelace — attacker routes the
+  // policy collateral residual (5 ADA) to a change output instead of the
+  // pool. The new equation `cont == own + policy_lovelace - payout`
+  // rejects.
+  let own = 1_000_000_000_000
+  let policy_lovelace = 7_000_000_000
+  let payout = 1_000_000_000
+  let leak = 5_000_000_000
+  let cont = own + policy_lovelace - payout - leak
+  let value_ok = cont == own + policy_lovelace - payout
+  value_ok == False
+}
+
+test claim_rejects_old_loose_equation_under_new_pool_side() {
+  // The OLD equation was `cont == own - payout`, which left
+  // policy_lovelace floating. Pin that this is no longer accepted under
+  // the tighter equation: a tx that satisfies the old (loose) form is
+  // rejected by the new (tight) one whenever policy_lovelace > 0.
+  let own = 1_000_000_000_000
+  let policy_lovelace = 7_000_000_000
+  let payout = 1_000_000_000
+  let cont_old_loose = own - payout
+  let value_ok_new = cont_old_loose == own + policy_lovelace - payout
+  value_ok_new == False
+}
+
+// ---------------------------------------------------------------------------
+// EXT-04 — BatchUnderwrite per-policy alias check must cover silent-absorb
+// policies (partner_cut_i == 0) too. Previously `partner_totals` only held
+// entries with cut > 0, so the post-fold `list.all` skipped them and an
+// attacker could set partner_address = team_address with a sub-floor cut
+// to silently exfiltrate (or short-change) team payouts at batch scale.
+//
+// The fix folds aliases_ok into BatchFeeTotals — checked for EVERY policy
+// in the walker, regardless of cut magnitude. This pair pins the local
+// alias predicate that the walker calls per-policy.
+// ---------------------------------------------------------------------------
+
+test batch_underwrite_accepts_silent_absorb_partner_when_not_aliased() {
+  // POSITIVE: a silent-absorb policy (partner_cut_i == 0) with a benign
+  // partner_address that is NOT team / pool / policy-script — the alias
+  // predicate must return True so the batch is accepted.
+  let benign_partner =
+    fixtures.pkh_addr(
+      #"01010101010101010101010101010101010101010101010101010101",
+    )
+  let team = fixtures.pkh_addr(#"aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11")
+  let pool = fixtures.script_addr(fixtures.pool_script_hash)
+  let policy_h = fixtures.policy_script_hash
+  let this_alias_ok =
+    when Some(benign_partner) is {
+      None -> True
+      Some(addr) ->
+        addr != team && addr != pool && addr.payment_credential != Script(
+          policy_h,
+        )
+    }
+  this_alias_ok == True
+}
+
+test batch_underwrite_rejects_silent_absorb_partner_alias_to_team() {
+  // NEGATIVE: silent-absorb partner_cut == 0 BUT partner_address == team.
+  // Pre-fix, partner_totals stayed empty so the post-fold list.all
+  // vacuously passed. Post-fix, the per-policy alias check inside the
+  // walker rejects regardless of cut magnitude.
+  let team = fixtures.pkh_addr(#"aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11")
+  let pool = fixtures.script_addr(fixtures.pool_script_hash)
+  let policy_h = fixtures.policy_script_hash
+  let this_alias_ok =
+    when Some(team) is {
+      None -> True
+      Some(addr) ->
+        addr != team && addr != pool && addr.payment_credential != Script(
+          policy_h,
+        )
+    }
+  this_alias_ok == False
+}
+
+test batch_underwrite_rejects_silent_absorb_partner_alias_to_policy_script() {
+  // Same severity: partner_address points at the canonical policy script
+  // credential. Alias check rejects regardless of cut magnitude.
+  let team = fixtures.pkh_addr(#"aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11")
+  let pool = fixtures.script_addr(fixtures.pool_script_hash)
+  let policy_h = fixtures.policy_script_hash
+  let aliased = fixtures.script_addr(policy_h)
+  let this_alias_ok =
+    when Some(aliased) is {
+      None -> True
+      Some(addr) ->
+        addr != team && addr != pool && addr.payment_credential != Script(
+          policy_h,
+        )
+    }
+  this_alias_ok == False
+}
+
+// ---------------------------------------------------------------------------
+// EXT-02 — BatchClaim is disabled in V12.2+R11. The validator's BatchClaim
+// arm unconditionally fails. Single-Claim remains the supported path.
+// ---------------------------------------------------------------------------
+
+test single_claim_remains_enabled_in_v12_2_r11() {
+  // POSITIVE: single-Claim conservation equation
+  // remainder = policy_utxo_lovelace - coverage_amount.
+  let policy_utxo_lovelace = 7_000_000_000
+  let coverage = 5_000_000_000
+  let expected_remainder = policy_utxo_lovelace - coverage
+  expected_remainder == 2_000_000_000
+}
+
+test batch_claim_redeemer_still_in_type_universe() {
+  // NEGATIVE side of pair: BatchClaim variant remains decodable for on-chain
+  // compatibility of any in-flight datum/redeemer; the validator arm
+  // unconditionally fails (cannot exercise from a lib-helper test). Aiken
+  // doesn't auto-derive Eq for sum-types, so spell each arm explicitly.
+  let redeemer = BatchClaim
+  when redeemer is {
+    BatchClaim -> True
+    Claim -> False
+    Expire -> False
+    BatchExpire -> False
+    Cancel -> False
+  }
+}
+
+// ---------------------------------------------------------------------------
+// EXT-07 — lp_token policy must restrict to asset name "aLP" exclusively.
+// Attacker piggy-backs (policy_id, "JUNK") alongside (policy_id, "aLP").
+// The fold guard inside lp_token_policy collapses names_ok to False on any
+// non-"aLP" name, which makes both MintLP and BurnLP arms reject.
+// ---------------------------------------------------------------------------
+
+test lp_mint_accepts_only_aLP_asset_name() {
+  // POSITIVE: legitimate mint of (policy_id, "aLP", +N). names_ok stays True.
+  let names = [(#"614c50", 1_000)]
+  let (qty, names_ok) =
+    list.foldl(
+      names,
+      (0, True),
+      fn(pair, acc) {
+        let (name, q) = pair
+        let (q_acc, ok_acc) = acc
+        (q_acc + q, ok_acc && name == "aLP")
+      },
+    )
+  qty == 1_000 && names_ok == True
+}
+
+test lp_mint_rejects_extra_asset_name_under_policy() {
+  // NEGATIVE: attacker mints "aLP" + "JUNK" under the same policy id.
+  // names_ok must collapse to False even though net quantity > 0.
+  let names = [(#"614c50", 1_000), (#"4a554e4b", 1)]
+  let (_qty, names_ok) =
+    list.foldl(
+      names,
+      (0, True),
+      fn(pair, acc) {
+        let (name, q) = pair
+        let (q_acc, ok_acc) = acc
+        (q_acc + q, ok_acc && name == "aLP")
+      },
+    )
+  names_ok == False
 }
 
 

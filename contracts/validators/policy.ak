@@ -137,79 +137,28 @@ validator policy_validator {
         let payout_valid =
           sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= datum.coverage_amount
 
-        // Residual must go to the canonical pool (must carry pool_nft).
-        let policy_utxo_lovelace = assets.lovelace_of(own_value)
-        let expected_remainder = policy_utxo_lovelace - datum.coverage_amount
-        let pool_output =
-          find_canonical_pool_output(
+        // Require the canonical pool output is present in the tx. The
+        // pool side (ProcessClaim) now owns the residual conservation
+        // equation: cont == own + policy_lovelace - payout, so any leak
+        // to "change" is impossible. Policy side only ensures the tx is
+        // co-spent with the canonical pool.
+        let pool_present =
+          when find_canonical_pool_output(
             outputs,
             datum.pool_script_hash,
             datum.pool_nft,
-          )
-        let pool_receives_remainder =
-          if expected_remainder <= 0 {
-            True
-          } else {
-            when pool_output is {
-              Some(out) -> output_has_min_lovelace(out, expected_remainder)
-              None -> False
-            }
+          ) is {
+            Some(_) -> True
+            None -> False
           }
 
-        single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_receives_remainder
+        single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_present
       }
 
       // -----------------------------------------------------------------------
-      // BATCH CLAIM: Multiple policies claimed in one transaction
+      // BATCH CLAIM: disabled in V12.2+R11. Use a single Claim per policy.
       // -----------------------------------------------------------------------
-      BatchClaim -> {
-        let has_policies = count_script_inputs(inputs, own_script_hash) >= 1
-
-        // All consumed policies must share the same
-        // (oracle_provider, oracle_nft) pair.
-        let oracle_uniform = batch_oracles_uniform(inputs, own_script_hash)
-
-        let price =
-          resolve_oracle_price(
-            reference_inputs,
-            datum.oracle_provider,
-            datum.oracle_nft,
-          )
-        let price_below_strike = price.value <= datum.strike_price
-
-        // Same freshness rule as Claim.
-        let tx_lower = get_lower_bound(validity_range)
-        let tx_upper = get_upper_bound(validity_range)
-        let oracle_fresh =
-          tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
-
-        let within_start = tx_lower >= datum.start_time
-        let within_expiry = tx_upper <= datum.expiry_time
-
-        let payout_valid =
-          sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= datum.coverage_amount
-
-        // Pool remainder (same logic as Claim).
-        let policy_utxo_lovelace = assets.lovelace_of(own_value)
-        let expected_remainder = policy_utxo_lovelace - datum.coverage_amount
-        let pool_output =
-          find_canonical_pool_output(
-            outputs,
-            datum.pool_script_hash,
-            datum.pool_nft,
-          )
-        let pool_receives_remainder =
-          if expected_remainder <= 0 {
-            True
-          } else {
-            when pool_output is {
-              Some(out) -> output_has_min_lovelace(out, expected_remainder)
-              None -> False
-            }
-          }
-
-        has_policies && oracle_uniform && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_receives_remainder
-      }
+      BatchClaim -> fail @"BatchClaim disabled in V12.2+R11. Use single Claim per policy."
 
       // -----------------------------------------------------------------------
       // EXPIRE: Policy has expired -> return all funds to pool

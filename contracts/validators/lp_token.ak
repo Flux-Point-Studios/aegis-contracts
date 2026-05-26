@@ -43,20 +43,25 @@ validator lp_token_policy(pool_script_hash: ScriptHash) {
     // Verify mint direction matches redeemer.
     // Without this, MintLP could be used with a negative mint (burn)
     // or BurnLP with a positive mint, breaking LP accounting.
-    // Sum all token quantities under this policy to determine net direction.
-    let mint_quantity =
+    // The fold also rejects any asset name other than "aLP" under this
+    // policy: a piggy-backed (policy_id, "JUNK") mint short-circuits to
+    // (-1, False) which makes both arms below fail.
+    let (mint_quantity, names_ok) =
       dict.foldl(
         assets.tokens(mint, policy_id),
-        0,
-        fn(_name, qty, acc) { acc + qty },
+        (0, True),
+        fn(name, qty, acc) {
+          let (q, ok) = acc
+          (q + qty, ok && name == "aLP")
+        },
       )
 
     when redeemer is {
-      // Minting LP tokens: net quantity must be positive
-      MintLP -> pool_is_consumed && mint_quantity > 0
+      // Minting LP tokens: net quantity must be positive AND only "aLP"
+      MintLP -> pool_is_consumed && names_ok && mint_quantity > 0
 
-      // Burning LP tokens: net quantity must be negative
-      BurnLP -> pool_is_consumed && mint_quantity < 0
+      // Burning LP tokens: net quantity must be negative AND only "aLP"
+      BurnLP -> pool_is_consumed && names_ok && mint_quantity < 0
     }
   }
 
