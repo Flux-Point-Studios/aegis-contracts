@@ -3,6 +3,7 @@ use aegis/pricing.{calculate_refund}
 use aegis/types.{
   AegisSelf, BatchClaim, BatchExpire, Cancel, Charli3, Claim, Expire, Indigo,
   OracleProvider, Orcfax, PolicyDatum, PolicyRedeemer, cancellation_window,
+  policy_marker_asset_name,
 }
 use aegis/validation.{
   count_script_inputs, find_canonical_pool_output, get_lower_bound,
@@ -71,7 +72,18 @@ fn batch_oracles_uniform(
 // Policy Validator
 // ---------------------------------------------------------------------------
 
-validator policy_validator {
+/// Policy validator parameterized by the policy marker minting policy id.
+///
+/// [V12.2+R12 / EXT-08, EXT-09] Every spend path (Claim, Cancel, Expire,
+/// BatchExpire) requires the consumed policy UTxO to hold exactly 1
+/// marker (policy_marker_policy_id, "AEGIS_POLICY"). The marker is
+/// minted only by a real Aegis Underwrite (which co-spends the pool);
+/// a synthetic policy UTxO at the policy validator address with a fake
+/// datum cannot acquire one, so the synthetic-Cancel pool-drain attack
+/// (EXT-08) and synthetic-Claim accounting-corruption attack (EXT-09)
+/// are closed at this layer in addition to the pool side. BatchClaim
+/// remains disabled in V12.2+R12 (inherited from R11).
+validator policy_validator(policy_marker_policy_id: ByteArray) {
   spend(
     datum_opt: Option<PolicyDatum>,
     redeemer: PolicyRedeemer,
@@ -99,6 +111,22 @@ validator policy_validator {
     // Determine own script hash for counting co-spent policy inputs
     expect Script(own_script_hash) =
       self_input.output.address.payment_credential
+
+    // [V12.2+R12 / EXT-08, EXT-09] Marker presence pin. Every legitimate
+    // Aegis policy UTxO carries exactly 1 marker
+    // (policy_marker_policy_id, "AEGIS_POLICY") minted by the pool
+    // validator at Underwrite / BatchUnderwrite time. Synthetic policy
+    // UTxOs (written at this script address with a fake datum by an
+    // attacker) cannot acquire one because the marker policy delegates
+    // mint authority to the pool validator's spend logic. Required True
+    // in every branch (the disabled BatchClaim arm naturally never
+    // reaches this check).
+    let has_marker =
+      assets.quantity_of(
+        own_value,
+        policy_marker_policy_id,
+        policy_marker_asset_name,
+      ) == 1
 
     when redeemer is {
       // -----------------------------------------------------------------------
@@ -152,7 +180,7 @@ validator policy_validator {
             None -> False
           }
 
-        single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_present
+        single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_present && has_marker
       }
 
       // -----------------------------------------------------------------------
@@ -181,7 +209,7 @@ validator policy_validator {
             None -> False
           }
 
-        is_expired && funds_to_pool
+        is_expired && funds_to_pool && has_marker
       }
 
       // -----------------------------------------------------------------------
@@ -207,13 +235,21 @@ validator policy_validator {
             None -> False
           }
 
-        has_policies && is_expired && funds_to_pool
+        has_policies && is_expired && funds_to_pool && has_marker
       }
 
       // -----------------------------------------------------------------------
       // CANCEL: Early cancellation within the allowed window
       // -----------------------------------------------------------------------
       Cancel -> {
+        // [V12.2+R12 / EXT-10] Reject multi-input Cancel. Symmetric
+        // with Claim's existing single_policy_input guard. Without
+        // this, an attacker pairs a legitimate policy input with a
+        // synthetic-datum policy input and the pool only accounts for
+        // the first one, while Cancel runs once per input.
+        let single_policy_input =
+          count_script_inputs(inputs, own_script_hash) == 1
+
         let signed_by_insured =
           must_be_signed_by(extra_signatories, datum.insured)
 
@@ -255,7 +291,7 @@ validator policy_validator {
             None -> False
           }
 
-        signed_by_insured && within_window && oracle_fresh && not_in_the_money && refund_valid && remainder_to_pool
+        signed_by_insured && within_window && oracle_fresh && not_in_the_money && refund_valid && remainder_to_pool && has_marker && single_policy_input
       }
     }
   }

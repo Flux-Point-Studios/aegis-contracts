@@ -10,8 +10,8 @@ use aegis/pricing.{
 use aegis/types.{
   AcceptCancellation, AddLiquidity, BatchExpireProcess, BatchUnderwrite,
   PolicyDatum, PoolDatum, PoolRedeemer, ProcessClaim, RemoveLiquidity,
-  Underwrite, min_utxo_lovelace, partner_share_cap_bps, team_address,
-  treasury_share_bps,
+  Underwrite, min_utxo_lovelace, partner_share_cap_bps,
+  policy_marker_asset_name, team_address, treasury_share_bps,
 }
 use aegis/validation.{
   count_script_inputs, get_lower_bound, get_upper_bound, output_has_nft,
@@ -129,6 +129,20 @@ type BatchFeeTotals {
   partner_totals_sum: Int,
   shares_ok: Bool,
   aliases_ok: Bool,
+  /// [V12.2+R12 / EXT-11] Per-policy validity check. Closes the
+  /// aggregate-only walker gap where a negative-coverage "ballast"
+  /// policy could let the aggregate ratio pass while individual
+  /// policies are 100× under-reserved. For each policy walked, the
+  /// walker AND-folds `coverage_amount > 0 && premium_paid > 0 &&
+  /// is_premium_adequate(premium_paid, coverage_amount)` into this
+  /// field. Required True by the final BatchUnderwrite conjunction.
+  per_policy_terms_ok: Bool,
+  /// [V12.2+R12 / EXT-09] Per-policy marker presence. Every new
+  /// policy output at the policy validator address must hold exactly
+  /// 1 marker (policy_marker_policy_id, "AEGIS_POLICY"). Required
+  /// True by the final BatchUnderwrite conjunction. Pairs with the
+  /// total mint of +N markers check.
+  per_policy_marker_ok: Bool,
 }
 
 /// §3.10 Merge a per-policy partner cut into the running floored
@@ -185,6 +199,7 @@ fn batch_policies_match_totals_v12(
   own_pool_hash: ByteArray,
   own_pool_nft: ByteArray,
   policy_script_hash: ByteArray,
+  policy_marker_policy_id: ByteArray,
   validity_range: ValidityRange,
   total_coverage: Int,
   total_premium: Int,
@@ -203,6 +218,8 @@ fn batch_policies_match_totals_v12(
       partner_totals_sum: 0,
       shares_ok: True,
       aliases_ok: True,
+      per_policy_terms_ok: True,
+      per_policy_marker_ok: True,
     }
   let totals =
     list.foldl(
@@ -233,6 +250,28 @@ fn batch_policies_match_totals_v12(
                     let bps_consistency =
                       pdat.partner_address != None || pdat.partner_share_bps == 0
                     let this_shares_ok = bps_in_bounds && bps_consistency
+                    // [V12.2+R12 / EXT-11] Per-policy validity check.
+                    // The walker's aggregate cov_sum / prem_sum / ratio
+                    // check is insufficient: a positive-aggregate batch
+                    // with one negative-coverage "ballast" policy + one
+                    // legitimate policy passes the aggregate but each
+                    // policy individually is malformed. Per-policy
+                    // positivity + premium-adequacy must AND in.
+                    let this_per_policy_terms_ok =
+                      pdat.coverage_amount > 0 && pdat.premium_paid > 0 && is_premium_adequate(
+                        pdat.premium_paid,
+                        pdat.coverage_amount,
+                      )
+                    // [V12.2+R12 / EXT-09] Per-policy marker presence.
+                    // Every new policy output at the policy validator
+                    // address must hold exactly 1 marker
+                    // (policy_marker_policy_id, "AEGIS_POLICY").
+                    let this_per_policy_marker_ok =
+                      assets.quantity_of(
+                        out.value,
+                        policy_marker_policy_id,
+                        policy_marker_asset_name,
+                      ) == 1
                     // §3.7 Per-policy Hybrid fee math:
                     //   fee_total_i = max(min_utxo, premium_i * fee_bps / 10_000)
                     //   (team_cut_i, partner_cut_i) = split with silent absorb
@@ -292,6 +331,8 @@ fn batch_policies_match_totals_v12(
                       partner_totals_sum: new_partner_totals_sum,
                       shares_ok: acc.shares_ok && this_shares_ok,
                       aliases_ok: acc.aliases_ok && this_alias_ok,
+                      per_policy_terms_ok: acc.per_policy_terms_ok && this_per_policy_terms_ok,
+                      per_policy_marker_ok: acc.per_policy_marker_ok && this_per_policy_marker_ok,
                     }
                   } else {
                     acc
@@ -467,17 +508,32 @@ fn partner_address_not_aliased(
 // Pool Validator
 // ---------------------------------------------------------------------------
 
-/// Pool validator parameterized by the policy_validator's script hash.
+/// Pool validator parameterized by the policy_validator's script hash
+/// and the policy marker minting policy id.
 ///
-/// The parameter is consumed by `policy_output_matches_underwrite`
-/// and `batch_policies_match_totals_v12` to require that newly-created policy
-/// outputs land at the canonical policy_validator address. Without this
-/// binding, an attacker could route the policy output to any script
-/// credential (e.g., a mint-only policy hash), permanently locking the
-/// pool's active_coverage at near-1:1 cost. Off-chain deployers MUST apply
-/// this parameter (`aiken blueprint apply`) using the deployed
-/// policy_validator hash before publishing the pool reference script.
-validator pool_validator(policy_script_hash: ByteArray) {
+/// `policy_script_hash` is consumed by `policy_output_matches_underwrite`
+/// and `batch_policies_match_totals_v12` to require that newly-created
+/// policy outputs land at the canonical policy_validator address.
+///
+/// `policy_marker_policy_id` (V12.2+R12 / EXT-08, EXT-09): every new
+/// policy output must hold exactly 1 marker
+/// (policy_marker_policy_id, "AEGIS_POLICY") at Underwrite /
+/// BatchUnderwrite, and every consumed policy input must hold exactly 1
+/// marker at ProcessClaim / AcceptCancellation / BatchExpireProcess.
+/// The corresponding mint or burn quantity is also pinned per-branch
+/// (+1 single, +N batch; -1 single, -N batch). Synthetic-policy attacks
+/// (write a UTxO at the policy address with a fake datum) cannot mint a
+/// marker because mint authority is delegated to the pool validator
+/// itself via the marker policy's pool-consumed gate.
+///
+/// Off-chain deployers MUST apply this parameter (`aiken blueprint
+/// apply`) using the deployed policy_validator hash AND the deployed
+/// policy_marker minting policy id before publishing the pool reference
+/// script.
+validator pool_validator(
+  policy_script_hash: ByteArray,
+  policy_marker_policy_id: ByteArray,
+) {
   spend(
     datum_opt: Option<PoolDatum>,
     redeemer: PoolRedeemer,
@@ -624,6 +680,48 @@ validator pool_validator(policy_script_hash: ByteArray) {
             premium,
           )
 
+        // [V12.2+R12 / EXT-09] The single new policy output must hold
+        // exactly 1 marker (policy_marker_policy_id, "AEGIS_POLICY") and
+        // the tx mint must contain exactly +1 of that token. Anchors the
+        // policy UTxO's provenance to a real pool spend; synthetic
+        // policy UTxOs cannot acquire a marker because the marker
+        // minting policy delegates authority to the pool's spend logic.
+        let new_policy_marker_ok =
+          list.any(
+            outputs,
+            fn(out) {
+              when out.address.payment_credential is {
+                Script(h) ->
+                  if h == policy_script_hash {
+                    when out.datum is {
+                      InlineDatum(raw_pdat) -> {
+                        expect pdat: PolicyDatum = raw_pdat
+                        // Match the SAME policy output the underwrite
+                        // helper matched on (pool_nft + coverage + premium).
+                        // Any other policy output at this script is not the
+                        // Underwrite's new policy.
+                        pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == datum.pool_nft && pdat.coverage_amount == coverage && pdat.premium_paid == premium && assets.quantity_of(
+                          out.value,
+                          policy_marker_policy_id,
+                          policy_marker_asset_name,
+                        ) == 1
+                      }
+                      _ -> False
+                    }
+                  } else {
+                    False
+                  }
+                _ -> False
+              }
+            },
+          )
+        let marker_mint_ok =
+          assets.quantity_of(
+            mint,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          ) == 1
+
         // 9. §3.8 Cap check on partner_share_bps. Defense-in-depth
         // alongside the canonical-datum pin in
         // `policy_output_matches_underwrite`.
@@ -702,7 +800,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             policy_script_hash,
           )
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && new_policy_marker_ok && marker_mint_ok
       }
 
       // -----------------------------------------------------------------------
@@ -756,6 +854,27 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let policy_consumed =
           policy_targets_this_pool && payout_matches_coverage
 
+        // [V12.2+R12 / EXT-09] The consumed policy input must hold
+        // exactly 1 marker (policy_marker_policy_id, "AEGIS_POLICY")
+        // AND the tx mint must burn exactly -1 marker. Closes the
+        // synthetic-Claim accounting-corruption attack: a fake policy
+        // UTxO with attacker-crafted PolicyDatum cannot acquire a
+        // marker (marker mint is gated on a pool spend authorising
+        // Underwrite), so any Claim that consumes a non-marker UTxO is
+        // rejected at this gate.
+        let policy_has_marker =
+          assets.quantity_of(
+            policy_input.output.value,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          ) == 1
+        let marker_burn_ok =
+          assets.quantity_of(
+            mint,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          ) == -1
+
         // 3. Verify datum update is correct
         let datum_ok =
           verify_claim_datum(
@@ -788,7 +907,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let remains_non_negative =
           new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0
 
-        payout_positive && policy_consumed && datum_ok && immutable_ok && value_ok && remains_non_negative
+        payout_positive && policy_consumed && datum_ok && immutable_ok && value_ok && remains_non_negative && policy_has_marker && marker_burn_ok
       }
 
       // -----------------------------------------------------------------------
@@ -957,6 +1076,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             own_pool_hash,
             datum.pool_nft,
             policy_script_hash,
+            policy_marker_policy_id,
             validity_range,
             total_coverage,
             total_premium,
@@ -964,6 +1084,40 @@ validator pool_validator(policy_script_hash: ByteArray) {
             team_address,
             own_address,
           )
+
+        // [V12.2+R12 / EXT-09] Count NEW policy outputs at the policy
+        // validator address. Mint quantity for the marker policy must
+        // equal exactly +N where N is that count. Per-policy marker
+        // presence is checked inside the walker
+        // (`per_policy_marker_ok`); this check pins the total mint.
+        let new_policy_count =
+          list.foldl(
+            outputs,
+            0,
+            fn(out, acc) {
+              when out.address.payment_credential is {
+                Script(h) ->
+                  if h == policy_script_hash {
+                    when out.datum is {
+                      InlineDatum(raw_pdat) -> {
+                        expect _pdat: PolicyDatum = raw_pdat
+                        acc + 1
+                      }
+                      _ -> acc
+                    }
+                  } else {
+                    acc
+                  }
+                _ -> acc
+              }
+            },
+          )
+        let marker_mint_ok =
+          assets.quantity_of(
+            mint,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          ) == new_policy_count
 
         // 6. §3.7 Aggregate net pool growth = total_premium −
         // Σ fee_total_i. team_total + partner_totals_sum == fee_total_sum
@@ -1042,7 +1196,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             None -> required_donation == 0
           }
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok
       }
 
       // -----------------------------------------------------------------------
@@ -1082,6 +1236,52 @@ validator pool_validator(policy_script_hash: ByteArray) {
             total_returned,
           )
 
+        // [V12.2+R12 / EXT-09] Every consumed policy input at the
+        // policy validator address whose datum binds to THIS pool must
+        // hold exactly 1 marker; the mint quantity for the marker
+        // policy must equal -N where N is the number of such policies.
+        let consumed_policy_count_with_marker =
+          list.foldl(
+            inputs,
+            (0, True),
+            fn(input, acc) {
+              let (count_acc, all_have_marker) = acc
+              when input.output.address.payment_credential is {
+                Script(h) ->
+                  if h == policy_script_hash {
+                    when input.output.datum is {
+                      InlineDatum(raw_pdat) -> {
+                        expect pdat: PolicyDatum = raw_pdat
+                        if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == datum.pool_nft {
+                          let has_marker =
+                            assets.quantity_of(
+                              input.output.value,
+                              policy_marker_policy_id,
+                              policy_marker_asset_name,
+                            ) == 1
+                          (count_acc + 1, all_have_marker && has_marker)
+                        } else {
+                          acc
+                        }
+                      }
+                      _ -> acc
+                    }
+                  } else {
+                    acc
+                  }
+                _ -> acc
+              }
+            },
+          )
+        let (consumed_n, all_markers_present) =
+          consumed_policy_count_with_marker
+        let marker_burn_ok =
+          all_markers_present && assets.quantity_of(
+            mint,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          ) == -consumed_n
+
         // 4. Verify datum: active_coverage decremented by total_returned,
         //    total_liquidity stays the same (expired policy funds were
         //    already counted in total_liquidity when underwritten)
@@ -1101,7 +1301,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
         let remains_non_negative =
           new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0 && total_returned <= datum.active_coverage
 
-        returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative
+        returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative && marker_burn_ok
       }
 
       // -----------------------------------------------------------------------
@@ -1167,6 +1367,37 @@ validator pool_validator(policy_script_hash: ByteArray) {
         // 3. [Anti-A-001] Policy must point at THIS pool.
         let policy_targets_this_pool =
           policy_datum.pool_script_hash == own_pool_hash && policy_datum.pool_nft == datum.pool_nft
+
+        // [V12.2+R12 / EXT-10] Reject multi-input Cancel. Without this
+        // guard, an attacker can pair a legitimate policy input with a
+        // synthetic-datum policy input and the pool only accounts for
+        // the first one, while the policy-side Cancel arm runs once per
+        // input. Single-input policy spend symmetric with Claim.
+        let single_policy_input =
+          count_script_inputs(inputs, policy_script_hash) == 1
+
+        // [V12.2+R12 / EXT-08] Marker presence + burn check. The
+        // consumed policy input must hold exactly 1 marker
+        // (policy_marker_policy_id, "AEGIS_POLICY") and the tx mint
+        // must contain exactly -1 of that token. Closes the synthetic
+        // Cancel direct pool drain: an attacker writes a fake policy
+        // UTxO at the policy validator address with a fake datum
+        // (premium_paid=1000 ADA), funds it with 2 ADA, calls Cancel
+        // → pool refunds 900 ADA. The marker is only mintable via a
+        // real Aegis Underwrite that co-spent the pool; a synthetic
+        // UTxO cannot acquire one.
+        let policy_has_marker =
+          assets.quantity_of(
+            policy_input.output.value,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          ) == 1
+        let marker_burn_ok =
+          assets.quantity_of(
+            mint,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          ) == -1
 
         // 4. Compute the canonical refund (derived; not caller-controlled).
         let refund_amount = calculate_refund(policy_datum.premium_paid)
@@ -1290,7 +1521,7 @@ validator pool_validator(policy_script_hash: ByteArray) {
             policy_script_hash,
           )
 
-        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded
+        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && single_policy_input && policy_has_marker && marker_burn_ok
       }
     }
   }

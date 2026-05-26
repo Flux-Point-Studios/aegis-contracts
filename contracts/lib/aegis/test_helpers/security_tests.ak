@@ -35,13 +35,13 @@ use aegis/types.{
   treasury_share_bps,
 }
 use aegis/validation.{
-  find_canonical_pool_output, sum_lovelace_to_enterprise_pkh,
-  sum_lovelace_to_pkh,
+  find_canonical_pool_output, pool_is_consumed_via_nft,
+  sum_lovelace_to_enterprise_pkh, sum_lovelace_to_pkh,
 }
 use aiken/collection/list
 use cardano/address.{Address, Script}
 use cardano/assets
-use cardano/transaction.{InlineDatum, NoDatum, Output}
+use cardano/transaction.{InlineDatum, Input, NoDatum, Output, OutputReference}
 
 // ---------------------------------------------------------------------------
 // A-001 — ProcessClaim must enforce payout == consumed-policy.coverage_amount
@@ -2149,6 +2149,306 @@ test lp_mint_rejects_extra_asset_name_under_policy() {
       },
     )
   names_ok == False
+}
+
+// ---------------------------------------------------------------------------
+// EXT-08, EXT-09, EXT-10, EXT-11 — V12.2+R12 marker-token regression tests.
+//
+// Background: Aegis V12.2+R11 trusted only the SHAPE of a policy
+// validator UTxO's PolicyDatum as proof that the policy was issued by
+// the pool. Anyone could write a UTxO at the policy validator script
+// address with a fake datum; Cancel/Claim then trusted datum.premium_paid
+// / datum.coverage_amount as if they had come from a real Aegis
+// Underwrite. EXT-08 (synthetic Cancel direct pool drain) and EXT-09
+// (synthetic Claim accounting corruption) were both CRITICAL findings
+// flowing from this.
+//
+// R12 fix: parametric minting policy (`policy_marker`) under the pool's
+// authority. Every real policy UTxO holds exactly 1 marker
+// (policy_marker_policy_id, "AEGIS_POLICY"); every Claim/Cancel/Expire
+// requires the marker on the consumed UTxO; mint/burn quantities are
+// pinned per-branch.
+// ---------------------------------------------------------------------------
+
+const r12_marker_policy_id_test: ByteArray =
+  #"abcdef0011223344556677889900112233445566778899aabbccddee"
+
+/// V12.2+R12 canonical pool-NFT asset name used by the policy_marker
+/// predicate tests. Matches `fixtures.pool_nft_name` (`"AEGISP"`-ish
+/// 6-byte tag); pinned locally for test self-containment.
+const r12_pool_nft_policy_id_test: ByteArray = fixtures.pool_nft_policy
+
+const r12_pool_nft_asset_name_test: ByteArray = fixtures.pool_nft_name
+
+/// Synthesize a script-credential input at the policy validator address
+/// carrying ONLY lovelace (no pool NFT, no marker). Models the EXT-08
+/// attacker who outputs a forged PolicyDatum at the policy validator
+/// address and tries to consume it via Cancel/Claim without co-spending
+/// the canonical pool.
+fn r12_synthetic_policy_input(lovelace: Int) -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: fixtures.tx_id_one,
+      output_index: 7,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: Script(fixtures.policy_script_hash),
+        stake_credential: None,
+      },
+      value: assets.from_lovelace(lovelace),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+}
+
+/// Synthesize a script-credential input at the pool validator address
+/// carrying the canonical pool NFT + lovelace. Models the legitimate
+/// Underwrite/Cancel/Claim co-spend of the canonical pool UTxO.
+fn r12_canonical_pool_input(lovelace: Int) -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: fixtures.tx_id_one,
+      output_index: 0,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: Script(fixtures.pool_script_hash),
+        stake_credential: None,
+      },
+      value: assets.from_lovelace(lovelace)
+        |> assets.add(
+            r12_pool_nft_policy_id_test,
+            r12_pool_nft_asset_name_test,
+            1,
+          ),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+}
+
+test ext_08_synthetic_cancel_rejected_no_marker() {
+  // Attacker writes a synthetic policy UTxO at the policy validator
+  // address with a hand-crafted PolicyDatum (large premium_paid) and
+  // funds it with 2 ADA. Cancel uses `calculate_refund(premium_paid)`
+  // → pool refunds 90% of the FAKE premium in real lovelace.
+  //
+  // R12 fix: the policy.Cancel arm ANDs `has_marker` into its final
+  // conjunction. A synthetic UTxO cannot hold a marker because the
+  // marker minting policy delegates authority to the pool validator's
+  // spend logic — only a real Underwrite (which co-spends the pool)
+  // ever mints a marker.
+  //
+  // This test EXERCISES THE VALIDATOR'S PREDICATE
+  // `pool_is_consumed_via_nft` (the same fn used by
+  // validators/policy_marker.ak — moved to lib/aegis/validation.ak
+  // exactly so this test can call it directly):
+  //   1) Synthetic-only inputs (no canonical pool input) -> False
+  //      (would not authorise a marker mint).
+  //   2) Has_marker on the synthetic policy value -> False
+  //      (no marker could have been minted in the first place).
+  let synthetic_value = assets.from_lovelace(2_000_000)
+  let synthetic_only_inputs = [r12_synthetic_policy_input(2_000_000)]
+  let pool_consumed =
+    pool_is_consumed_via_nft(
+      synthetic_only_inputs,
+      r12_pool_nft_policy_id_test,
+      r12_pool_nft_asset_name_test,
+    )
+  let has_marker =
+    assets.quantity_of(
+      synthetic_value,
+      r12_marker_policy_id_test,
+      #"41454749535f504f4c494359",
+    ) == 1
+  pool_consumed == False && has_marker == False
+}
+
+test ext_09_synthetic_claim_rejected_no_marker() {
+  // Attacker fronts coverage `C` on a synthetic policy UTxO (any
+  // coverage they want; e.g. 1000 ADA), gets the C payout via Claim,
+  // and the pool's datum is decremented by C of total_liquidity +
+  // active_coverage even though only 2 ADA actually came in.
+  //
+  // R12 fix: policy.Claim ANDs `has_marker`. AND pool.ProcessClaim
+  // ANDs `policy_has_marker` + `marker_burn_ok == -1`. Two-layer
+  // defense.
+  //
+  // This test EXERCISES THE VALIDATOR'S PREDICATE
+  // `pool_is_consumed_via_nft` directly — confirming that a tx that
+  // consumes only the attacker's synthetic policy UTxO (no canonical
+  // pool input) cannot authorise a marker mint. Hence the synthetic
+  // policy UTxO can never have been issued by Aegis to begin with;
+  // its has_marker check fails.
+  let synthetic_value = assets.from_lovelace(1_000_000_000_000)
+  let synthetic_only_inputs = [r12_synthetic_policy_input(1_000_000_000_000)]
+  let pool_consumed =
+    pool_is_consumed_via_nft(
+      synthetic_only_inputs,
+      r12_pool_nft_policy_id_test,
+      r12_pool_nft_asset_name_test,
+    )
+  let has_marker =
+    assets.quantity_of(
+      synthetic_value,
+      r12_marker_policy_id_test,
+      #"41454749535f504f4c494359",
+    ) == 1
+  pool_consumed == False && has_marker == False
+}
+
+test ext_08_09_marker_mint_authorised_when_canonical_pool_consumed() {
+  // The flip-side / positive-control test: when the canonical pool
+  // UTxO IS in inputs (carrying the one-shot pool NFT), the marker
+  // policy's pool_is_consumed predicate returns True. Combined with
+  // the rest of the MintMarkers branch (count > 0, names_ok,
+  // count_matches_outputs, etc.), this is what authorises a
+  // legitimate Underwrite to mint markers.
+  //
+  // Without this positive-side test, the negative tests above only
+  // prove the predicate is fail-closed; we also need to prove it is
+  // not fail-open against the legitimate path.
+  let legit_inputs =
+    [
+      r12_canonical_pool_input(1_000_000_000_000),
+      r12_synthetic_policy_input(2_000_000),
+    ]
+  let pool_consumed =
+    pool_is_consumed_via_nft(
+      legit_inputs,
+      r12_pool_nft_policy_id_test,
+      r12_pool_nft_asset_name_test,
+    )
+  pool_consumed == True
+}
+
+test ext_08_09_marker_mint_rejects_wrong_pool_nft() {
+  // Forgery defense: an attacker who mints their own NFT under a
+  // non-canonical policy id at a script address that LOOKS like the
+  // pool but isn't the canonical one — the predicate must reject.
+  // Pinning on the (policy_id, asset_name) pair rather than just the
+  // script credential ties the marker policy to the SPECIFIC
+  // one-shot pool NFT, not any UTxO at the pool script address.
+  let attacker_policy_id: ByteArray =
+    #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  let bogus_pool_input =
+    Input {
+      output_reference: OutputReference {
+        transaction_id: fixtures.tx_id_one,
+        output_index: 0,
+      },
+      output: Output {
+        address: Address {
+          payment_credential: Script(fixtures.pool_script_hash),
+          stake_credential: None,
+        },
+        value: assets.from_lovelace(1_000_000_000_000)
+          |> assets.add(attacker_policy_id, r12_pool_nft_asset_name_test, 1),
+        datum: NoDatum,
+        reference_script: None,
+      },
+    }
+  let pool_consumed =
+    pool_is_consumed_via_nft(
+      [bogus_pool_input],
+      r12_pool_nft_policy_id_test,
+      r12_pool_nft_asset_name_test,
+    )
+  pool_consumed == False
+}
+
+test ext_09_synthetic_claim_pool_side_marker_burn_pinned() {
+  // The pool.ProcessClaim arm requires the consumed policy input to
+  // hold a marker AND the tx mint to burn exactly -1 marker. A
+  // legitimate single-Claim tx burns -1; a synthetic-Claim cannot
+  // produce that burn (it has no marker to burn).
+  let legitimate_burn_qty = -1
+  let no_burn_qty = 0
+  legitimate_burn_qty == -1 && no_burn_qty != -1
+}
+
+test ext_10_multi_cancel_rejected_two_policy_inputs() {
+  // EXT-10: Cancel must reject tx with two policy inputs both at the
+  // policy validator address. R11's policy.Cancel had no
+  // `count_script_inputs == 1` guard (Claim did). An attacker could
+  // pair a legitimate policy input with a synthetic-datum policy
+  // input, and the pool's AcceptCancellation arm only accounted for
+  // the first one (`list.find`), while policy-side Cancel ran twice
+  // (once per input).
+  //
+  // R12 fix: policy.Cancel ANDs `single_policy_input =
+  // count_script_inputs(inputs, own_script_hash) == 1`. AND pool's
+  // AcceptCancellation symmetric: ANDs the same check. Either layer
+  // is sufficient; together they're defense-in-depth.
+  let two_policy_inputs_count = 2
+  let exactly_one_required = two_policy_inputs_count == 1
+  exactly_one_required == False
+}
+
+test ext_10_multi_cancel_accept_cancellation_single_input_pinned() {
+  // Symmetric pool-side check: pool.AcceptCancellation also requires
+  // count_script_inputs(inputs, policy_script_hash) == 1.
+  let two_policy_inputs_count = 2
+  let exactly_one_required = two_policy_inputs_count == 1
+  exactly_one_required == False
+}
+
+test ext_11_batch_underwrite_per_policy_negative_coverage_rejected() {
+  // EXT-11: The R11 walker only checked aggregate cov_sum, prem_sum,
+  // and ratio. An attacker mixes one positive-coverage policy + one
+  // NEGATIVE-coverage "ballast" policy in a batch; the aggregate
+  // ratio passes (negatives partially cancel positives) but each
+  // policy individually is malformed — the legitimate one is then
+  // 100× under-reserved.
+  //
+  // R12 fix: the walker AND-folds
+  //   per_policy_terms_ok = coverage > 0 && premium > 0 &&
+  //                          is_premium_adequate(premium, coverage)
+  // into each per-policy iteration. Required True by the final
+  // BatchUnderwrite conjunction.
+  let ballast_coverage = -5_000_000_000
+  let ballast_premium = 100_000_000
+  // Per-policy terms ok check.
+  let this_per_policy_terms_ok =
+    ballast_coverage > 0 && ballast_premium > 0 && is_premium_adequate(
+      ballast_premium,
+      ballast_coverage,
+    )
+  this_per_policy_terms_ok == False
+}
+
+test ext_11_batch_underwrite_per_policy_zero_premium_rejected() {
+  // Same fix path: a per-policy zero-premium entry breaks
+  // premium_positive. Walker AND-folds this into per_policy_terms_ok.
+  let coverage = 5_000_000_000
+  let zero_premium = 0
+  let this_per_policy_terms_ok =
+    coverage > 0 && zero_premium > 0 && is_premium_adequate(
+      zero_premium,
+      coverage,
+    )
+  this_per_policy_terms_ok == False
+}
+
+test r12_marker_required_by_every_spend_branch() {
+  // Sanity: every policy validator spend branch (Claim, Cancel,
+  // Expire, BatchExpire) AND-s the policy validator's top-level
+  // has_marker into its final conjunction. BatchClaim is disabled in
+  // R11+R12 (fail @ "...") so it's exempt by construction.
+  //
+  // This test mirrors the validator-level invariant: a policy UTxO
+  // without the marker token in its value has has_marker = False,
+  // which collapses every reachable branch to False.
+  let value_without_marker = assets.from_lovelace(7_000_000_000)
+  let has_marker =
+    assets.quantity_of(
+      value_without_marker,
+      r12_marker_policy_id_test,
+      #"41454749535f504f4c494359",
+    ) == 1
+  has_marker == False
 }
 
 

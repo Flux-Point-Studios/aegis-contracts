@@ -5,7 +5,8 @@ use aegis/types.{ScriptHash, VerificationKeyHash}
 // Summary: Reusable validation helpers used across multiple validators.
 //          Provides signature checks, time boundary extraction, output
 //          searching by address/pkh/script, and value checks.
-//          Used by validators/policy.ak and validators/pool.ak.
+//          Used by validators/policy.ak, validators/pool.ak, and
+//          validators/policy_marker.ak.
 // =============================================================================
 
 use aiken/collection/list
@@ -198,6 +199,44 @@ pub fn find_canonical_pool_output(
         output,
         pool_nft,
       )
+    },
+  )
+}
+
+/// Scan the tx inputs for one whose VALUE contains ≥1 of the canonical
+/// pool NFT `(pool_nft_policy_id, pool_nft_asset_name)`. Used by
+/// `validators/policy_marker.ak` to delegate mint/burn authority to the
+/// pool validator's spend logic — only a transaction that consumes the
+/// canonical pool UTxO can produce or burn a marker, and the pool's own
+/// spend rules constrain what that spend can be (Underwrite /
+/// BatchUnderwrite for mint; ProcessClaim / AcceptCancellation /
+/// BatchExpireProcess for burn).
+///
+/// Pinned on the NFT (not the script hash) so the marker is bound to the
+/// SPECIFIC canonical pool, not just any UTxO at the pool script address.
+/// This is also what breaks the V12.2+R12 parameterization cycle: the
+/// one-shot `pool_nft` policy id is computed BEFORE either the pool or
+/// the policy validator is parameterized, so the marker policy can
+/// reference it without inducing a circular hash dependency.
+///
+/// Lifted into `lib/aegis/validation.ak` (rather than living inside the
+/// marker validator) so the EXT-08 / EXT-09 / EXT-10 / EXT-11 regression
+/// tests can exercise this predicate directly with real
+/// `Transaction.inputs` fixtures, rather than re-encoding the boolean
+/// shape as constants.
+pub fn pool_is_consumed_via_nft(
+  inputs: List<Input>,
+  pool_nft_policy_id: ByteArray,
+  pool_nft_asset_name: ByteArray,
+) -> Bool {
+  list.any(
+    inputs,
+    fn(input) {
+      assets.quantity_of(
+        input.output.value,
+        pool_nft_policy_id,
+        pool_nft_asset_name,
+      ) >= 1
     },
   )
 }

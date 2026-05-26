@@ -282,6 +282,48 @@ pub type LPTokenRedeemer {
 }
 
 // ---------------------------------------------------------------------------
+// Policy Marker Token Redeemer (Aegis V12.2+R12 / EXT-08, EXT-09)
+// ---------------------------------------------------------------------------
+
+/// Policy marker minting-policy redeemer.
+///
+/// Aegis V12.2+R11 trusted only the shape of a policy-validator UTxO's
+/// `PolicyDatum` as proof that the policy was issued by the pool — but
+/// anyone can write a UTxO at the policy validator script address with a
+/// fake datum because spend-side gating is only triggered when the UTxO
+/// is consumed. R12 closes that gap by a parametric minting policy:
+/// every policy UTxO MUST hold exactly 1 marker token whose policy_id is
+/// the compiled marker validator's hash and whose asset name is the
+/// constant `policy_marker_asset_name`. Mint authority is delegated to
+/// the pool validator's spend logic (one of Underwrite / BatchUnderwrite);
+/// burn authority is delegated to the pool validator's spend logic
+/// (ProcessClaim / AcceptCancellation / BatchExpireProcess).
+///
+/// Closes:
+///   EXT-08 (CRITICAL) — synthetic Cancel direct pool drain.
+///   EXT-09 (CRITICAL) — synthetic Claim accounting corruption.
+///
+/// Pairs with the per-branch `has_marker` check (policy validator) and the
+/// per-output marker presence check (pool validator).
+pub type MarkerRedeemer {
+  /// Mint N markers — one per new policy output in this tx. The pool
+  /// validator must be co-spent. `count` must equal the number of new
+  /// policy outputs and the total quantity minted under this policy.
+  MintMarkers { count: Int }
+  /// Burn one or more markers. The pool validator must be co-spent.
+  /// Net mint quantity must be strictly negative.
+  BurnMarkers
+}
+
+/// Canonical asset name for the policy marker token: ASCII
+/// `"AEGIS_POLICY"` (12 bytes; hex `41454749535f504f4c494359`). All
+/// marker tokens under the parameterized marker policy id share this
+/// name; the policy_id (28 bytes) is the discriminator. One marker per
+/// policy UTxO held as quantity=1.
+pub const policy_marker_asset_name: ByteArray =
+  #"41454749535f504f4c494359"
+
+// ---------------------------------------------------------------------------
 // Protocol Constants
 // ---------------------------------------------------------------------------
 
