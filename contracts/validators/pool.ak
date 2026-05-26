@@ -143,6 +143,26 @@ type BatchFeeTotals {
   /// True by the final BatchUnderwrite conjunction. Pairs with the
   /// total mint of +N markers check.
   per_policy_marker_ok: Bool,
+  /// [V12.2+R13 / EXT-13] Number of walker-ACCEPTED policies. A
+  /// policy output is "accepted" iff it passes EVERY check the
+  /// walker applies (pool binding, oracle pin, time-range, coverage
+  /// positive, premium positive, premium adequacy, AND 1 marker on
+  /// the output). Only accepted policies contribute to cov_sum /
+  /// prem_sum / fee accumulators AND only accepted policies count
+  /// toward the marker-mint pin (`marker_mint_ok == matched_policy_count`).
+  /// Replaces the R12 BROAD scan `count_policy_outputs` which let
+  /// walker-rejected policies still receive a real marker.
+  matched_policy_count: Int,
+  /// [V12.2+R13 / EXT-13] All-or-nothing flag on policy outputs at
+  /// the policy validator address. True iff EVERY output at
+  /// policy_script_hash decoded as PolicyDatum passes the walker's
+  /// per-policy `valid_policy` check. ANY walker-rejected policy
+  /// output collapses this to False — closes the laundering attack
+  /// where the attacker mixes one accepted + one rejected policy
+  /// into a batch and the rejected one gets a marker without
+  /// contributing premium. Required True by the final BatchUnderwrite
+  /// conjunction.
+  all_policy_outputs_valid: Bool,
 }
 
 /// §3.10 Merge a per-policy partner cut into the running floored
@@ -220,6 +240,8 @@ fn batch_policies_match_totals_v12(
       aliases_ok: True,
       per_policy_terms_ok: True,
       per_policy_marker_ok: True,
+      matched_policy_count: 0,
+      all_policy_outputs_valid: True,
     }
   let totals =
     list.foldl(
@@ -241,43 +263,60 @@ fn batch_policies_match_totals_v12(
                   // [v12 / A-026, A-027 generalised] Canonical NFT pin.
                   let oracle_pinned =
                     is_canonical_oracle_nft(pdat.oracle_provider, pdat.oracle_nft)
-                  if pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned {
-                    let funded =
-                      assets.lovelace_of(out.value) >= pdat.coverage_amount
-                    // §3.10 Per-policy partner_share_bps invariants.
-                    let bps_in_bounds =
-                      pdat.partner_share_bps >= 0 && pdat.partner_share_bps <= partner_share_cap_bps
-                    let bps_consistency =
-                      pdat.partner_address != None || pdat.partner_share_bps == 0
-                    let this_shares_ok = bps_in_bounds && bps_consistency
-                    // [V12.2+R12 / EXT-11] Per-policy validity check.
-                    // The walker's aggregate cov_sum / prem_sum / ratio
-                    // check is insufficient: a positive-aggregate batch
-                    // with one negative-coverage "ballast" policy + one
-                    // legitimate policy passes the aggregate but each
-                    // policy individually is malformed. Per-policy
-                    // positivity + premium-adequacy must AND in.
-                    let this_per_policy_terms_ok =
-                      pdat.coverage_amount > 0 && pdat.premium_paid > 0 && is_premium_adequate(
-                        pdat.premium_paid,
-                        pdat.coverage_amount,
-                      )
-                    // [V12.2+R12 / EXT-09] Per-policy marker presence.
-                    // Every new policy output at the policy validator
-                    // address must hold exactly 1 marker
-                    // (policy_marker_policy_id, "AEGIS_POLICY").
-                    let this_per_policy_marker_ok =
-                      assets.quantity_of(
-                        out.value,
-                        policy_marker_policy_id,
-                        policy_marker_asset_name,
-                      ) == 1
-                    // §3.7 Per-policy Hybrid fee math:
-                    //   fee_total_i = max(min_utxo, premium_i * fee_bps / 10_000)
-                    //   (team_cut_i, partner_cut_i) = split with silent absorb
-                    // The split helper's contract guarantees
-                    //   team_cut_i + partner_cut_i == fee_total_i
-                    // exactly, and partner_cut_i ∈ {0, ≥ min_utxo}.
+                  // [V12.2+R13 / EXT-13] valid_policy is the conjunction
+                  // of EVERY per-policy gate the walker can evaluate
+                  // locally on this output. Walker-rejected policies
+                  // (any gate False) MUST NOT contribute to
+                  // cov_sum/prem_sum/fees AND MUST NOT count toward
+                  // marker mint. The two new fields:
+                  //   * matched_policy_count - tallies accepted only.
+                  //   * all_policy_outputs_valid - collapses to False
+                  //     on ANY rejected policy output (closes the
+                  //     mixed-batch marker-laundering attack).
+                  let funded =
+                    assets.lovelace_of(out.value) >= pdat.coverage_amount
+                  let bps_in_bounds =
+                    pdat.partner_share_bps >= 0 && pdat.partner_share_bps <= partner_share_cap_bps
+                  let bps_consistency =
+                    pdat.partner_address != None || pdat.partner_share_bps == 0
+                  let this_shares_ok = bps_in_bounds && bps_consistency
+                  let this_per_policy_terms_ok =
+                    pdat.coverage_amount > 0 && pdat.premium_paid > 0 && is_premium_adequate(
+                      pdat.premium_paid,
+                      pdat.coverage_amount,
+                    )
+                  let marker_qty_on_output =
+                    assets.quantity_of(
+                      out.value,
+                      policy_marker_policy_id,
+                      policy_marker_asset_name,
+                    )
+                  let this_per_policy_marker_ok = marker_qty_on_output == 1
+                  let this_alias_ok =
+                    partner_address_not_aliased(
+                      pdat.partner_address,
+                      team_address,
+                      own_address,
+                      policy_script_hash,
+                    )
+                  // [V12.2+R13 / EXT-13] valid_policy: walker-accepted iff
+                  // EVERY gate is True. Per auditor pseudo-code: pool
+                  // binding + time + oracle + coverage > 0 + premium > 0 +
+                  // premium-adequate + marker present + funded + shares_ok
+                  // + alias_ok. (We add funded/shares/alias here even
+                  // though earlier walker shape kept them as separate AND
+                  // fields — folding them into valid_policy keeps the
+                  // accepted set semantically clean and prevents a partial-
+                  // accept from contributing to fee accumulators while
+                  // flunking elsewhere.)
+                  let valid_policy =
+                    pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned && pdat.coverage_amount > 0 && pdat.premium_paid > 0 && is_premium_adequate(
+                      pdat.premium_paid,
+                      pdat.coverage_amount,
+                    ) && marker_qty_on_output == 1 && funded && this_shares_ok && this_alias_ok
+                  if valid_policy {
+                    // §3.7 Per-policy Hybrid fee math (only accumulated
+                    // for walker-accepted policies).
                     let fee_total_i =
                       calculate_fee_total(
                         pdat.premium_paid,
@@ -290,10 +329,6 @@ fn batch_policies_match_totals_v12(
                         pdat.partner_share_bps,
                         min_utxo_lovelace,
                       )
-                    // §3.7 partner_totals only accumulates entries
-                    // where partner_cut_i > 0. The silent-absorb path
-                    // (partner_cut_i == 0) contributes nothing to
-                    // partner_totals AND nothing to partner_totals_sum.
                     let new_partner_totals =
                       when pdat.partner_address is {
                         Some(addr) ->
@@ -310,17 +345,6 @@ fn batch_policies_match_totals_v12(
                       }
                     let new_partner_totals_sum =
                       acc.partner_totals_sum + partner_cut_i
-                    // Per-policy alias check covers silent-absorb policies
-                    // (partner_cut_i == 0) too, which never reach
-                    // partner_totals and would otherwise bypass the
-                    // post-fold list.all check.
-                    let this_alias_ok =
-                      partner_address_not_aliased(
-                        pdat.partner_address,
-                        team_address,
-                        own_address,
-                        policy_script_hash,
-                      )
                     BatchFeeTotals {
                       cov_sum: acc.cov_sum + pdat.coverage_amount,
                       prem_sum: acc.prem_sum + pdat.premium_paid,
@@ -333,9 +357,23 @@ fn batch_policies_match_totals_v12(
                       aliases_ok: acc.aliases_ok && this_alias_ok,
                       per_policy_terms_ok: acc.per_policy_terms_ok && this_per_policy_terms_ok,
                       per_policy_marker_ok: acc.per_policy_marker_ok && this_per_policy_marker_ok,
+                      matched_policy_count: acc.matched_policy_count + 1,
+                      all_policy_outputs_valid: acc.all_policy_outputs_valid,
                     }
                   } else {
-                    acc
+                    // [V12.2+R13 / EXT-13] Walker-REJECTED policy output:
+                    // do NOT bump cov_sum/prem_sum/fees/match_count, but
+                    // collapse all_policy_outputs_valid to False. This is
+                    // the load-bearing change: in R12 a rejected policy
+                    // output was simply skipped, leaving the broad scan
+                    // free to give it a marker. Here it's still skipped
+                    // from accounting, but its existence is recorded so
+                    // the BatchUnderwrite final conjunction can fail-
+                    // close.
+                    BatchFeeTotals {
+                      ..acc,
+                      all_policy_outputs_valid: False,
+                    }
                   }
                 }
                 _ -> acc
@@ -348,7 +386,9 @@ fn batch_policies_match_totals_v12(
       },
     )
   // Aggregate totals must match the redeemer's claimed totals AND every
-  // policy output's lovelace must be >= its coverage.
+  // accepted policy output's lovelace must be >= its coverage (already
+  // checked per-policy via `funded` inside `valid_policy`; redundancy
+  // is intentional).
   BatchFeeTotals {
     ..totals,
     funded_ok: totals.funded_ok && totals.cov_sum == total_coverage && totals.prem_sum == total_premium,
@@ -953,7 +993,22 @@ validator pool_validator(
         let lp_supply_delta = new_datum.lp_supply - datum.lp_supply
         let lp_minted = mint_qty == lp_supply_delta && mint_qty > 0
 
-        amount_positive && datum_ok && immutable_ok && value_ok && lp_minted
+        // [V12.2+R13 / EXT-12] Per-branch marker_qty pin. The marker
+        // minting policy authorises any tx that consumes the canonical
+        // pool NFT — so without a per-branch pin, AddLiquidity could co-
+        // mint +N markers, park them on a fake policy-validator UTxO,
+        // and the attacker would later use that marker-bearing fake
+        // policy in a Cancel/Claim to drain the pool. AddLiquidity has
+        // no legitimate reason to mint markers; pin to 0.
+        let marker_qty =
+          assets.quantity_of(
+            mint,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          )
+        let marker_qty_zero = marker_qty == 0
+
+        amount_positive && datum_ok && immutable_ok && value_ok && lp_minted && marker_qty_zero
       }
 
       // -----------------------------------------------------------------------
@@ -1005,7 +1060,20 @@ validator pool_validator(
         // 8. Sanity: mint must be strictly negative (burn).
         let direction_ok = mint_qty < 0
 
-        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok
+        // [V12.2+R13 / EXT-12] Per-branch marker_qty pin. Symmetric with
+        // AddLiquidity. RemoveLiquidity has no legitimate reason to mint
+        // OR burn markers — only Underwrite / BatchUnderwrite mint,
+        // only ProcessClaim / AcceptCancellation / BatchExpireProcess
+        // burn. Pin to 0.
+        let marker_qty =
+          assets.quantity_of(
+            mint,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          )
+        let marker_qty_zero = marker_qty == 0
+
+        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero
       }
 
       // -----------------------------------------------------------------------
@@ -1085,39 +1153,23 @@ validator pool_validator(
             own_address,
           )
 
-        // [V12.2+R12 / EXT-09] Count NEW policy outputs at the policy
-        // validator address. Mint quantity for the marker policy must
-        // equal exactly +N where N is that count. Per-policy marker
-        // presence is checked inside the walker
-        // (`per_policy_marker_ok`); this check pins the total mint.
-        let new_policy_count =
-          list.foldl(
-            outputs,
-            0,
-            fn(out, acc) {
-              when out.address.payment_credential is {
-                Script(h) ->
-                  if h == policy_script_hash {
-                    when out.datum is {
-                      InlineDatum(raw_pdat) -> {
-                        expect _pdat: PolicyDatum = raw_pdat
-                        acc + 1
-                      }
-                      _ -> acc
-                    }
-                  } else {
-                    acc
-                  }
-                _ -> acc
-              }
-            },
-          )
-        let marker_mint_ok =
+        // [V12.2+R13 / EXT-13] Mint quantity for the marker policy must
+        // equal `batch_totals.matched_policy_count` — the count of
+        // WALKER-ACCEPTED policies (NOT a broad output scan as in R12).
+        // The R12 broad scan let an attacker mix one walker-accepted
+        // policy with one walker-rejected policy (e.g. `time_ok = False`)
+        // — broad count = 2 → mint = +2, rejected policy got a real
+        // marker without contributing premium, then was used in a
+        // synthetic Cancel later. This pin closes that laundering path.
+        // Per-policy marker presence on each accepted output is still
+        // checked inside the walker (`per_policy_marker_ok`).
+        let marker_qty =
           assets.quantity_of(
             mint,
             policy_marker_policy_id,
             policy_marker_asset_name,
-          ) == new_policy_count
+          )
+        let marker_mint_ok = marker_qty == batch_totals.matched_policy_count
 
         // 6. §3.7 Aggregate net pool growth = total_premium −
         // Σ fee_total_i. team_total + partner_totals_sum == fee_total_sum
@@ -1196,7 +1248,7 @@ validator pool_validator(
             None -> required_donation == 0
           }
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && batch_totals.all_policy_outputs_valid
       }
 
       // -----------------------------------------------------------------------
