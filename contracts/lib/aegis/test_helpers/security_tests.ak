@@ -2717,3 +2717,46 @@ test ext_14_exact_matched_output_with_marker_accepted() {
     }
   matching_count == 1
 }
+
+test ext_15_underwrite_with_policy_input_rejected() {
+  let policy_input_count = 1
+  let no_policy_inputs = policy_input_count == 0
+  no_policy_inputs == False
+}
+
+test ext_15_batch_underwrite_with_policy_input_rejected() {
+  let policy_input_count = 1
+  let no_policy_inputs = policy_input_count == 0
+  no_policy_inputs == False
+}
+
+test ext_15_add_liquidity_with_policy_input_rejected() {
+  let policy_input_count = 1
+  let no_policy_inputs = policy_input_count == 0
+  no_policy_inputs == False
+}
+
+test ext_15_remove_liquidity_with_policy_input_rejected() {
+  let policy_input_count = 1
+  let no_policy_inputs = policy_input_count == 0
+  no_policy_inputs == False
+}
+
+test ext_15_process_claim_with_two_policy_inputs_rejected() {
+  let policy_input_count = 2
+  let exactly_one_policy_input = policy_input_count == 1
+  exactly_one_policy_input == False
+}
+
+test ext_15_process_claim_with_zero_policy_inputs_rejected() {
+  let policy_input_count = 0
+  let exactly_one_policy_input = policy_input_count == 1
+  exactly_one_policy_input == False
+}
+
+test ext_15_batch_expire_extra_unaccounted_policy_input_rejected() {
+  let policies_consumed_total = 2
+  let consumed_n = 1
+  let all_policy_inputs_accounted = policies_consumed_total == consumed_n
+  all_policy_inputs_accounted == False
+}

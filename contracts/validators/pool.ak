@@ -440,25 +440,8 @@ fn policy_output_matches_underwrite(
   coverage: Int,
   premium: Int,
 ) -> Option<(Option<Address>, Int)> {
-  // Walk the outputs counting matches and capturing the partner
-  // fields of the (unique) matching one. The fold accumulator carries the
-  // count plus the most-recent matching policy's partner fields. We only
-  // return `Some(...)` when count == 1, so >1 matches degrade to None and
-  // fail the branch the same way 0 matches do. The previous Bool
-  // return type is widened to `Option<(Option<Address>, Int)>` so the
-  // caller can apply the per-policy team/partner output checks without a
-  // second walk over `outputs`.
-  //
-  // [V12.2+R14 / EXT-14] Marker presence is part of the SAME predicate
-  // as pool binding + coverage + premium + oracle + funding + time. The
-  // R12/R13 standalone `new_policy_marker_ok` (a weak `list.any` over
-  // outputs) is removed because it admitted a split-proof attack:
-  // attacker creates Output A (funded + correct datum, NO marker) AND
-  // Output B (marker + same coverage/premium but underfunded or
-  // future-dated). The strict predicate accepted A; the weak predicate
-  // accepted B; marker was minted but attached to the wrong (stranded)
-  // output. Folding marker presence into THIS predicate ensures the
-  // accepted output IS the marker-bearing one.
+  // Returns Some when exactly one output matches; partner fields are
+  // captured from the matching policy datum for downstream output checks.
   let walk =
     list.foldl(
       outputs,
@@ -727,16 +710,6 @@ validator pool_validator(
             Script(h) -> h
             _ -> #""
           }
-        // [V12.2+R14 / EXT-14] Marker presence is now part of
-        // `policy_output_matches_underwrite`'s strict predicate (same
-        // walk, same output). The previous separate `new_policy_marker_ok`
-        // list.any check was a split-proof attack surface: it admitted
-        // tx-shapes where one output satisfied the strict predicate
-        // (funded + time-valid + correct datum, NO marker) and a DIFFERENT
-        // output satisfied the weaker marker predicate (marker present
-        // but underfunded or future-dated). Folding marker into the
-        // strict predicate guarantees the accepted output IS the
-        // marker-bearing one.
         expect Some((new_partner_address, new_partner_share_bps)) =
           policy_output_matches_underwrite(
             outputs,
@@ -749,11 +722,6 @@ validator pool_validator(
             premium,
           )
 
-        // Marker total mint bound is still load-bearing: ensures exactly
-        // one marker token was created in this tx (Cardano ledger
-        // conservation means the +1 must land in some output; combined
-        // with `policy_output_matches_underwrite`'s per-output marker
-        // pin, that output is the matched policy UTxO).
         let marker_mint_ok =
           assets.quantity_of(
             mint,
@@ -839,7 +807,10 @@ validator pool_validator(
             policy_script_hash,
           )
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok
+        let no_policy_inputs =
+          count_script_inputs(inputs, policy_script_hash) == 0
+
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -946,7 +917,10 @@ validator pool_validator(
         let remains_non_negative =
           new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0
 
-        payout_positive && policy_consumed && datum_ok && immutable_ok && value_ok && remains_non_negative && policy_has_marker && marker_burn_ok
+        let exactly_one_policy_input =
+          count_script_inputs(inputs, policy_script_hash) == 1
+
+        payout_positive && policy_consumed && datum_ok && immutable_ok && value_ok && remains_non_negative && policy_has_marker && marker_burn_ok && exactly_one_policy_input
       }
 
       // -----------------------------------------------------------------------
@@ -1007,7 +981,10 @@ validator pool_validator(
           )
         let marker_qty_zero = marker_qty == 0
 
-        amount_positive && datum_ok && immutable_ok && value_ok && lp_minted && marker_qty_zero
+        let no_policy_inputs =
+          count_script_inputs(inputs, policy_script_hash) == 0
+
+        amount_positive && datum_ok && immutable_ok && value_ok && lp_minted && marker_qty_zero && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1072,7 +1049,10 @@ validator pool_validator(
           )
         let marker_qty_zero = marker_qty == 0
 
-        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero
+        let no_policy_inputs =
+          count_script_inputs(inputs, policy_script_hash) == 0
+
+        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1247,7 +1227,10 @@ validator pool_validator(
             None -> required_donation == 0
           }
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && batch_totals.all_policy_outputs_valid
+        let no_policy_inputs =
+          count_script_inputs(inputs, policy_script_hash) == 0
+
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && batch_totals.all_policy_outputs_valid && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1276,8 +1259,9 @@ validator pool_validator(
             Script(h) -> h
             _ -> #""
           }
-        let policies_consumed =
-          count_script_inputs(inputs, policy_script_hash) >= 1
+        let policies_consumed_total =
+          count_script_inputs(inputs, policy_script_hash)
+        let policies_consumed = policies_consumed_total >= 1
         let consumed_policies_match =
           consumed_policies_total_to(
             inputs,
@@ -1352,7 +1336,9 @@ validator pool_validator(
         let remains_non_negative =
           new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0 && total_returned <= datum.active_coverage
 
-        returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative && marker_burn_ok
+        let all_policy_inputs_accounted = policies_consumed_total == consumed_n
+
+        returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative && marker_burn_ok && all_policy_inputs_accounted
       }
 
       // -----------------------------------------------------------------------
