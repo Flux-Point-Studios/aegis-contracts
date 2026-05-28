@@ -1,6 +1,6 @@
 name = "aegis/insurance"
 version = "0.1.0"
-compiler = "v1.1.21"
+compiler = "v1.1.22"
 plutus = "v3"
 license = "Apache-2.0"
 description = "Aegis - Parametric Crypto Insurance Protocol for Cardano"

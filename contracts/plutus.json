@@ -295,18 +295,15 @@
     },
     "aegis/types/LPTokenRedeemer": {
       "title": "LPTokenRedeemer",
-      "description": "Actions for the LP token minting policy",
       "anyOf": [
         {
           "title": "MintLP",
-          "description": "Mint new LP tokens (when adding liquidity)",
           "dataType": "constructor",
           "index": 0,
           "fields": []
         },
         {
           "title": "BurnLP",
-          "description": "Burn LP tokens (when removing liquidity)",
           "dataType": "constructor",
           "index": 1,
           "fields": []
@@ -315,11 +312,9 @@
     },
     "aegis/types/MarkerRedeemer": {
       "title": "MarkerRedeemer",
-      "description": "Policy marker minting-policy redeemer.\n\n Aegis V12.2+R11 trusted only the shape of a policy-validator UTxO's\n `PolicyDatum` as proof that the policy was issued by the pool — but\n anyone can write a UTxO at the policy validator script address with a\n fake datum because spend-side gating is only triggered when the UTxO\n is consumed. R12 closes that gap by a parametric minting policy:\n every policy UTxO MUST hold exactly 1 marker token whose policy_id is\n the compiled marker validator's hash and whose asset name is the\n constant `policy_marker_asset_name`. Mint authority is delegated to\n the pool validator's spend logic (one of Underwrite / BatchUnderwrite);\n burn authority is delegated to the pool validator's spend logic\n (ProcessClaim / AcceptCancellation / BatchExpireProcess).\n\n Closes:\n   EXT-08 (CRITICAL) — synthetic Cancel direct pool drain.\n   EXT-09 (CRITICAL) — synthetic Claim accounting corruption.\n\n Pairs with the per-branch `has_marker` check (policy validator) and the\n per-output marker presence check (pool validator).",
       "anyOf": [
         {
           "title": "MintMarkers",
-          "description": "Mint N markers — one per new policy output in this tx. The pool\n validator must be co-spent. `count` must equal the number of new\n policy outputs and the total quantity minted under this policy.",
           "dataType": "constructor",
           "index": 0,
           "fields": [
@@ -331,21 +326,18 @@
         },
         {
           "title": "BurnForClaim",
-          "description": "Burn exactly 1 marker — paired with pool.ProcessClaim +\n policy.Claim. Branch-specific so the pool and policy validators\n can both pin the burn redeemer to their own lifecycle and refuse\n burn-arm crossings.",
           "dataType": "constructor",
           "index": 1,
           "fields": []
         },
         {
           "title": "BurnForCancel",
-          "description": "Burn exactly 1 marker — paired with pool.AcceptCancellation +\n policy.Cancel.",
           "dataType": "constructor",
           "index": 2,
           "fields": []
         },
         {
           "title": "BurnForExpire",
-          "description": "Burn N markers — paired with pool.BatchExpireProcess +\n policy.Expire / policy.BatchExpire. `count` must equal the\n number of consumed policy inputs and the absolute net burn\n quantity.",
           "dataType": "constructor",
           "index": 3,
           "fields": [
@@ -359,32 +351,27 @@
     },
     "aegis/types/OracleProvider": {
       "title": "OracleProvider",
-      "description": "Oracle provider tag. Aegis v7 supports three providers — Charli3\n (mainnet primary), Orcfax (redundant secondary; provider winding down\n 2026-07-31), and AegisSelf (Aegis-published feed; vendor-survival-\n independent fallback). Sum-type semantics give us compile-time\n exhaustivity — adding a new provider in the future requires a redeploy\n that visibly rotates the validator hash, which IS the curated whitelist.\n\n CBOR encoding: `Charli3 = constr_0([])`, `Orcfax = constr_1([])`,\n `AegisSelf = constr_2([])`. Minimal on-chain bytes (1 byte for the\n constr index + empty list of fields).\n\n Why a sum type and not a free-form `oracle_script_hash: ByteArray`:\n   * A free-form ByteArray would require a second runtime check (\"is this\n     hash whitelisted?\"), either as a hardcoded list (which defeats the\n     point — adding a provider would still need a redeploy) or as a separate\n     registry UTxO (large new audit surface). A sum-type variant *is* the\n     whitelist, enforced by Aiken's exhaustivity check on `when` branches.\n   * Type-safe parser dispatch. The validator's\n     `when datum.oracle_provider is { Charli3 -> ... | Orcfax -> ... |\n     AegisSelf -> ... }` branches each call a provider-specific resolver-\n     and-parser without casting Data through unsafe holes.\n\n Trade-off: adding a fourth provider in v8 (e.g., Pyth Lazer once GA on\n Cardano) requires another datum-schema rotation. Frequency of new\n providers we'd actually trust enough to onboard is bounded; each onboarding\n deserves its own audit pass anyway. A datum rotation per onboarding is\n the right cadence.",
       "anyOf": [
         {
           "title": "Charli3",
-          "description": "Charli3 ODV (Oracle Data Verification). Single canonical UTxO at a\n Charli3-controlled validator address, identified by an oracle NFT\n (`oracle_nft` field below carries the NFT policy id). Datum is\n `OracleDatum { price_data: GenericData { Map<Int,Int> } }` with\n keys 0=price (1e6-scaled), 1=created_at, 2=expiry — see\n `aegis/oracle/charli3` for the parser.",
           "dataType": "constructor",
           "index": 0,
           "fields": []
         },
         {
           "title": "Orcfax",
-          "description": "Orcfax V1. Two-layer pointer indirection (FSP -> FS): the consumer\n references both an FSP UTxO (whose datum carries the dynamic FS hash)\n and the FS UTxO whose datum is `FsDat<Rational>`. For Orcfax-bound\n policies, the `oracle_nft` field below carries the FSP script hash\n (NOT the NFT policy id) — see `aegis/oracle/orcfax` for the parser.",
           "dataType": "constructor",
           "index": 1,
           "fields": []
         },
         {
           "title": "AegisSelf",
-          "description": "Aegis-self. We publish ADA/USD ourselves at a UTxO under a\n one-shot-minted NFT (AEGIS_PRICE_FEED_V1) at the publisher wallet's\n payment credential. Same Charli3-compatible CBOR datum format as\n `Charli3` so we reuse the parser; the trust handshake pins both NFT\n policy id (`oracle_nft` field) AND publisher VKH (compile-time\n constant `aegis_self_publisher_vkh`). Vendor-survival-independent —\n keeps Aegis claimable even if Charli3 dissolves and Orcfax sunsets.",
           "dataType": "constructor",
           "index": 2,
           "fields": []
         },
         {
           "title": "Indigo",
-          "description": "Indigo on-chain price oracle. Constructor index 3. 4\n iAssets directly bound (iUSD, iBTC, iETH, iSOL) via\n `indigo_canonical_nfts` + `indigo_oracle_script_hashes` (paired by\n index). Resolver: `oracle/indigo.ak`. Trust handshake: NFT pin +\n per-iAsset oracle script credential pin + single-token-of-policy.\n See V12.2 spec §2.6 for the on-chain architecture.",
           "dataType": "constructor",
           "index": 3,
           "fields": []
@@ -393,7 +380,6 @@
     },
     "aegis/types/PolicyDatum": {
       "title": "PolicyDatum",
-      "description": "The datum stored in each insurance policy UTxO.\n Contains all terms of the insurance contract.\n\n PolicyDatum has 11 positional fields. The new\n `oracle_provider` tag is APPENDED to the end of the schema so existing\n v5 (10-field) policies remain forensically decodable; their datums simply\n fail the v6 `expect pdat: PolicyDatum = raw_pdat` check, which is the\n intended migration semantics — v5 policies are stranded after the v6\n redeploy and must be cleaned up via Expire/Cancel paths against the v5\n validator (still on chain at the v5 hash).",
       "anyOf": [
         {
           "title": "PolicyDatum",
@@ -402,67 +388,54 @@
           "fields": [
             {
               "title": "policy_id",
-              "description": "Unique identifier for this policy (hash of concatenated terms)",
               "$ref": "#/definitions/ByteArray"
             },
             {
               "title": "insured",
-              "description": "Payment key hash of the insured party (beneficiary)",
               "$ref": "#/definitions/aegis~1types~1VerificationKeyHash"
             },
             {
               "title": "strike_price",
-              "description": "ADA/USD price threshold for payout trigger (scaled by 1e6)\n Example: $0.35 = 350_000",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "coverage_amount",
-              "description": "Maximum payout in lovelace\n Example: 5000 ADA = 5_000_000_000",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "premium_paid",
-              "description": "Premium paid by the insured in lovelace",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "start_time",
-              "description": "Policy effective start time (POSIX milliseconds)",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "expiry_time",
-              "description": "Policy expiration time (POSIX milliseconds)",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "oracle_nft",
-              "description": "Provider-dependent oracle handle. Field name retained for v5\n backwards-compat at the schema level, but semantics now branch on\n `oracle_provider`:\n   * `Charli3` -> Charli3 oracle NFT policy id (matches a token in the\n     value of the canonical oracle UTxO at `charli3_oracle_script_hash`).\n   * `Orcfax`  -> Orcfax FSP (Feed Source Pointer) script hash. The FS\n     hash itself is resolved at runtime by reading the FSP datum, so it\n     does NOT live in the policy datum.",
               "$ref": "#/definitions/ByteArray"
             },
             {
               "title": "pool_script_hash",
-              "description": "Payment script hash of the pool validator for returning funds",
               "$ref": "#/definitions/aegis~1types~1ScriptHash"
             },
             {
               "title": "pool_nft",
-              "description": "NFT identifying the canonical pool. Used by Claim/Expire/Cancel\n to verify that the residual is sent to the REAL pool UTxO (one carrying\n `pool_nft`), not just any UTxO at `pool_script_hash`. Without this binding\n an attacker could route policy residuals to a stuck UTxO at the pool address\n that the pool validator can't subsequently spend.",
               "$ref": "#/definitions/ByteArray"
             },
             {
               "title": "oracle_provider",
-              "description": "Oracle provider tag. Selects the parser (and trust handshake)\n used at Claim/BatchClaim/Cancel time. Aegis v6 ships `Charli3` (default\n primary) and `Orcfax` (redundant secondary) so a single oracle outage,\n deprecation, or governance breakdown cannot brick the protocol. Pinned\n at policy-creation time and immutable for the policy's lifetime —\n ensures the trust handshake the insured agreed to at premium-payment\n time is the same one enforced at claim time.",
               "$ref": "#/definitions/aegis~1types~1OracleProvider"
             },
             {
               "title": "partner_address",
-              "description": "Optional partner address that receives a share of the 2%\n protocol fee. Set at policy-creation time and immutable. None means\n the entire protocol fee flows to `team_address` (solo policy); Some(addr)\n requires `partner_share_bps > 0` and routes `partner_cut` to that\n address.\n\n Trust model: caller-supplied. Anyone can set any address. A caller\n setting an attacker-controlled `partner_address` is self-pwning\n (diverting their own fees away from the team to a wallet they don't\n control); the protocol incurs no risk. Partner registry / lookup is\n a frontend UX concern (post-V12 follow-up).",
               "$ref": "#/definitions/Option<cardano~1address~1Address>"
             },
             {
               "title": "partner_share_bps",
-              "description": "Partner share of the protocol fee in basis points of the\n fee (NOT of the premium). 0..=2000 (capped by validator at\n `partner_share_cap_bps`). Set at policy-creation time and immutable.\n\n Validator invariants:\n   * `partner_share_bps >= 0` (defensive; rejects signed-int weirdness)\n   * `partner_share_bps <= partner_share_cap_bps` (= 2000 bps = 20% of fee)\n   * `partner_address == None` => `partner_share_bps == 0`\n   * `partner_address == Some(_)` => no lower-bound on partner_share_bps;\n     a 0-share partner is legal (treated as a \"credit\" — partner is\n     recorded in the datum for analytics but receives no lovelace)",
               "$ref": "#/definitions/Int"
             }
           ]
@@ -471,39 +444,33 @@
     },
     "aegis/types/PolicyRedeemer": {
       "title": "PolicyRedeemer",
-      "description": "Actions that can be performed on a policy UTxO",
       "anyOf": [
         {
           "title": "Claim",
-          "description": "Trigger an insurance payout (single policy per tx).",
           "dataType": "constructor",
           "index": 0,
           "fields": []
         },
         {
           "title": "BatchClaim",
-          "description": "Batch-claim multiple policies in a single transaction.",
           "dataType": "constructor",
           "index": 1,
           "fields": []
         },
         {
           "title": "Expire",
-          "description": "Reclaim funds after policy has expired (single).",
           "dataType": "constructor",
           "index": 2,
           "fields": []
         },
         {
           "title": "BatchExpire",
-          "description": "Batch-expire multiple policies in a single transaction.",
           "dataType": "constructor",
           "index": 3,
           "fields": []
         },
         {
           "title": "Cancel",
-          "description": "Cancel a policy within the cancellation window.",
           "dataType": "constructor",
           "index": 4,
           "fields": []
@@ -512,7 +479,6 @@
     },
     "aegis/types/PoolDatum": {
       "title": "PoolDatum",
-      "description": "The datum stored in the liquidity pool UTxO.\n Tracks aggregate pool state.",
       "anyOf": [
         {
           "title": "PoolDatum",
@@ -521,32 +487,26 @@
           "fields": [
             {
               "title": "total_liquidity",
-              "description": "Total ADA deposited by liquidity providers (lovelace)",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "active_coverage",
-              "description": "ADA currently reserved as coverage for active policies (lovelace)",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "lp_token_policy",
-              "description": "Minting policy ID for LP tokens",
               "$ref": "#/definitions/ByteArray"
             },
             {
               "title": "protocol_fee_bps",
-              "description": "Protocol fee in basis points (e.g., 200 = 2%)",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "pool_nft",
-              "description": "NFT identifying this unique pool UTxO",
               "$ref": "#/definitions/ByteArray"
             },
             {
               "title": "lp_supply",
-              "description": "Outstanding aLP token supply.\n Tracked on-chain so the pool validator can verify the exact mint or\n burn quantity matches `calculate_lp_mint` / `calculate_withdrawal`,\n preventing direction-flip attacks (mint during Remove, burn during Add).",
               "$ref": "#/definitions/Int"
             }
           ]
@@ -555,99 +515,83 @@
     },
     "aegis/types/PoolRedeemer": {
       "title": "PoolRedeemer",
-      "description": "Actions that can be performed on the pool UTxO",
       "anyOf": [
         {
           "title": "Underwrite",
-          "description": "Reserve coverage for a new insurance policy (single)",
           "dataType": "constructor",
           "index": 0,
           "fields": [
             {
               "title": "coverage",
-              "description": "Coverage amount in lovelace to reserve",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "premium",
-              "description": "Premium collected in lovelace",
               "$ref": "#/definitions/Int"
             }
           ]
         },
         {
           "title": "ProcessClaim",
-          "description": "Process a claim payout from the pool. The\n `policy_script` redeemer field has been removed — the validator now\n resolves the policy script credential via the pool_validator's\n compile-time `policy_script_hash` parameter, closing the surface\n where an attacker-deployed permissive script could be supplied via\n the redeemer to drain the pool through fake `PolicyDatum` UTxOs.",
           "dataType": "constructor",
           "index": 1,
           "fields": [
             {
               "title": "payout",
-              "description": "Amount to pay out in lovelace",
               "$ref": "#/definitions/Int"
             }
           ]
         },
         {
           "title": "AddLiquidity",
-          "description": "Deposit ADA into the liquidity pool",
           "dataType": "constructor",
           "index": 2,
           "fields": [
             {
               "title": "amount",
-              "description": "Amount being deposited in lovelace",
               "$ref": "#/definitions/Int"
             }
           ]
         },
         {
           "title": "RemoveLiquidity",
-          "description": "Withdraw ADA from the liquidity pool",
           "dataType": "constructor",
           "index": 3,
           "fields": [
             {
               "title": "amount",
-              "description": "Amount being withdrawn in lovelace",
               "$ref": "#/definitions/Int"
             }
           ]
         },
         {
           "title": "BatchUnderwrite",
-          "description": "Batch-underwrite: create N policies in a single transaction",
           "dataType": "constructor",
           "index": 4,
           "fields": [
             {
               "title": "total_coverage",
-              "description": "Total coverage across all policies",
               "$ref": "#/definitions/Int"
             },
             {
               "title": "total_premium",
-              "description": "Total premium collected across all policies",
               "$ref": "#/definitions/Int"
             }
           ]
         },
         {
           "title": "BatchExpireProcess",
-          "description": "Process batch-expire: return expired policy funds to pool.",
           "dataType": "constructor",
           "index": 5,
           "fields": [
             {
               "title": "total_returned",
-              "description": "Total lovelace being returned from expired policies",
               "$ref": "#/definitions/Int"
             }
           ]
         },
         {
           "title": "AcceptCancellation",
-          "description": "Process a cancellation. Consumes a Cancel-redeemed policy,\n sends the canonical refund (90% of premium) to the insured, decrements\n `active_coverage` by the consumed policy's coverage, and retains the\n 10% cancellation fee in the pool. The refund magnitude is derived\n on-chain from the consumed policy's `premium_paid` (NOT a caller-\n controlled amount), so an over-refund cannot drain the pool.\n\n `policy_script` removed; validator uses the\n parameterized `policy_script_hash`.",
           "dataType": "constructor",
           "index": 6,
           "fields": []

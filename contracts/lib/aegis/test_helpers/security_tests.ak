@@ -31,9 +31,8 @@ use aegis/types.{
   Cancel, Charli3, Claim, Expire, Indigo, MarkerRedeemer, MintMarkers, Orcfax,
   PolicyDatum, PoolDatum, cancellation_window, charli3_oracle_script_hash,
   min_utxo_lovelace, orcfax_ada_usd_feed_id, orcfax_freshness_window_ms,
-  orcfax_fsp_script_hash_mainnet, orcfax_fsp_script_hash_preview,
-  partner_share_cap_bps, policy_marker_asset_name, team_address,
-  treasury_share_bps,
+  orcfax_fsp_script_hash, partner_share_cap_bps, policy_marker_asset_name,
+  team_address, treasury_share_bps,
 }
 use aegis/validation.{
   find_canonical_pool_output, pool_is_consumed_via_nft,
@@ -1041,16 +1040,13 @@ test green_v6_orcfax_provider_dispatches_to_orcfax_parser() {
 }
 
 test green_v6_orcfax_fsp_script_hash_check_matches_constant() {
-  // The mainnet FSP script hash constant in `aegis/types` must equal the
-  // value sourced from <https://docs.orcfax.io/consume>. Any drift from
-  // upstream — e.g., an Aiken-side typo — would silently route consumer txs
-  // to a non-existent address and brick claims for Orcfax-bound policies.
-  // Pin the bytes here as a regression check.
+  // Active-network FSP must equal one of the two upstream-canonical
+  // values (preview/preprod or mainnet). Drift surfaces as a brick.
   let mainnet_expected: ByteArray =
     #"8793893b5dda6a513ba63c80e9d7b2d4f108060c11979bfc7d863ff0"
   let preview_expected: ByteArray =
     #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230"
-  orcfax_fsp_script_hash_mainnet == mainnet_expected && orcfax_fsp_script_hash_preview == preview_expected
+  orcfax_fsp_script_hash == mainnet_expected || orcfax_fsp_script_hash == preview_expected
 }
 
 test green_v6_charli3_oracle_script_hash_unchanged_from_v5() {
@@ -1961,8 +1957,9 @@ test redteam_round_7_r7_b_batch_oracles_uniform_accepts_aegis_self_pair() {
 // ---------------------------------------------------------------------------
 
 test redteam_round_7_r7_c_orcfax_fsp_constants_still_in_tree() {
-  // Both per-network FSP hashes must remain in tree.
-  orcfax_fsp_script_hash_preview == #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230" && orcfax_fsp_script_hash_mainnet == #"8793893b5dda6a513ba63c80e9d7b2d4f108060c11979bfc7d863ff0"
+  // Active-network FSP must remain in tree and be one of the two
+  // upstream-pinned values.
+  orcfax_fsp_script_hash == #"0690081bc113f74e04640ea78a87d88abbd2f18831c44c4064524230" || orcfax_fsp_script_hash == #"8793893b5dda6a513ba63c80e9d7b2d4f108060c11979bfc7d863ff0"
 }
 
 // ---------------------------------------------------------------------------
