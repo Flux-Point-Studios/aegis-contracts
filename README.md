@@ -91,6 +91,17 @@ aegis-contracts/
 
 ## Audit posture (2026-05-12)
 
+> **Update — 2026-05-29 (post-launch readiness).** Since this section was written the
+> contracts advanced through Rounds 11–17, received a **TESTNET-GREEN** verdict from an
+> external contracts audit (UTxO Company / Anastasia Labs engineers, EXT-01…EXT-21
+> closed), and then passed a **mainnet live-fire red-team** — four autonomous agents
+> attacking the *live mainnet deployment with real ADA*, 160+ attack transactions across
+> validator / economic-oracle / API / coordinated-collusion surfaces, **all rejected,
+> zero value extracted.** The one issue found (LP-token locality) was fixed and
+> **bytecode-verified closed**. Full catalog and results:
+> [`redteam/MAINNET_LIVE_FIRE_REDTEAM.md`](redteam/MAINNET_LIVE_FIRE_REDTEAM.md). The
+> finding tally below reflects the 2026-05-12 R7 snapshot and is retained for history.
+
 - **Total findings to date:** 41 (across 7 rounds of internal red-team)
 - **Closed:** 27 — A-001..A-016 + A-019..A-027 + L-003 + L-006 + Charli3 NFT pin extension + R7-A + R7-B
 - **Open:** 14 — 1 HIGH (L-002, batch-expire multi-policy aggregation — likely MED in practice), the rest MED/LOW/INFO with documented deferral rationale (see [`docs/audit/SECURITY_AUDIT_REPORT.md`](docs/audit/SECURITY_AUDIT_REPORT.md) and [`redteam/V12.2_ROUND_7_REPORT.md`](redteam/V12.2_ROUND_7_REPORT.md)). No CRITICAL findings open.
