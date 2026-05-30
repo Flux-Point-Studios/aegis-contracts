@@ -1,5 +1,23 @@
 # Security Audit Report: Aegis Parametric Insurance Protocol
 
+> ## Current status — 2026-05-29
+>
+> **Aegis is live on Cardano mainnet (V12.2 + R17).** Since this report was first
+> written (April 30, 2026, covering v0–v5), the protocol advanced through internal
+> red-team Rounds 1–17, closed an **external third-party contracts audit with a
+> TESTNET-GREEN verdict** (EXT-01…EXT-21 closed), and passed a **mainnet live-fire
+> red-team** (160+ real-ADA attacks, all rejected, zero value extracted; the one issue
+> found — LP-token locality — was fixed and bytecode-verified closed).
+>
+> **Everything below is the historical, finding-by-finding record.** Statements of the
+> form "not safe for mainnet until…" or "pending external sign-off" reflect the
+> protocol's status *at the time each section was written*, not today — every finding
+> referenced has since been closed. Current deployment facts are in the repository
+> [README](../../README.md); the live-fire catalog is in
+> [`redteam/MAINNET_LIVE_FIRE_REDTEAM.md`](../../redteam/MAINNET_LIVE_FIRE_REDTEAM.md).
+>
+> ---
+
 **Date:** April 30, 2026
 **Validator Versions:**
 - `policy.policy_validator` — v0.1.0
@@ -21,7 +39,7 @@
 - `lp_token.lp_token_policy`: `5052905c...` (parameter-free baseline) cascades with pool's hash via parameterization — currently `ffa6d4ad...`.
 - `pool_nft.pool_nft`: re-parameterized per deploy with the operator's init UTxO; current `9e56198e...`.
 
-**Audit Status:** 🟢 **A-001..A-016 + A-019..A-025 closed across v0..v5. 22 of 24 findings remediated. Remaining: A-017 (Info — off-chain audit pending) and A-018 (Info — Materios bridge deferred to post-v1 roadmap). Mainnet readiness: pending external auditor sign-off + the off-chain audit pass.**
+**Audit Status (as of this April-30 report):** 🟢 **A-001..A-016 + A-019..A-025 closed across v0..v5. 22 of 24 findings remediated. Remaining at the time: A-017 (Info — off-chain audit pending) and A-018 (Info — Materios bridge deferred to post-v1 roadmap).** _Superseded — see the **Current status** banner above: the protocol is now live on mainnet (V12.2 + R17) with an external third-party TESTNET-GREEN verdict and a passed mainnet live-fire red-team._
 
 **Live red-team summary across 3 rounds (2026-04-30):**
 - **Round 1 (static + Aiken):** A-001..A-020 documented. 15 fixed in v0/v1.
