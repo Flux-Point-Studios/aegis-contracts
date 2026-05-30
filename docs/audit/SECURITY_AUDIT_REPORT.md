@@ -147,7 +147,7 @@ A separate work stream is updating `offchain/src/*`, `sdk/src/*`, and `api/serve
 
 A-009 through A-013 (Priority-2: stake hijacking, in-the-money cancel, single-canonical-pool enforcement, batch oracle uniformity, helper greediness — note A-013's `sum_lovelace_to_pkh` switch was already made as part of A-006, but the residual A-013 cleanup is on the Priority-2 list) and A-014 through A-016 (Priority-3/4) remain 🔴 Open. A-017 / A-018 are scope notes (off-chain and Materios bridge respectively) and remain 📝 Documented.
 
-The protocol is **still not safe for mainnet** until Priority-2/3/4 are closed and an external auditor (Anastasia Labs / MLabs / Tweag or equivalent) has signed off on the full remediated contract set.
+The protocol is **still not safe for mainnet** until Priority-2/3/4 are closed and an external third party has signed off on the full remediated contract set.
 
 ---
 
@@ -1948,7 +1948,7 @@ The 2026-04-30 remediation addresses all three classes via a single coordinated 
 3. **Implement Priority 2 fixes (A-009 through A-013).** In flight under a parallel work stream. Stake-credential hardening, in-the-money cancel guard, single-canonical-pool review, BatchClaim oracle uniformity, and the residual `find_output_to_pkh` cleanup.
 4. **Implement Priority 3/4 fixes (A-014 through A-016).** Ratio-truncation, `start_time` upper bound, and the explicit Charli3 oracle script-hash pin.
 5. **Re-run this audit internally, confirm all findings closed.** Once the off-chain transaction builders are updated for the new `pool_nft` / `lp_supply` datum fields, run end-to-end mainnet-fork tests covering every redeemer.
-6. **Engage an external Cardano-experienced auditor** (Anastasia Labs, MLabs, Tweag, or equivalent) for the full remediated contract set.
+6. **Engage an external third-party auditor** for the full remediated contract set.
 7. **Only then proceed to mainnet.**
 
 The 2,286 lines of Aiken originally under audit have grown to roughly 2,500 with the new fields and helpers, plus 527 lines of test fixtures and security tests. The Priority-1 remediation closed the cross-validator boundary issues that were the protocol's weakest surface; what remains is hardening against the more specialized attack vectors covered in A-009 through A-016.

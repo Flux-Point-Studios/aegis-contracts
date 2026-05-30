@@ -186,7 +186,7 @@ This is a clean separation. The policy validator does not gain any new responsib
 
 ### 3.5 Cited prior art
 
-- Aiken Common Design Patterns: "to prevent double satisfaction, outputs aren't counted multiple times across multiple executions of the validator (for each input validation). This can be achieved by tagging outputs with a value which is unique to the input." See aiken-lang.org/fundamentals/common-design-patterns and Anastasia-Labs/aiken-design-patterns.
+- Aiken Common Design Patterns: "to prevent double satisfaction, outputs aren't counted multiple times across multiple executions of the validator (for each input validation). This can be achieved by tagging outputs with a value which is unique to the input." See aiken-lang.org/fundamentals/common-design-patterns.
 - Vacuumlabs: "Cardano Vulnerabilities #1 — Double Satisfaction" — the canonical write-up of the class.
 - Internal A-008 (`SECURITY_AUDIT_REPORT.md:1059-1158`) — same class, output-side. The treasury-donation case is the body-side analog and we resolve it via the same principle: **read the shared resource exactly once, in one validator's hot path, and scope obligations to that path.**
 

@@ -8,7 +8,7 @@ The protocol is **live on Cardano mainnet** (V12.2 + R17). The off-chain backend
 monitoring bot, frontend, SDK) lives in a separate repository and is not included here.
 
 - **Status:** mainnet-live · `Plutus V3` (Conway) · Aiken `v1.1.22+39d6b04`
-- **External audit:** TESTNET-**GREEN** — UTxO Company / Anastasia Labs engineers (EXT-01…EXT-21 closed)
+- **External audit:** TESTNET-**GREEN** — an external third party (EXT-01…EXT-21 closed)
 - **Tests:** 473 Aiken tests, 0 failures (`aiken check`)
 - **Final pre-launch gate:** mainnet live-fire red-team — 160+ real-ADA attacks, all rejected, zero value extracted ([report](redteam/MAINNET_LIVE_FIRE_REDTEAM.md))
 
@@ -74,7 +74,7 @@ process — all completed before mainnet launch.
 | Layer | Coverage | Outcome |
 |-------|----------|---------|
 | Internal red-team (Rounds 1–17) | Adversarial review of every redeemer, V5 → V12.2+R17 | All findings closed with regression tests |
-| External audit | UTxO Company / Anastasia Labs (contracts scope) | TESTNET-**GREEN**; EXT-01…EXT-21 closed |
+| External audit | External third party (contracts scope) | TESTNET-**GREEN**; EXT-01…EXT-21 closed |
 | Symbolic execution | Z3-backed formal slice of core spend/mint paths | 27/27 properties proven |
 | Property / differential fuzzing | Aiken property tests + Python differential fuzzer | No invariant violations |
 | **Mainnet live-fire** | 4 autonomous agents vs the live deployment, real ADA | **0 exploits, 0 value extracted** |
