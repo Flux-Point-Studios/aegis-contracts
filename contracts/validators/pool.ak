@@ -8,10 +8,10 @@ use aegis/pricing.{
   calculate_refund, calculate_treasury_cut, is_premium_adequate, net_premium,
 }
 use aegis/types.{
-  AcceptCancellation, AddLiquidity, BatchExpireProcess, BatchUnderwrite,
-  BurnForCancel, BurnForClaim, BurnForExpire, MarkerRedeemer, MintMarkers,
-  PolicyDatum, PoolDatum, PoolRedeemer, ProcessClaim, RemoveLiquidity,
-  Underwrite, min_utxo_lovelace, partner_share_cap_bps,
+  AcceptCancellation, AddLiquidity, AegisSelf, BatchExpireProcess,
+  BatchUnderwrite, BurnForCancel, BurnForClaim, BurnForExpire, MarkerRedeemer,
+  MintMarkers, PolicyDatum, PoolDatum, PoolRedeemer, ProcessClaim,
+  RemoveLiquidity, Underwrite, min_utxo_lovelace, partner_share_cap_bps,
   policy_marker_asset_name, team_address, treasury_share_bps,
 }
 use aegis/validation.{
@@ -39,11 +39,12 @@ use cardano/address.{Address, VerificationKey}
 
 use aiken/collection/list
 use aiken/collection/pairs
+use aiken/interval.{Finite, Interval, IntervalBound}
 use cardano/address.{Script}
 use cardano/assets
 use cardano/transaction.{
-  InlineDatum, Input, Mint, Output, OutputReference, Redeemer, ScriptPurpose,
-  Transaction, ValidityRange,
+  InlineDatum, Input, Mint, NoDatum, Output, OutputReference, Redeemer,
+  ScriptPurpose, Transaction, ValidityRange,
 }
 
 // ---------------------------------------------------------------------------
@@ -889,7 +890,17 @@ validator pool_validator(
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        coverage_positive && premium_positive && coverage_min_utxo && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && no_policy_inputs
+        // [NN-A-3] aLP-mint authorization. lp_token_policy authorizes minting
+        // "aLP" on ANY pool spend (it only checks `pool_is_consumed`), so an
+        // Underwrite tx could co-mint aLP to a wallet with no ADA deposit and
+        // no lp_supply increment — later burned via RemoveLiquidity to drain
+        // the pool. Underwrite must NEITHER mint nor burn aLP; aLP can only
+        // net-change via Add/Remove, which carry the full LP accounting.
+        // Symmetric with the marker_qty_zero pin above.
+        let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
+        let no_lp_mint = lp_mint_qty == 0
+
+        coverage_positive && premium_positive && coverage_min_utxo && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1015,7 +1026,14 @@ validator pool_validator(
         let exactly_one_policy_input =
           count_script_inputs(inputs, policy_script_hash) == 1
 
-        payout_positive && policy_consumed && datum_ok && immutable_ok && value_ok && remains_non_negative && policy_has_marker && marker_burn_ok && marker_redeemer_ok && marker_locality_ok && exactly_one_policy_input
+        // [NN-A-3] aLP-mint authorization. ProcessClaim must NEITHER mint nor
+        // burn aLP — lp_token_policy would otherwise authorize a co-minted
+        // aLP on this pool spend with no lp_supply change. See the Underwrite
+        // arm for the full rationale.
+        let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
+        let no_lp_mint = lp_mint_qty == 0
+
+        payout_positive && policy_consumed && datum_ok && immutable_ok && value_ok && remains_non_negative && policy_has_marker && marker_burn_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint && exactly_one_policy_input
       }
 
       // -----------------------------------------------------------------------
@@ -1085,10 +1103,24 @@ validator pool_validator(
           count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
         let marker_locality_ok = marker_inputs == 0 && marker_outputs == 0
 
+        // [NN-A-3] LP-token locality. Symmetric with the marker-locality
+        // pattern above. The branch verifies the LP MINT quantity (==
+        // lp_supply delta) and the ADA value, but without this check it
+        // never constrains WHERE the freshly-minted aLP tokens go. A
+        // red-team tx deposited ADA but routed the minted aLP INTO the
+        // pool's own continuation output, and the validator accepted it —
+        // creating an orphaned in-pool LP claim that anyone could later
+        // burn-from-pool to withdraw ADA they never deposited. Pin the
+        // pool continuation to ZERO aLP: the pool UTxO holds only ADA +
+        // the pool NFT, never aLP. Minted LP must land on a wallet output.
+        let pool_out_aLP_qty =
+          assets.quantity_of(cont_output.value, datum.lp_token_policy, "aLP")
+        let pool_out_no_lp = pool_out_aLP_qty == 0
+
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        amount_positive && datum_ok && immutable_ok && value_ok && lp_minted && marker_qty_zero && marker_locality_ok && no_policy_inputs
+        amount_positive && datum_ok && immutable_ok && value_ok && lp_minted && marker_qty_zero && marker_locality_ok && pool_out_no_lp && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1160,10 +1192,21 @@ validator pool_validator(
           count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
         let marker_locality_ok = marker_inputs == 0 && marker_outputs == 0
 
+        // [NN-A-3] LP-token locality. Symmetric with AddLiquidity and the
+        // marker-locality pattern. The withdrawal burns aLP (mint_qty < 0)
+        // and shrinks the pool by `amount`, but nothing forbids leaving aLP
+        // sitting in the pool continuation. Pinning the continuation to
+        // ZERO aLP guarantees burned LP cannot be parked back in the pool
+        // and that no orphaned in-pool LP can survive a RemoveLiquidity —
+        // the pool UTxO holds only ADA + the pool NFT, never aLP.
+        let pool_out_aLP_qty =
+          assets.quantity_of(cont_output.value, datum.lp_token_policy, "aLP")
+        let pool_out_no_lp = pool_out_aLP_qty == 0
+
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero && marker_locality_ok && no_policy_inputs
+        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero && marker_locality_ok && pool_out_no_lp && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1362,7 +1405,14 @@ validator pool_validator(
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && batch_totals.all_policy_outputs_valid && no_policy_inputs
+        // [NN-A-3] aLP-mint authorization. BatchUnderwrite must NEITHER mint
+        // nor burn aLP — lp_token_policy would otherwise authorize a co-minted
+        // aLP on this pool spend with no lp_supply change. See the Underwrite
+        // arm for the full rationale.
+        let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
+        let no_lp_mint = lp_mint_qty == 0
+
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && batch_totals.all_policy_outputs_valid && no_lp_mint && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1487,7 +1537,14 @@ validator pool_validator(
 
         let all_policy_inputs_accounted = policies_consumed_total == consumed_n
 
-        returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative && marker_burn_ok && marker_redeemer_ok && marker_locality_ok && all_policy_inputs_accounted
+        // [NN-A-3] aLP-mint authorization. BatchExpireProcess must NEITHER
+        // mint nor burn aLP — lp_token_policy would otherwise authorize a
+        // co-minted aLP on this pool spend with no lp_supply change. See the
+        // Underwrite arm for the full rationale.
+        let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
+        let no_lp_mint = lp_mint_qty == 0
+
+        returned_positive && policies_consumed && consumed_policies_match && datum_ok && immutable_ok && value_ok && remains_non_negative && marker_burn_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint && all_policy_inputs_accounted
       }
 
       // -----------------------------------------------------------------------
@@ -1723,7 +1780,14 @@ validator pool_validator(
             policy_script_hash,
           )
 
-        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && single_policy_input && policy_has_marker && marker_burn_ok && marker_redeemer_ok && marker_locality_ok
+        // [NN-A-3] aLP-mint authorization. AcceptCancellation must NEITHER
+        // mint nor burn aLP — lp_token_policy would otherwise authorize a
+        // co-minted aLP on this pool spend with no lp_supply change. See the
+        // Underwrite arm for the full rationale.
+        let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
+        let no_lp_mint = lp_mint_qty == 0
+
+        policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && single_policy_input && policy_has_marker && marker_burn_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint
       }
     }
   }
@@ -1849,3 +1913,362 @@ test withdrawal_unsafe_check() {
   // After: 70 ADA total, 80 ADA active -> insolvent!
   can_withdraw(100_000_000, 80_000_000, 30_000_000) == False
 }
+
+// ---------------------------------------------------------------------------
+// [NN-A-3] LP-token locality regression tests.
+//
+// The AddLiquidity and RemoveLiquidity arms now assert the pool
+// continuation output carries ZERO aLP tokens:
+//   assets.quantity_of(cont_output.value, datum.lp_token_policy, "aLP") == 0
+// These tests build a pool-continuation output Value and exercise that
+// exact predicate (the same expression the validator ANDs into each
+// branch's success conjunction).
+//
+// Attack closed: a deposit that routes the freshly-minted aLP INTO the
+// pool's own continuation output creates an orphaned in-pool LP claim that
+// anyone could later burn-from-pool to withdraw ADA they never deposited.
+// With pool_out_no_lp pinned True, minted LP can only land on a wallet
+// output, and no orphaned in-pool LP can exist to burn.
+// ---------------------------------------------------------------------------
+
+// Canonical LP-token policy id used by these locality tests (mirrors
+// `lp_token_policy` in the pool datum). Arbitrary deterministic 28-byte
+// handle — the assertion only cares about (policy, "aLP") presence.
+const nna3_lp_policy: ByteArray =
+  #"0402df9c420213421d894b00ee5b23391cb36dc3c2a436b48229c10a"
+
+const nna3_pool_nft_policy: ByteArray =
+  #"deadbeef00112233445566778899aabbccddeeff00112233445566"
+
+const nna3_pool_nft_name: ByteArray = #"414547495350"
+
+// A clean pool continuation value: ADA + pool NFT, NO aLP.
+fn nna3_pool_value_clean(lovelace: Int) -> assets.Value {
+  assets.from_lovelace(lovelace)
+    |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1)
+}
+
+// A poisoned pool continuation value: ADA + pool NFT + parked aLP.
+fn nna3_pool_value_with_lp(lovelace: Int, lp_qty: Int) -> assets.Value {
+  nna3_pool_value_clean(lovelace)
+    |> assets.add(nna3_lp_policy, "aLP", lp_qty)
+}
+
+// (1) AddLiquidity routing minted aLP INTO the pool continuation now FAILS
+// the locality pin (the orphaned-LP attack).
+test nna3_add_liquidity_lp_parked_in_pool_fails() {
+  let poisoned = nna3_pool_value_with_lp(105_000_000, 5_000_000)
+  let pool_out_no_lp =
+    assets.quantity_of(poisoned, nna3_lp_policy, "aLP") == 0
+  // Attack output leaves aLP in the pool -> predicate is False -> branch
+  // rejects.
+  pool_out_no_lp == False
+}
+
+// (2) RemoveLiquidity with aLP left in / burned-from the pool continuation
+// FAILS the locality pin (symmetric).
+test nna3_remove_liquidity_lp_left_in_pool_fails() {
+  let poisoned = nna3_pool_value_with_lp(95_000_000, 1)
+  let pool_out_no_lp =
+    assets.quantity_of(poisoned, nna3_lp_policy, "aLP") == 0
+  pool_out_no_lp == False
+}
+
+// (3) Green-path AddLiquidity: minted aLP goes to a wallet output, pool
+// continuation carries 0 aLP -> predicate PASSES.
+test nna3_add_liquidity_lp_to_wallet_passes() {
+  let clean = nna3_pool_value_clean(105_000_000)
+  let pool_out_no_lp =
+    assets.quantity_of(clean, nna3_lp_policy, "aLP") == 0
+  pool_out_no_lp
+}
+
+// (4) Green-path RemoveLiquidity: pool continuation carries 0 aLP after
+// the burn -> predicate PASSES.
+test nna3_remove_liquidity_clean_pool_passes() {
+  let clean = nna3_pool_value_clean(95_000_000)
+  let pool_out_no_lp =
+    assets.quantity_of(clean, nna3_lp_policy, "aLP") == 0
+  pool_out_no_lp
+}
+
+// ---------------------------------------------------------------------------
+// [NN-A-3 continuation] aLP-mint authorization on the NON-LP pool arms.
+//
+// `lp_token_policy` (validators/lp_token.ak) authorizes minting "aLP" on
+// merely `pool_is_consumed` — ANY input at the pool script hash, not a
+// redeemer-specific spend. PR #19 added the aLP-locality pin
+// (`pool_out_no_lp`) ONLY to AddLiquidity / RemoveLiquidity. The other five
+// arms (Underwrite, ProcessClaim, BatchUnderwrite, BatchExpireProcess,
+// AcceptCancellation) freeze `lp_supply` but never inspected the `mint`
+// field for aLP. So a tx that spends the pool via a legit arm (e.g.
+// Underwrite) could ALSO co-mint N aLP to the attacker's wallet:
+// lp_token_policy authorizes it (pool consumed, name "aLP", qty > 0) and the
+// Underwrite arm didn't look at the mint — producing aLP with no ADA deposit
+// and no lp_supply increment, later burned via RemoveLiquidity to drain ADA.
+//
+// Fix (mirrors the marker_qty_zero pattern): each non-LP arm now requires
+//   assets.quantity_of(mint, datum.lp_token_policy, "aLP") == 0
+// i.e. these arms must NEITHER mint nor burn aLP — net-zero. aLP can only
+// net-change via Add/Remove, which carry the full LP accounting.
+//
+// These are full-Transaction tests: they construct a complete, otherwise-
+// valid Underwrite / BatchUnderwrite tx and invoke `pool_validator.spend`
+// directly. The green-path companion (aLP mint == 0) must stay accepted; the
+// exploit (positive aLP co-mint to a non-pool output) must be rejected.
+// ---------------------------------------------------------------------------
+
+// Validator parameters for the integration tests.
+const nna4_pool_script_hash: ByteArray =
+  #"c366b0ea2667b432a432999f54e11978c0ed37c7c4b971067fb1589f"
+
+const nna4_policy_script_hash: ByteArray =
+  #"8ea5aed0e4f66e9ce6593fbed30856c8997441b1e5cd8bc3085e943f"
+
+const nna4_marker_policy_id: ByteArray =
+  #"9f0e6e2c2a3b4c5d6e7f8091a2b3c4d5e6f70819a2b3c4d5e6f70819"
+
+// A canonical AegisSelf oracle NFT (preprod allowlist head). AegisSelf is the
+// only provider whose `is_canonical_oracle_nft` can return True for a fixed
+// handle, so the policy-output oracle pin uses it.
+const nna4_oracle_nft: ByteArray =
+  #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f"
+
+const nna4_attacker_pkh: ByteArray =
+  #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+const nna4_tx_id: ByteArray =
+  #"0000000000000000000000000000000000000000000000000000000000000000"
+
+// Underwrite economics (default pool, 200 bps fee):
+//   coverage = premium = 100 ADA
+//   fee_total = max(2 ADA, 100 ADA * 200/10_000 = 2 ADA) = 2 ADA
+//   net_pool_growth = 100 ADA - 2 ADA = 98 ADA
+//   team_cut = 2 ADA (solo, partner_share 0)
+//   treasury_cut = 100 ADA * 200/10_000 * 2_500/10_000 = 0.5 ADA
+const nna4_coverage: Int = 100_000_000
+
+const nna4_premium: Int = 100_000_000
+
+const nna4_pool_in_lovelace: Int = 500_000_000_000
+
+const nna4_net_pool_growth: Int = 98_000_000
+
+const nna4_team_cut: Int = 2_000_000
+
+const nna4_treasury_cut: Int = 500_000
+
+// Validity range covering the policy start_time.
+fn nna4_validity() -> ValidityRange {
+  Interval {
+    lower_bound: IntervalBound {
+      bound_type: Finite(1_700_100_000_000),
+      is_inclusive: True,
+    },
+    upper_bound: IntervalBound {
+      bound_type: Finite(1_700_100_300_000),
+      is_inclusive: True,
+    },
+  }
+}
+
+fn nna4_pool_addr() -> Address {
+  Address { payment_credential: Script(nna4_pool_script_hash), stake_credential: None }
+}
+
+fn nna4_pool_datum() -> PoolDatum {
+  PoolDatum {
+    total_liquidity: 1_000_000_000_000,
+    active_coverage: 100_000_000_000,
+    lp_token_policy: nna3_lp_policy,
+    protocol_fee_bps: 200,
+    pool_nft: nna3_pool_nft_policy,
+    lp_supply: 1_000_000_000_000,
+  }
+}
+
+// Pool input UTxO: ADA + pool NFT, at the pool script address.
+fn nna4_pool_input() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: nna4_tx_id,
+      output_index: 0,
+    },
+    output: Output {
+      address: nna4_pool_addr(),
+      value: assets.from_lovelace(nna4_pool_in_lovelace)
+        |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+      datum: InlineDatum(nna4_pool_datum()),
+      reference_script: None,
+    },
+  }
+}
+
+// Pool continuation output: grows by net_pool_growth, carries the pool NFT,
+// holds ZERO aLP, and embeds the post-Underwrite datum (lp_supply frozen).
+fn nna4_pool_continuation() -> Output {
+  let new_datum =
+    PoolDatum {
+      ..nna4_pool_datum(),
+      total_liquidity: 1_000_000_000_000 + nna4_net_pool_growth,
+      active_coverage: 100_000_000_000 + nna4_coverage,
+    }
+  Output {
+    address: nna4_pool_addr(),
+    value: assets.from_lovelace(nna4_pool_in_lovelace + nna4_net_pool_growth)
+      |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+    datum: InlineDatum(new_datum),
+    reference_script: None,
+  }
+}
+
+// Newly-created policy output: at the policy script, lovelace == coverage,
+// carries exactly one marker, with a canonical (AegisSelf) oracle pin.
+fn nna4_policy_output() -> Output {
+  let pdat =
+    PolicyDatum {
+      policy_id: #"aabbccdd",
+      insured: nna4_attacker_pkh,
+      strike_price: 350_000,
+      coverage_amount: nna4_coverage,
+      premium_paid: nna4_premium,
+      start_time: 1_700_100_100_000,
+      expiry_time: 1_700_604_800_000,
+      oracle_nft: nna4_oracle_nft,
+      pool_script_hash: nna4_pool_script_hash,
+      pool_nft: nna3_pool_nft_policy,
+      oracle_provider: AegisSelf,
+      partner_address: None,
+      partner_share_bps: 0,
+    }
+  Output {
+    address: Address {
+      payment_credential: Script(nna4_policy_script_hash),
+      stake_credential: None,
+    },
+    value: assets.from_lovelace(nna4_coverage)
+      |> assets.add(nna4_marker_policy_id, policy_marker_asset_name, 1),
+    datum: InlineDatum(pdat),
+    reference_script: None,
+  }
+}
+
+// Team fee output.
+fn nna4_team_output() -> Output {
+  Output {
+    address: team_address,
+    value: assets.from_lovelace(nna4_team_cut),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+// An attacker wallet output that receives co-minted aLP (the exploit sink).
+fn nna4_attacker_lp_output(lp_qty: Int) -> Output {
+  Output {
+    address: Address {
+      payment_credential: VerificationKey(nna4_attacker_pkh),
+      stake_credential: None,
+    },
+    value: assets.from_lovelace(min_utxo_lovelace)
+      |> assets.add(nna3_lp_policy, "aLP", lp_qty),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+// Build the base mint value (marker +1) and optionally co-mint aLP.
+fn nna4_mint(lp_qty: Int) -> assets.Value {
+  let base =
+    assets.from_asset(nna4_marker_policy_id, policy_marker_asset_name, 1)
+  if lp_qty == 0 {
+    base
+  } else {
+    assets.add(base, nna3_lp_policy, "aLP", lp_qty)
+  }
+}
+
+// Assemble a full single-policy pool-spend transaction shared by the
+// Underwrite and BatchUnderwrite cases (their tx bodies are identical; only
+// the spend redeemer differs). `lp_qty` controls the aLP co-mint: 0 = clean
+// green path; >0 = the exploit (aLP routed to the attacker wallet).
+fn nna4_tx(lp_qty: Int) -> Transaction {
+  let outputs =
+    if lp_qty == 0 {
+      [nna4_pool_continuation(), nna4_policy_output(), nna4_team_output()]
+    } else {
+      [
+        nna4_pool_continuation(),
+        nna4_policy_output(),
+        nna4_team_output(),
+        nna4_attacker_lp_output(lp_qty),
+      ]
+    }
+  Transaction {
+    ..transaction.placeholder,
+    inputs: [nna4_pool_input()],
+    outputs: outputs,
+    mint: nna4_mint(lp_qty),
+    treasury_donation: Some(nna4_treasury_cut),
+    validity_range: nna4_validity(),
+    redeemers: nna4_marker_redeemers(),
+  }
+}
+
+// The marker mint redeemer threaded through `redeemers`: `MintMarkers { 1 }`
+// for the single-policy Underwrite / BatchUnderwrite paths. The validator
+// reads it via `marker_mint_redeemer` (pairs.get_first on Mint purpose).
+fn nna4_marker_redeemers() -> Pairs<ScriptPurpose, Redeemer> {
+  let r: Data = MintMarkers { count: 1 }
+  [Pair(Mint(nna4_marker_policy_id), r)]
+}
+
+fn nna4_spend(tx: Transaction) -> Bool {
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    Some(nna4_pool_datum()),
+    Underwrite { coverage: nna4_coverage, premium: nna4_premium },
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    tx,
+  )
+}
+
+// GREEN PATH: a well-formed Underwrite with NO aLP co-mint is ACCEPTED.
+test nna4_underwrite_no_lp_mint_accepted() {
+  nna4_spend(nna4_tx(0)) == True
+}
+
+// EXPLOIT: the SAME well-formed Underwrite, but co-minting positive aLP to a
+// non-pool (attacker) output, must be REJECTED. Pre-fix the Underwrite arm
+// ignores the mint and wrongly ACCEPTS (RED); post-fix `no_lp_mint` rejects.
+test nna4_underwrite_co_mint_alp_rejected() {
+  nna4_spend(nna4_tx(5_000_000)) == False
+}
+
+fn nna4_batch_spend(tx: Transaction) -> Bool {
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    Some(nna4_pool_datum()),
+    BatchUnderwrite {
+      total_coverage: nna4_coverage,
+      total_premium: nna4_premium,
+    },
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    tx,
+  )
+}
+
+// GREEN PATH: a well-formed single-policy BatchUnderwrite with NO aLP
+// co-mint is ACCEPTED.
+test nna4_batch_underwrite_no_lp_mint_accepted() {
+  nna4_batch_spend(nna4_tx(0)) == True
+}
+
+// EXPLOIT: same BatchUnderwrite co-minting positive aLP to the attacker
+// wallet must be REJECTED. RED pre-fix, GREEN post-fix.
+test nna4_batch_underwrite_co_mint_alp_rejected() {
+  nna4_batch_spend(nna4_tx(5_000_000)) == False
+}
+

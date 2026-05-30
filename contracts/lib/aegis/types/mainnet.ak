@@ -19,18 +19,18 @@ pub const orcfax_fsp_script_hash: ByteArray =
 // Publisher VKH — late-bound. Mint mainnet AEGIS_PRICE_FEED_* NFTs from a
 // fresh wallet, then fill in. Zero-VKH placeholder fails closed at validation.
 pub const aegis_self_publisher_vkh: ByteArray =
-  #"00000000000000000000000000000000000000000000000000000000"
+  #"bb09f43245759995440388db9ef3f8a614246e8da1dd9bd053261347"
 
 // AegisSelf publisher NFT allowlist — late-bound. Mint 5 one-shot NFTs
 // (ADA/BTC/ETH/USDC/USDT) on mainnet, then fill in. Zero-policy placeholder
 // fails closed; any AegisSelf path on mainnet will reject all oracle UTxOs.
 pub const aegis_self_canonical_nfts: List<ByteArray> =
   [
-    #"00000000000000000000000000000000000000000000000000000000",
-    #"00000000000000000000000000000000000000000000000000000000",
-    #"00000000000000000000000000000000000000000000000000000000",
-    #"00000000000000000000000000000000000000000000000000000000",
-    #"00000000000000000000000000000000000000000000000000000000",
+    #"f0f14cd0dd1cae52398360e3e4001375000032cb392cb3efeb342301",
+    #"99e8fe4f9d2a4a85f5e3f20d37b10048ce54e4a03e56d9fd492163b3",
+    #"a8c5354a4813f2b3f60836839b8842a9422186f4f15511790ec95f9c",
+    #"a8231f0c10b514659fd590f6ee7420acf4e145cce36909a7f5fe1c5e",
+    #"82a324a3de0be7bc9c4b8450db5350cf0479fa1393eb8eee2481c652",
   ]
 
 // Indigo canonical iAsset oracle NFT policy ids on mainnet (live, Koios-
