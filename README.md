@@ -87,6 +87,8 @@ mainnet across validator-logic, economic/oracle, API, and coordinated-collusion 
 locality) was fixed — both the mint-authority and continuation-locality halves — and
 **re-verified closed by reproducing the deployed script hash byte-for-byte from source.**
 Full catalog: [`redteam/MAINNET_LIVE_FIRE_REDTEAM.md`](redteam/MAINNET_LIVE_FIRE_REDTEAM.md).
+The V3 cascade was re-run against the catalog (2026-06-08) with a marker-aware claim/cancel
+lifecycle pass against a live on-chain policy — all adversarial transactions rejected.
 
 The finding-by-finding history across all internal rounds is in
 [`docs/audit/SECURITY_AUDIT_REPORT.md`](docs/audit/SECURITY_AUDIT_REPORT.md); each finding
@@ -95,32 +97,34 @@ it. Round-specific reports live under [`redteam/`](redteam/).
 
 ---
 
-## Deployed on mainnet (V12.2 + R17)
+## Deployed on mainnet (V12.2 + R17 · V3 cascade)
 
 Validators are parameterized in a cascade (pool NFT → marker → policy → pool → LP), so
 each has a profile-independent **base** hash and a deployed **applied** hash. Both are
 reproducible from a clean checkout on the mainnet build profile (the live-fire report
-documents the byte-for-byte reproduction).
+documents the byte-for-byte reproduction). The current deployment is the **V3 cascade** —
+adding the Indigo iUSD relay feed as the 6th AegisSelf canonical NFT re-parameterized
+every hash below; the validator *logic* is unchanged from R17.
 
 | Validator | Applied hash (deployed) | Reference UTxO |
 |-----------|-------------------------|----------------|
-| `pool_validator` | `a2e4f9619b52ee7bf0a4862eff56e3b0f17fe2b7191525a8b08b58c4` | [`4a85f550…#0`](https://cexplorer.io/tx/4a85f5503866f2d5cd13049d99b3aef57ec05156a84009417d0a136d6f55accd) |
-| `policy_validator` | `f776a841b01dffc98eb95e80f8c2a07a81f6b8d13aaf7dd3d3dab972` | [`9fafd340…#0`](https://cexplorer.io/tx/9fafd34040a9cb648c323813c366e2fa861f7ae8383db60f2b86b19ea8ce98d7) |
-| `policy_marker` | `feff14aefc4b13183c840931e1830ff4efe7f049cbc2017f7214c0ea` | [`314518b9…#0`](https://cexplorer.io/tx/314518b93c318d4ec088a5e251acebc76e8781676fe8435a591ea17992cf5570) |
-| `lp_token_policy` | `86846fc23aeb4edf9df13c4e32c48318af3e001922e19a199f50e281` | [`de006fa6…#0`](https://cexplorer.io/tx/de006fa674a26d365974b23cfcc091eec1a4b78455abbfcd26ac0a1e3bbbcc11) |
+| `pool_validator` | `792b5c5bd5d36e8d43e0bdca84d2494150ebbb1c23889d8476ca3651` | [`4e75c919…#0`](https://cexplorer.io/tx/4e75c9192a1304857201e593fc9625d908f33caec6e35caabb871f3d4c16f1ab) |
+| `policy_validator` | `5fc5ee32cddc0bb659c4e16ec0d9f1335ce884b6cf3e432c084234db` | [`76fdf0b9…#0`](https://cexplorer.io/tx/76fdf0b904ad2d41a75bbdfabf8f01ae26aeeb62bbb003128afb8513681e4a5a) |
+| `policy_marker` | `99ef049570d2e49d7af979a81df5f0f023e2adeb526f8f957be92f7d` | [`91800fdb…#0`](https://cexplorer.io/tx/91800fdb0ec5693dca7bee8812363f9397924a318aab5795c47376028831a69c) |
+| `lp_token_policy` | `c2bed58062161970fb48f17b0dccba281b950b5e04a3eea5fefdf85d` | [`550f77b8…#0`](https://cexplorer.io/tx/550f77b83c82036c0a3b25a05bf334d738277e2837adf0761a55ee37e14301d1) |
 
 | | |
 |---|---|
-| Pool script address | `addr1wx3wf7tpndfwu7ls5jrzal6kuwc0zllzkuv32fdgkz9433qah34wa` |
-| Policy script address | `addr1w8mhd2zpkqwlljvwh90gp7xz5pagra4c6ya27lwn60dtjusd2fcnw` |
-| Pool NFT | `17f0b39cbc75ca4a34deb1ed0c311ed27d5275822c3b3c9257a066d3` (`AEGIS_POOL_V2`) |
-| Canonical pool UTxO | [`f3b851b5…#0`](https://cexplorer.io/tx/f3b851b557da2dd058807651feb4771e60452ea097ac03835aef50592ee4fd4c) |
+| Pool script address | `addr1w9ujkhzm6hfkar2ruz7u4pxjf9q4p6amrs3c38vywm9rv5gsgtjfa` |
+| Policy script address | `addr1w90utm3jehwqhdjecnskasxe7ye4e6yykm8nusevppprfkc2wxq3k` |
+| Pool NFT | `d71ffa88abe78092a5cba794d2f20ab86ca61bbbede36ca58c065778` (`AEGIS_POOL_V3`) |
+| Canonical pool UTxO | [`75cf754b…#0`](https://cexplorer.io/tx/75cf754b7b8672d327c4032109d2c90a81f65915cdc4408ca3ed13af36b53188) |
 | AegisSelf publisher VKH (compile-pinned) | `bb09f43245759995440388db9ef3f8a614246e8da1dd9bd053261347` |
 | Minimum premium | 100 ADA |
 
 **Base (pre-parameterization) hashes** — the ceremony preflight gate reproduces these
 exactly from the canonical source before any on-chain step:
-`pool_validator 2fdab37b…` · `policy_validator b4a7859b…` · `policy_marker 4e99e1ab…` ·
+`pool_validator 080c9a9c…` · `policy_validator 4b2f5f73…` · `policy_marker 4e99e1ab…` ·
 `lp_token_policy 1acbea2d…`.
 
 ---
