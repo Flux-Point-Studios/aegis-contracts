@@ -97,34 +97,34 @@ it. Round-specific reports live under [`redteam/`](redteam/).
 
 ---
 
-## Deployed on mainnet (V12.2 + R17 · V3 cascade)
+## Deployed on mainnet (V12.2 + R17 · 20-ADA floor)
 
 Validators are parameterized in a cascade (pool NFT → marker → policy → pool → LP), so
 each has a profile-independent **base** hash and a deployed **applied** hash. Both are
-reproducible from a clean checkout on the mainnet build profile (the live-fire report
-documents the byte-for-byte reproduction). The current deployment is the **V3 cascade** —
-adding the Indigo iUSD relay feed as the 6th AegisSelf canonical NFT re-parameterized
-every hash below; the validator *logic* is unchanged from R17.
+reproducible byte-for-byte from a clean checkout on the mainnet build profile under the
+pinned compiler. The live deployment sets the minimum-premium floor to **20 ADA**
+(`min_premium` in `aegis/types/mainnet.ak`); the validator *logic* is byte-identical to
+the R17 review.
 
 | Validator | Applied hash (deployed) | Reference UTxO |
 |-----------|-------------------------|----------------|
-| `pool_validator` | `792b5c5bd5d36e8d43e0bdca84d2494150ebbb1c23889d8476ca3651` | [`4e75c919…#0`](https://cexplorer.io/tx/4e75c9192a1304857201e593fc9625d908f33caec6e35caabb871f3d4c16f1ab) |
-| `policy_validator` | `5fc5ee32cddc0bb659c4e16ec0d9f1335ce884b6cf3e432c084234db` | [`76fdf0b9…#0`](https://cexplorer.io/tx/76fdf0b904ad2d41a75bbdfabf8f01ae26aeeb62bbb003128afb8513681e4a5a) |
-| `policy_marker` | `99ef049570d2e49d7af979a81df5f0f023e2adeb526f8f957be92f7d` | [`91800fdb…#0`](https://cexplorer.io/tx/91800fdb0ec5693dca7bee8812363f9397924a318aab5795c47376028831a69c) |
-| `lp_token_policy` | `c2bed58062161970fb48f17b0dccba281b950b5e04a3eea5fefdf85d` | [`550f77b8…#0`](https://cexplorer.io/tx/550f77b83c82036c0a3b25a05bf334d738277e2837adf0761a55ee37e14301d1) |
+| `pool_validator` | `1b0fd819c3199d13098e75f7204f6de4aca4d6baedc34867477171a3` | [`6e9f7a27…#0`](https://cexplorer.io/tx/6e9f7a273600b9d45786d831fbf0cd5b8597dd8451cff2e71017ca5d7a97145b) |
+| `policy_validator` | `6cfd457e82ac0377e53ee32f16f5b4345d02b6af1abf9572d73424ba` | [`72b09c72…#0`](https://cexplorer.io/tx/72b09c726f47ac0cc6a9387e1ecc0618715f8ce42c7306328821ee23a936b098) |
+| `policy_marker` | `3e04eb23074f0fd1346d370ea290fb228981abef51a16d5ffa1e398f` | [`fc1249ce…#0`](https://cexplorer.io/tx/fc1249ce4d93b2ad8b334df7f87362494078093fd88e5dc706c6117c5464bbde) |
+| `lp_token_policy` | `96932a82c7b8f2b8ed914d041ecedd16048df5b65ccfc70dbb4a1120` | [`710de6b2…#0`](https://cexplorer.io/tx/710de6b2402bd9d3db1a329ea2bdf25b88f2c6c38c8e952e3d6d4ab8b4cdb1b5) |
 
 | | |
 |---|---|
-| Pool script address | `addr1w9ujkhzm6hfkar2ruz7u4pxjf9q4p6amrs3c38vywm9rv5gsgtjfa` |
-| Policy script address | `addr1w90utm3jehwqhdjecnskasxe7ye4e6yykm8nusevppprfkc2wxq3k` |
-| Pool NFT | `d71ffa88abe78092a5cba794d2f20ab86ca61bbbede36ca58c065778` (`AEGIS_POOL_V3`) |
-| Canonical pool UTxO | [`75cf754b…#0`](https://cexplorer.io/tx/75cf754b7b8672d327c4032109d2c90a81f65915cdc4408ca3ed13af36b53188) |
+| Pool script address | `addr1wydslkqecvve6ycf3e6lwgz0dhj2efxkhtkuxjr8gachrgc8zx7vf` |
+| Policy script address | `addr1w9k063t7s2kqxal98m3j79h4ks696q4k4udtl9tj6u6zfwsp2r2ye` |
+| Pool NFT | `efd4de6bc34f026f5da839ca5544e4077e433ddc25715929cfab2ae2` (`AEGIS_POOL`) |
+| Canonical pool UTxO | [`fb940e80…#0`](https://cexplorer.io/tx/fb940e8097bec2dacf3215eecb58c8adcfe600c2bf8f628ab7a4cf30dae2eea2) |
 | AegisSelf publisher VKH (compile-pinned) | `bb09f43245759995440388db9ef3f8a614246e8da1dd9bd053261347` |
-| Minimum premium | 100 ADA |
+| Minimum premium | 20 ADA |
 
 **Base (pre-parameterization) hashes** — the ceremony preflight gate reproduces these
 exactly from the canonical source before any on-chain step:
-`pool_validator 080c9a9c…` · `policy_validator 4b2f5f73…` · `policy_marker 4e99e1ab…` ·
+`pool_validator cf30ca20…` · `policy_validator 4b2f5f73…` · `policy_marker 4e99e1ab…` ·
 `lp_token_policy 1acbea2d…`.
 
 ---

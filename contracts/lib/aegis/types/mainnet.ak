@@ -2,7 +2,7 @@ use cardano/address.{
   Address, from_verification_key, with_delegation_key,
 }
 
-pub const min_premium: Int = 100_000_000
+pub const min_premium: Int = 20_000_000
 
 // Charli3 is soft-disabled in V12.2; placeholders kept so the type
 // surface compiles. Replace before any mainnet path takes Charli3 live.
@@ -21,9 +21,10 @@ pub const orcfax_fsp_script_hash: ByteArray =
 pub const aegis_self_publisher_vkh: ByteArray =
   #"bb09f43245759995440388db9ef3f8a614246e8da1dd9bd053261347"
 
-// AegisSelf publisher NFT allowlist — late-bound. Mint 5 one-shot NFTs
-// (ADA/BTC/ETH/USDC/USDT) on mainnet, then fill in. Zero-policy placeholder
-// fails closed; any AegisSelf path on mainnet will reject all oracle UTxOs.
+// AegisSelf publisher NFT allowlist (one-shot policy ids minted under
+// publisher VKH bb09f432). Slots 0-4: ADA/BTC/ETH/USDC/USDT spot feeds;
+// slot 5: Indigo iUSD CDP relay feed (AEGIS_PRICE_FEED_IUSD_USD_V1). The
+// validator gates on policy-id membership only.
 pub const aegis_self_canonical_nfts: List<ByteArray> =
   [
     #"f0f14cd0dd1cae52398360e3e4001375000032cb392cb3efeb342301",
@@ -31,6 +32,7 @@ pub const aegis_self_canonical_nfts: List<ByteArray> =
     #"a8c5354a4813f2b3f60836839b8842a9422186f4f15511790ec95f9c",
     #"a8231f0c10b514659fd590f6ee7420acf4e145cce36909a7f5fe1c5e",
     #"82a324a3de0be7bc9c4b8450db5350cf0479fa1393eb8eee2481c652",
+    #"f6458f3b7a6b2027fe89c39a622956336ec3253b7d65971f0cb64b02",
   ]
 
 // Indigo canonical iAsset oracle NFT policy ids on mainnet (live, Koios-
