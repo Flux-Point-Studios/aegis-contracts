@@ -1,4 +1,10 @@
-use aegis/oracle.{is_canonical_oracle_nft}
+use aegis/floor_table.{
+  depeg_strike_in_band, meets_barrier_floor, meets_depeg_floor,
+  min_strike_distance_bps,
+}
+use aegis/oracle.{is_canonical_oracle_nft, resolve_oracle_price}
+// test-only: build a canonical AegisSelf feed UTxO for Underwrite fixtures.
+use aegis/oracle/charli3.{create_oracle_datum}
 use aegis/pool.{
   can_underwrite, can_withdraw, verify_add_liquidity_datum, verify_claim_datum,
   verify_remove_liquidity_datum, verify_underwrite_datum,
@@ -8,10 +14,11 @@ use aegis/pricing.{
   calculate_refund, calculate_treasury_cut, is_premium_adequate, net_premium,
 }
 use aegis/types.{
-  AcceptCancellation, AddLiquidity, AegisSelf, BatchExpireProcess,
-  BatchUnderwrite, BurnForCancel, BurnForClaim, BurnForExpire, MarkerRedeemer,
-  MintMarkers, PolicyDatum, PoolDatum, PoolRedeemer, ProcessClaim,
-  RemoveLiquidity, Underwrite, min_utxo_lovelace, partner_share_cap_bps,
+  AcceptCancellation, AddLiquidity, AegisSelf, Barrier, BatchExpireProcess,
+  BatchUnderwrite, BurnForCancel, BurnForClaim, BurnForExpire, Depeg,
+  MarkerRedeemer, MintMarkers, PolicyDatum, PoolDatum, PoolRedeemer,
+  ProcessClaim, RemoveLiquidity, Underwrite, aegis_self_publisher_vkh,
+  depeg_eligible_nfts, min_utxo_lovelace, partner_share_cap_bps,
   policy_marker_asset_name, team_address, treasury_share_bps,
 }
 use aegis/validation.{
@@ -220,6 +227,7 @@ fn accumulate_partner(
 /// — the validator's top-level conjunction catches it.
 fn batch_policies_match_totals_v12(
   outputs: List<Output>,
+  reference_inputs: List<Input>,
   own_pool_hash: ByteArray,
   own_pool_nft: ByteArray,
   policy_script_hash: ByteArray,
@@ -313,11 +321,19 @@ fn batch_policies_match_totals_v12(
                   // accepted set semantically clean and prevents a partial-
                   // accept from contributing to fee accumulators while
                   // flunking elsewhere.)
+                  // [POOL-FUNDED REPRICE] Per-policy actuarial floor gate
+                  // (risk_class dispatch; Barrier reads a fresh oracle spot
+                  // ref input). Folded into valid_policy so an underpriced /
+                  // near-money / stale policy is walker-REJECTED — it then
+                  // drops out of cov_sum/prem_sum (→ totals mismatch) AND
+                  // collapses all_policy_outputs_valid, failing the batch.
+                  let this_floor_ok =
+                    policy_floor_ok(pdat, reference_inputs, validity_range)
                   let valid_policy =
                     pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned && pdat.coverage_amount > 0 && pdat.premium_paid > 0 && is_premium_adequate(
                       pdat.premium_paid,
                       pdat.coverage_amount,
-                    ) && marker_qty_on_output == 1 && funded && this_shares_ok && this_alias_ok
+                    ) && marker_qty_on_output == 1 && funded && this_shares_ok && this_alias_ok && this_floor_ok
                   if valid_policy {
                     // §3.7 Per-policy Hybrid fee math (only accumulated
                     // for walker-accepted policies).
@@ -443,15 +459,17 @@ fn policy_output_matches_underwrite(
   validity_range: ValidityRange,
   coverage: Int,
   premium: Int,
-) -> Option<(Option<Address>, Int)> {
-  // Returns Some when exactly one output matches; partner fields are
-  // captured from the matching policy datum for downstream output checks.
+) -> Option<PolicyDatum> {
+  // Returns Some(matched_datum) when EXACTLY ONE output matches; the full
+  // PolicyDatum is surfaced so the caller can read partner fields AND the
+  // pool-funded reprice inputs (risk_class, strike, start/expiry, oracle) for
+  // the premium-floor gate without a second walk over outputs.
   let walk =
     list.foldl(
       outputs,
-      (0, None, 0),
+      (0, None),
       fn(out, acc) {
-        let (count_acc, partner_addr_acc, partner_bps_acc) = acc
+        let (count_acc, pdat_acc) = acc
         when out.address.payment_credential is {
           Script(h) ->
             if h == policy_script_hash {
@@ -479,9 +497,9 @@ fn policy_output_matches_underwrite(
                       validity_range,
                     ) && marker_on_this_output
                   if predicate {
-                    (count_acc + 1, pdat.partner_address, pdat.partner_share_bps)
+                    (count_acc + 1, Some(pdat))
                   } else {
-                    (count_acc, partner_addr_acc, partner_bps_acc)
+                    (count_acc, pdat_acc)
                   }
                 }
                 _ -> acc
@@ -493,11 +511,90 @@ fn policy_output_matches_underwrite(
         }
       },
     )
-  let (matching_count, partner_addr, partner_bps) = walk
+  let (matching_count, matched_pdat) = walk
   if matching_count == 1 {
-    Some((partner_addr, partner_bps))
+    matched_pdat
   } else {
     None
+  }
+}
+
+/// [POOL-FUNDED REPRICE] Per-policy actuarial premium-floor gate, dispatched
+/// by `risk_class`. This is the single point where the strike-/duration-/vol-
+/// aware floor is enforced; both the single Underwrite arm and the
+/// BatchUnderwrite walker call it per new policy.
+///
+///   * `Barrier` — reads a FRESH oracle spot reference input (via the same
+///     provider dispatcher the Claim path uses), pins the reading's freshness
+///     to the tx validity range, derives the strike distance
+///     `d = (spot − strike) / spot`, and requires `d >= 15%` (min strike
+///     distance) AND `premium >= coverage × barrier_floor(d, T)`. A missing
+///     oracle reference input fails closed (the resolver aborts); a stale or
+///     non-positive reading returns False.
+///   * `Depeg` — duration-only: requires the trigger strike to sit in the
+///     insurable depeg band (5%–50% below the $1 peg) AND
+///     `premium >= coverage × depeg_floor(T)`. No spot read (the trigger is
+///     pinned near the peg by construction).
+///
+/// `T` is the policy term in whole days, floored — matching the floor table's
+/// T-band flooring.
+fn policy_floor_ok(
+  pdat: PolicyDatum,
+  reference_inputs: List<Input>,
+  validity_range: ValidityRange,
+) -> Bool {
+  let t_days = ( pdat.expiry_time - pdat.start_time ) / 86_400_000
+  when pdat.risk_class is {
+    Barrier -> {
+      let price =
+        resolve_oracle_price(
+          reference_inputs,
+          pdat.oracle_provider,
+          pdat.oracle_nft,
+        )
+      let tx_lower = get_lower_bound(validity_range)
+      let tx_upper = get_upper_bound(validity_range)
+      // Freshness for the strike-distance read — TWO legs:
+      //  * anti-stale-HIGH `tx_upper <= valid_until`: rejects a feed past its
+      //    validity horizon. The floor decreases in d=(spot-strike)/spot, so a
+      //    stale-HIGH spot is the floor-relevant manipulation.
+      //  * bounded no-time-travel `tx_lower <= observed_at + max_feed_age_ms`:
+      //    caps how OLD the referenced reading may be. Anti-stale alone (the
+      //    earlier 7917a58 form) let an attacker reference a still-in-validity
+      //    but up-to-70-min-old HIGH spot to inflate apparent d and buy a
+      //    near-money barrier at a deep-barrier floor (SEC FINDING-2). The bound
+      //    is wide enough not to false-reject a fresh underwrite (the ~300s
+      //    validity back-pad keeps tx_lower BELOW observed_at+5min for any feed
+      //    the minute-cadence publisher emits), and it is enforced at the
+      //    contract level regardless of publisher cadence (defense in depth).
+      //    NB this is the OPPOSITE direction from Claim's `tx_lower >= observed_at`
+      //    (which false-rejected here because the back-pad predates observed_at).
+      let max_feed_age_ms = 300_000
+      let fresh =
+        tx_lower <= price.observed_at + max_feed_age_ms && tx_upper <= price.valid_until
+      let spot = price.value
+      if !fresh || spot <= 0 {
+        False
+      } else {
+        let d_bps = ( spot - pdat.strike_price ) * 10_000 / spot
+        d_bps >= min_strike_distance_bps && meets_barrier_floor(
+          pdat.premium_paid,
+          pdat.coverage_amount,
+          d_bps,
+          t_days,
+        )
+      }
+    }
+    Depeg ->
+      // [CRITICAL-1 review fix] The cheap duration-only Depeg floor may ONLY be
+      // applied to an established-stablecoin feed (USDC/USDT). Without this an
+      // attacker could label a near-money ADA/BTC price barrier `Depeg` to
+      // skip the barrier floor + spot read + 15% min-strike entirely, OR apply
+      // the λ=0.08 established floor to an under-priced Cardano-native depeg.
+      // Pinning oracle_nft to the depeg allowlist closes both.
+      list.has(depeg_eligible_nfts, pdat.oracle_nft) && depeg_strike_in_band(
+        pdat.strike_price,
+      ) && meets_depeg_floor(pdat.premium_paid, pdat.coverage_amount, t_days)
   }
 }
 
@@ -651,6 +748,7 @@ validator pool_validator(
     // there is only ever one consumed pool input per tx.
     let Transaction {
       inputs,
+      reference_inputs,
       outputs,
       mint,
       treasury_donation,
@@ -754,14 +852,22 @@ validator pool_validator(
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
-        // 7. §3.5 Pool value grows by `net_pool_growth`, NOT by
-        // the full premium and NOT by V12's `net_premium`. The fee_total
-        // leaves the pool to team/partner outputs; the floor is inside
-        // fee_total so the pool gives back a slight discount on small
-        // premiums (LP absorbs the floor cost in exchange for a clean
-        // user-facing fee curve — V12.2 spec §10.1).
+        // 7. [POOL-FUNDED COVERAGE] Pool value grows by `net_pool_growth`
+        // (the premium net of fees) AND drops by `coverage`, which the pool
+        // FUNDS into the new policy output (the buyer pays only the premium).
+        // The fee_total leaves the pool to team/partner outputs; the floor is
+        // inside fee_total so the pool gives back a slight discount on small
+        // premiums (LP absorbs the floor cost — V12.2 spec §10.1).
+        //
+        // Invariant shift: pool_lovelace == total_liquidity − active_coverage
+        // (the pool holds the UNRESERVED capital; reserved coverage lives in
+        // the policy outputs). `can_underwrite` (available ≥ coverage) already
+        // gates that the pool physically holds the coverage it moves out;
+        // `verify_claim_datum` already decrements total_liquidity on payout —
+        // now the real LP loss; `can_withdraw` already caps LPs to available.
+        // So this `− coverage` is the single structural change for pool-funded.
         let value_ok =
-          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth
+          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth - coverage
 
         // 8. An Underwrite tx MUST create exactly one
         // policy output bound to THIS pool with matching coverage/premium.
@@ -774,7 +880,7 @@ validator pool_validator(
             Script(h) -> h
             _ -> #""
           }
-        expect Some((new_partner_address, new_partner_share_bps)) =
+        expect Some(new_policy_datum) =
           policy_output_matches_underwrite(
             outputs,
             own_pool_hash,
@@ -785,6 +891,24 @@ validator pool_validator(
             coverage,
             premium,
           )
+        let new_partner_address = new_policy_datum.partner_address
+        let new_partner_share_bps = new_policy_datum.partner_share_bps
+
+        // [POOL-FUNDED REPRICE] Strike-/duration-/vol-aware actuarial premium
+        // floor, dispatched on the new policy's risk_class (see
+        // `policy_floor_ok`). Now that the POOL funds and bears the coverage,
+        // a strike-blind premium is an adverse-selection drain; this gate
+        // bounds underpricing against the baked floor tables.
+        let floor_ok =
+          policy_floor_ok(new_policy_datum, reference_inputs, validity_range)
+
+        // [POOL-FUNDED REPRICE] Portfolio accumulation cap: post-underwrite
+        // active coverage must stay <= ~33% (1/3) of pool capital so one correlated
+        // crash (the whole barrier book triggers together) leaves the pool
+        // solvent with half its liquidity intact. On-chain backstop for the
+        // aggregate; per-asset sub-caps are enforced off-chain.
+        let accumulation_cap_ok =
+          new_datum.active_coverage * 3 <= new_datum.total_liquidity
 
         let marker_mint_ok =
           assets.quantity_of(
@@ -900,7 +1024,7 @@ validator pool_validator(
         let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
         let no_lp_mint = lp_mint_qty == 0
 
-        coverage_positive && premium_positive && coverage_min_utxo && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint && no_policy_inputs
+        coverage_positive && premium_positive && coverage_min_utxo && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && floor_ok && accumulation_cap_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1140,6 +1264,15 @@ validator pool_validator(
         let withdrawal_safe =
           can_withdraw(datum.total_liquidity, datum.active_coverage, amount)
 
+        // [SEC FINDING-3] Re-assert the portfolio accumulation cap on the
+        // POST-withdrawal datum, not just at underwrite. Without it, an LP (or
+        // attacker-as-LP) withdraws down to the 1x solvency floor after an
+        // at-cap underwrite, pushing utilization to 100% and defeating the
+        // correlated-crash buffer the cap holds. Same ~33% (1/3) ceiling as
+        // Underwrite/BatchUnderwrite: post-withdraw active*3 <= total.
+        let accumulation_cap_ok =
+          new_datum.active_coverage * 3 <= new_datum.total_liquidity
+
         // 4. LP burn quantity is taken from the mint and must
         // be the canonical match for the requested withdrawal amount.
         let mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
@@ -1206,7 +1339,7 @@ validator pool_validator(
         let no_policy_inputs =
           count_script_inputs(inputs, policy_script_hash) == 0
 
-        amount_positive && withdrawal_safe && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero && marker_locality_ok && pool_out_no_lp && no_policy_inputs
+        amount_positive && withdrawal_safe && accumulation_cap_ok && datum_ok && immutable_ok && value_ok && direction_ok && marker_qty_zero && marker_locality_ok && pool_out_no_lp && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1274,6 +1407,7 @@ validator pool_validator(
         let batch_totals =
           batch_policies_match_totals_v12(
             outputs,
+            reference_inputs,
             own_pool_hash,
             datum.pool_nft,
             policy_script_hash,
@@ -1285,6 +1419,12 @@ validator pool_validator(
             team_address,
             own_address,
           )
+
+        // [POOL-FUNDED REPRICE] Portfolio accumulation cap (same ~33% (1/3)-of-capital
+        // backstop as single Underwrite). The per-policy actuarial floor is
+        // enforced inside the walker's `valid_policy`.
+        let accumulation_cap_ok =
+          new_datum.active_coverage * 3 <= new_datum.total_liquidity
 
         // [V12.2+R13 / EXT-13] Mint quantity for the marker policy must
         // equal `batch_totals.matched_policy_count` — the count of
@@ -1341,12 +1481,13 @@ validator pool_validator(
             total_coverage,
           )
 
-        // 8. §3.7 Pool value equality — grow by net_pool_growth.
-        // The fee_total leaves the pool to team/partner outputs; the floor
-        // is inside fee_total so the pool gives back a slight discount on
-        // small premiums (LP absorbs the floor cost, V12.2 spec §10.1).
+        // 8. §3.7 [POOL-FUNDED COVERAGE] Pool value grows by net_pool_growth
+        // (premium net of fees) and DROPS by `total_coverage`, which the pool
+        // funds into the N new policy outputs. Mirror of the single-Underwrite
+        // value check; the batch walker already pins each policy output to hold
+        // >= its own coverage, so total_coverage leaves the pool here exactly.
         let value_ok =
-          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth
+          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + net_pool_growth - total_coverage
 
         // 9. §3.7 Funded check from `batch_totals`: coverage and
         // premium sums match the redeemer; every policy output is at the
@@ -1412,7 +1553,7 @@ validator pool_validator(
         let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
         let no_lp_mint = lp_mint_qty == 0
 
-        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && batch_totals.all_policy_outputs_valid && no_lp_mint && no_policy_inputs
+        coverage_positive && premium_positive && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && accumulation_cap_ok && batch_policies_funded && shares_ok && partner_addresses_not_aliased && team_output_funded && partner_outputs_funded && donation_ok && batch_totals.per_policy_terms_ok && batch_totals.per_policy_marker_ok && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && batch_totals.all_policy_outputs_valid && no_lp_mint && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1705,12 +1846,20 @@ validator pool_validator(
         let bounds_ok =
           refund_amount >= 0 && refund_amount <= datum.total_liquidity && policy_datum.coverage_amount <= datum.active_coverage
 
-        // 10. §3.6 Pool's value decreases by refund_amount AND
-        // fee_total_cancel. team_cut + partner_cut sum exactly to
-        // fee_total_cancel by helper contract; tracking fee_total here
-        // makes the value invariant easier to audit.
+        // 10. [POOL-FUNDED REPRICE / SEC FINDING-1] The consumed policy UTxO's
+        // lovelace IS the pool-funded coverage; on Cancel it returns to the
+        // POOL (mirror of Expire). The pool continuation therefore RECEIVES
+        // `policy_lovelace` and pays out `refund_amount + fee_total_cancel`:
+        //   cont == own + policy_lovelace - refund - fee.
+        // (The old buyer-collateralized form `cont == own - refund - fee` paid
+        // the coverage to the insured and left the pool short by `coverage`
+        // every cancel — a full-coverage drain.) total_liquidity still drops by
+        // refund + fee only; active_coverage by coverage_amount — so the
+        // physical/datum solvency invariant pool == total_liq - active is
+        // preserved (verified: Δ-balanced).
+        let policy_lovelace = assets.lovelace_of(policy_input.output.value)
         let value_ok =
-          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) - refund_amount - fee_total_cancel
+          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + policy_lovelace - refund_amount - fee_total_cancel
 
         // 11. §3.6 Datum: total_liquidity drops by refund +
         // fee_total_cancel (sum of team_cut + partner_cut by construction).
@@ -2058,6 +2207,39 @@ const nna4_team_cut: Int = 2_000_000
 
 const nna4_treasury_cut: Int = 500_000
 
+// [POOL-FUNDED REPRICE] Fresh AegisSelf oracle spot at underwrite. The
+// Barrier floor gate reads this to derive the strike distance d. Spot $1.00
+// (1e6 scale) vs the policy's 350_000 strike → d = 65%, comfortably past the
+// 15% min strike distance. `valid_until` is past the tx upper bound so the
+// freshness pin passes. Built at the publisher VKH credential carrying the
+// canonical ADA NFT, exactly as `aegis_self.resolve` requires.
+const nna4_oracle_spot: Int = 1_000_000
+
+fn nna4_oracle_ref_input() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: nna4_tx_id,
+      output_index: 9,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(aegis_self_publisher_vkh),
+        stake_credential: None,
+      },
+      value: assets.from_lovelace(min_utxo_lovelace)
+        |> assets.add(nna4_oracle_nft, #"", 1),
+      datum: InlineDatum(
+        create_oracle_datum(
+          nna4_oracle_spot,
+          1_700_100_000_000,
+          1_700_104_200_000,
+        ),
+      ),
+      reference_script: None,
+    },
+  }
+}
+
 // Validity range covering the policy start_time.
 fn nna4_validity() -> ValidityRange {
   Interval {
@@ -2104,8 +2286,10 @@ fn nna4_pool_input() -> Input {
   }
 }
 
-// Pool continuation output: grows by net_pool_growth, carries the pool NFT,
-// holds ZERO aLP, and embeds the post-Underwrite datum (lp_supply frozen).
+// Pool continuation output: under POOL-FUNDED coverage the pool value grows by
+// net_pool_growth (premium in) and DROPS by coverage (funded into the policy
+// output). Datum: total_liquidity += net_pool_growth, active_coverage +=
+// coverage (unchanged). Carries the pool NFT, holds ZERO aLP, lp_supply frozen.
 fn nna4_pool_continuation() -> Output {
   let new_datum =
     PoolDatum {
@@ -2115,7 +2299,9 @@ fn nna4_pool_continuation() -> Output {
     }
   Output {
     address: nna4_pool_addr(),
-    value: assets.from_lovelace(nna4_pool_in_lovelace + nna4_net_pool_growth)
+    value: assets.from_lovelace(
+      nna4_pool_in_lovelace + nna4_net_pool_growth - nna4_coverage,
+    )
       |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
     datum: InlineDatum(new_datum),
     reference_script: None,
@@ -2125,11 +2311,18 @@ fn nna4_pool_continuation() -> Output {
 // Newly-created policy output: at the policy script, lovelace == coverage,
 // carries exactly one marker, with a canonical (AegisSelf) oracle pin.
 fn nna4_policy_output() -> Output {
+  nna4_policy_output_strike(350_000)
+}
+
+// Strike-parameterized policy output. The Underwrite/Batch matcher pins
+// coverage/premium/oracle/marker but NOT strike, so varying strike isolates
+// the Barrier floor gate (strike distance d) for the negative tests.
+fn nna4_policy_output_strike(strike: Int) -> Output {
   let pdat =
     PolicyDatum {
       policy_id: #"aabbccdd",
       insured: nna4_attacker_pkh,
-      strike_price: 350_000,
+      strike_price: strike,
       coverage_amount: nna4_coverage,
       premium_paid: nna4_premium,
       start_time: 1_700_100_100_000,
@@ -2140,6 +2333,7 @@ fn nna4_policy_output() -> Output {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
     }
   Output {
     address: Address {
@@ -2207,6 +2401,7 @@ fn nna4_tx(lp_qty: Int) -> Transaction {
   Transaction {
     ..transaction.placeholder,
     inputs: [nna4_pool_input()],
+    reference_inputs: [nna4_oracle_ref_input()],
     outputs: outputs,
     mint: nna4_mint(lp_qty),
     treasury_donation: Some(nna4_treasury_cut),
@@ -2270,5 +2465,515 @@ test nna4_batch_underwrite_no_lp_mint_accepted() {
 // wallet must be REJECTED. RED pre-fix, GREEN post-fix.
 test nna4_batch_underwrite_co_mint_alp_rejected() {
   nna4_batch_spend(nna4_tx(5_000_000)) == False
+}
+
+// ---------------------------------------------------------------------------
+// [POOL-FUNDED REPRICE] Underwrite floor + oracle + accumulation-cap wiring
+//
+// Each variant changes exactly ONE input vs the green path so the rejection
+// is attributable to the gate under test. These prove `policy_floor_ok` and
+// the accumulation cap are load-bearing (not a no-op) on both the single
+// Underwrite and BatchUnderwrite arms. The premium-vs-floor *arithmetic* is
+// proven exhaustively in lib/aegis/floor_table.ak; these prove the WIRING.
+// ---------------------------------------------------------------------------
+
+// Same green-path tx but the policy strike sits only 10% below spot (d=10%),
+// inside the 15% min strike distance — every other check passes, only the
+// floor gate flips.
+fn nna4_tx_strike(strike: Int) -> Transaction {
+  Transaction {
+    ..nna4_tx(0),
+    outputs: [
+      nna4_pool_continuation(),
+      nna4_policy_output_strike(strike),
+      nna4_team_output(),
+    ],
+  }
+}
+
+// Green-path tx with the oracle reference input REMOVED — the resolver aborts
+// (fail-closed), so an Underwrite cannot dodge the floor by omitting the feed.
+fn nna4_tx_no_oracle() -> Transaction {
+  Transaction { ..nna4_tx(0), reference_inputs: [] }
+}
+
+// A stale oracle: valid_until (1_700_100_200_000) precedes the tx upper bound
+// (1_700_100_300_000), so the freshness pin in `policy_floor_ok` rejects it.
+fn nna4_oracle_ref_input_stale() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: nna4_tx_id,
+      output_index: 9,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(aegis_self_publisher_vkh),
+        stake_credential: None,
+      },
+      value: assets.from_lovelace(min_utxo_lovelace)
+        |> assets.add(nna4_oracle_nft, #"", 1),
+      datum: InlineDatum(
+        create_oracle_datum(
+          nna4_oracle_spot,
+          1_700_099_000_000,
+          1_700_100_200_000,
+        ),
+      ),
+      reference_script: None,
+    },
+  }
+}
+
+fn nna4_tx_stale_oracle() -> Transaction {
+  Transaction { ..nna4_tx(0), reference_inputs: [nna4_oracle_ref_input_stale()] }
+}
+
+// A pool already 60% utilized: after this 100-ADA underwrite, active coverage
+// (600.1B) exceeds 50% of total liquidity (1000.098B) → accumulation cap
+// rejects. can_underwrite still passes (400B available), so the cap is the
+// sole reason for rejection.
+fn nna4_pool_datum_near_cap() -> PoolDatum {
+  PoolDatum { ..nna4_pool_datum(), active_coverage: 600_000_000_000 }
+}
+
+fn nna4_pool_input_near_cap() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: nna4_tx_id,
+      output_index: 0,
+    },
+    output: Output {
+      address: nna4_pool_addr(),
+      value: assets.from_lovelace(nna4_pool_in_lovelace)
+        |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+      datum: InlineDatum(nna4_pool_datum_near_cap()),
+      reference_script: None,
+    },
+  }
+}
+
+fn nna4_pool_continuation_near_cap() -> Output {
+  let new_datum =
+    PoolDatum {
+      ..nna4_pool_datum_near_cap(),
+      total_liquidity: 1_000_000_000_000 + nna4_net_pool_growth,
+      active_coverage: 600_000_000_000 + nna4_coverage,
+    }
+  Output {
+    address: nna4_pool_addr(),
+    value: assets.from_lovelace(
+      nna4_pool_in_lovelace + nna4_net_pool_growth - nna4_coverage,
+    )
+      |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+    datum: InlineDatum(new_datum),
+    reference_script: None,
+  }
+}
+
+fn nna4_tx_near_cap() -> Transaction {
+  Transaction {
+    ..nna4_tx(0),
+    inputs: [nna4_pool_input_near_cap()],
+    outputs: [
+      nna4_pool_continuation_near_cap(),
+      nna4_policy_output(),
+      nna4_team_output(),
+    ],
+  }
+}
+
+fn nna4_spend_near_cap() -> Bool {
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    Some(nna4_pool_datum_near_cap()),
+    Underwrite { coverage: nna4_coverage, premium: nna4_premium },
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    nna4_tx_near_cap(),
+  )
+}
+
+// Barrier floor gate fires: shallow strike (d=10% < 15% min) REJECTED.
+test nna4_underwrite_shallow_strike_rejected() {
+  nna4_spend(nna4_tx_strike(900_000)) == False
+}
+
+// Missing oracle reference input fails CLOSED (resolver aborts).
+test nna4_underwrite_missing_oracle_fails_closed() fail {
+  nna4_spend(nna4_tx_no_oracle())
+}
+
+// Stale oracle REJECTED — a stale-high spot can't cheapen the floor.
+test nna4_underwrite_stale_oracle_rejected() {
+  nna4_spend(nna4_tx_stale_oracle()) == False
+}
+
+// ---------------------------------------------------------------------------
+// [SEC FINDING-2] Barrier underwrite oracle freshness is BOUNDED (not just
+// anti-stale). `policy_floor_ok` Barrier leg now requires
+//   tx_lower <= observed_at + max_feed_age_ms (300_000)   -- bounded no-time-travel
+//   AND tx_upper <= valid_until                            -- anti-stale-high
+//
+// The earlier (7917a58) form checked anti-stale-high ONLY, so an attacker
+// could reference a spot that is STILL inside its validity horizon
+// (tx_upper <= valid_until) but arbitrarily OLD (tx_lower far past
+// observed_at + 5min) to pin a near-money barrier at a deep-barrier floor.
+//
+// These exercises change EXACTLY the referenced reading's `observed_at`
+// (spot, valid_until, strike, premium, coverage and the tx validity range
+// all held identical to the green path), so the accept/reject flip is
+// attributable to the NEW bounded-freshness leg alone — not the strike
+// distance, the anti-stale-high leg, or any other gate.
+//
+// Fresh:  observed_at = 1_700_100_000_000 -> tx_lower (1_700_100_000_000)
+//         <= observed_at + 300_000 (1_700_100_300_000)   ✓  ACCEPT
+// TooOld: observed_at = 1_700_099_000_000 -> tx_lower (1_700_100_000_000)
+//         >  observed_at + 300_000 (1_700_099_300_000)   ✗  REJECT
+//         while valid_until (1_700_104_200_000) >= tx_upper (1_700_100_300_000)
+//         i.e. the reading is STILL IN VALIDITY — only the age bound fires.
+// ---------------------------------------------------------------------------
+
+// The Barrier policy datum used by the green path, exposed directly so the
+// freshness tests can drive `policy_floor_ok` in isolation. Identical to the
+// datum embedded in `nna4_policy_output()` (strike 350_000, d=65% vs the
+// $1.00 spot, premium == coverage == 100 ADA, T ~5.8 days -> clears the
+// barrier floor). Only the oracle reading's `observed_at` differs per test.
+fn nna4_barrier_policy_datum() -> PolicyDatum {
+  expect InlineDatum(raw) = nna4_policy_output_strike(350_000).datum
+  expect pdat: PolicyDatum = raw
+  pdat
+}
+
+// Oracle reading that is STILL within its validity horizon
+// (valid_until >= tx_upper) but TOO OLD for the bounded-freshness leg
+// (observed_at + 300_000 < tx_lower). This is the SEC FINDING-2 reading:
+// anti-stale-high alone accepts it; the bounded age leg rejects it.
+fn nna4_oracle_ref_input_too_old() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: nna4_tx_id,
+      output_index: 9,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(aegis_self_publisher_vkh),
+        stake_credential: None,
+      },
+      value: assets.from_lovelace(min_utxo_lovelace)
+        |> assets.add(nna4_oracle_nft, #"", 1),
+      datum: InlineDatum(
+        create_oracle_datum(
+          nna4_oracle_spot,
+          // observed_at: 1_000_000 ms (>> 300_000) before tx_lower.
+          1_700_099_000_000,
+          // valid_until: same as the fresh reading, still >= tx_upper.
+          1_700_104_200_000,
+        ),
+      ),
+      reference_script: None,
+    },
+  }
+}
+
+fn nna4_tx_too_old_oracle() -> Transaction {
+  Transaction {
+    ..nna4_tx(0),
+    reference_inputs: [nna4_oracle_ref_input_too_old()],
+  }
+}
+
+// FULL-CONTEXT (validator invocation): a Barrier Underwrite whose oracle
+// reading is in-validity but too old is REJECTED by the floor gate. RED under
+// the anti-stale-only form (the reading passes tx_upper <= valid_until);
+// GREEN under the bounded-freshness form.
+test nna4_underwrite_too_old_oracle_rejected() {
+  nna4_spend(nna4_tx_too_old_oracle()) == False
+}
+
+// ISOLATION (direct floor-gate call): proves the rejection above is the
+// bounded-freshness leg, not a side effect. Identical datum + validity range,
+// only `observed_at` moved past the +300_000 bound.
+test nna4_floor_too_old_oracle_rejected() {
+  policy_floor_ok(
+    nna4_barrier_policy_datum(),
+    [nna4_oracle_ref_input_too_old()],
+    nna4_validity(),
+  ) == False
+}
+
+// ISOLATION (positive control): the SAME datum + validity range with a FRESH
+// reading (observed_at within 300_000 of tx_lower) is ACCEPTED. Holding every
+// other input identical to the too-old case, this proves the age leg is the
+// sole discriminator (and that the bound does not false-reject a fresh
+// underwrite).
+test nna4_floor_fresh_oracle_accepted() {
+  policy_floor_ok(
+    nna4_barrier_policy_datum(),
+    [nna4_oracle_ref_input()],
+    nna4_validity(),
+  ) == True
+}
+
+// Accumulation cap fires: post-underwrite active coverage > 50% of pool
+// capital is REJECTED even though the pool can physically cover it.
+test nna4_underwrite_over_accumulation_cap_rejected() {
+  nna4_spend_near_cap() == False
+}
+
+// The BatchUnderwrite arm shares the floor + oracle wiring (same walker).
+test nna4_batch_shallow_strike_rejected() {
+  nna4_batch_spend(nna4_tx_strike(900_000)) == False
+}
+
+test nna4_batch_missing_oracle_fails_closed() fail {
+  nna4_batch_spend(nna4_tx_no_oracle())
+}
+
+// [CRITICAL-1 review fix] risk_class=Depeg is bound to the established-
+// stablecoin oracle allowlist, so it can't be used to apply the cheap
+// duration-only floor to a price barrier (ADA/BTC) or an under-priced native.
+fn pf_depeg_datum(oracle_nft: ByteArray, strike: Int) -> PolicyDatum {
+  PolicyDatum {
+    policy_id: #"aabbccdd",
+    insured: nna4_attacker_pkh,
+    strike_price: strike,
+    coverage_amount: 1_000_000_000,
+    premium_paid: 80_000_000,
+    start_time: 1_700_100_100_000,
+    expiry_time: 1_700_604_800_000,
+    oracle_nft,
+    pool_script_hash: nna4_pool_script_hash,
+    pool_nft: nna3_pool_nft_policy,
+    oracle_provider: AegisSelf,
+    partner_address: None,
+    partner_share_bps: 0,
+    risk_class: Depeg,
+  }
+}
+
+// A Depeg label on the ADA price feed (nna4_oracle_nft = d2f08410, NOT in the
+// depeg allowlist) is REJECTED — the mislabel drain is closed.
+test depeg_mislabel_on_ada_feed_rejected() {
+  policy_floor_ok(pf_depeg_datum(nna4_oracle_nft, 950_000), [], nna4_validity()) == False
+}
+
+// A Depeg policy on the canonical preprod USDC feed (860faa66, depeg-eligible)
+// with an in-band strike + adequate premium is ACCEPTED.
+test depeg_on_usdc_feed_accepted() {
+  policy_floor_ok(
+    pf_depeg_datum(
+      #"860faa663d8a3ae3071d61f95464340c0e49c1f47f56db76441df7a0",
+      950_000,
+    ),
+    [],
+    nna4_validity(),
+  ) == True
+}
+
+// ---------------------------------------------------------------------------
+// [SEC FINDING-1 / CRITICAL] AcceptCancellation routes the pool-funded
+// coverage BACK to the POOL (was paying it to the insured = a full-coverage
+// pool drain on every underwrite->cancel cycle).
+//
+// The load-bearing fix is the pool arm's `value_ok`:
+//   cont.lovelace == own.lovelace + policy_lovelace - refund - fee_total_cancel
+// where policy_lovelace = lovelace_of(consumed policy UTxO) = the pool-funded
+// coverage. The pool REGAINS that coverage on cancel; the insured receives the
+// premium refund ONLY (enforced on the policy side, `sum_to_insured >= refund`).
+//
+// These are FULL-CONTEXT tests: they construct a complete AcceptCancellation
+// transaction (single marked policy input, marker mint == -1, BurnForCancel
+// redeemer, pool continuation + team output + treasury donation) and invoke
+// `pool_validator.spend` directly. The ONLY thing that differs between the
+// accept and reject builds is where the coverage flows:
+//   * coverage_to_pool == True  -> cont == own + policy_lovelace - refund - fee
+//                                   (insured output = refund only)        ACCEPT
+//   * coverage_to_pool == False -> cont == own - refund - fee  (OLD buyer-
+//                                   collateralized form; the pool is left short
+//                                   by `coverage` and the insured output gets
+//                                   refund + coverage)                    REJECT
+// The PoolDatum decrements (datum_ok) are IDENTICAL in both builds, so the
+// reject is attributable to `value_ok` alone — i.e. to the coverage-routing
+// flip, not to any datum-accounting difference.
+//
+// Economics (nna4 defaults: premium == coverage == 100 ADA, 200 bps fee):
+//   refund_amount    = calculate_refund(100 ADA)        = 90 ADA
+//   cancellation_fee = 100 ADA - 90 ADA                 = 10 ADA
+//   fee_total_cancel = max(2 ADA, 10 ADA * 200/10_000=0.2 ADA) = 2 ADA
+//   (team_cut, partner_cut) = (2 ADA, 0)  (solo policy, partner_share 0)
+//   required_donation = 10 ADA * 200/10_000 * 2_500/10_000 = 0.05 ADA
+//   policy_lovelace  = coverage                         = 100 ADA
+//   pool_in          = 500_000 ADA
+//   cont (to-pool)   = 500_000 + 100 - 90 - 2  ADA      = 500_008 ADA
+//   cont (to-insured)= 500_000        - 90 - 2  ADA     = 499_908 ADA  (short 100)
+// ---------------------------------------------------------------------------
+
+const cancel_refund: Int = 90_000_000
+
+const cancel_fee_total: Int = 2_000_000
+
+const cancel_team_cut: Int = 2_000_000
+
+const cancel_donation: Int = 50_000
+
+// Consumed policy UTxO being cancelled: lovelace == coverage (pool-funded),
+// carries exactly 1 marker, Barrier datum pointing back at THIS pool, solo
+// (no partner). premium_paid == 100 ADA drives the refund/fee derivation.
+fn cancel_policy_datum() -> PolicyDatum {
+  PolicyDatum {
+    policy_id: #"aabbccdd",
+    insured: nna4_attacker_pkh,
+    strike_price: 350_000,
+    coverage_amount: nna4_coverage,
+    premium_paid: nna4_premium,
+    start_time: 1_700_100_100_000,
+    expiry_time: 1_700_604_800_000,
+    oracle_nft: nna4_oracle_nft,
+    pool_script_hash: nna4_pool_script_hash,
+    pool_nft: nna3_pool_nft_policy,
+    oracle_provider: AegisSelf,
+    partner_address: None,
+    partner_share_bps: 0,
+    risk_class: Barrier,
+  }
+}
+
+fn cancel_policy_input() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: nna4_tx_id,
+      output_index: 1,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: Script(nna4_policy_script_hash),
+        stake_credential: None,
+      },
+      // lovelace == coverage: this IS the pool-funded coverage that must
+      // return to the pool on cancel.
+      value: assets.from_lovelace(nna4_coverage)
+        |> assets.add(nna4_marker_policy_id, policy_marker_asset_name, 1),
+      datum: InlineDatum(cancel_policy_datum()),
+      reference_script: None,
+    },
+  }
+}
+
+// Canonical PoolDatum decrements applied on cancel — IDENTICAL across both
+// builds (so only `value_ok` distinguishes accept from reject):
+//   total_liquidity -= refund + fee_total_cancel
+//   active_coverage -= coverage_amount
+//   lp_supply        unchanged
+fn cancel_pool_new_datum() -> PoolDatum {
+  PoolDatum {
+    ..nna4_pool_datum(),
+    total_liquidity: 1_000_000_000_000 - cancel_refund - cancel_fee_total,
+    active_coverage: 100_000_000_000 - nna4_coverage,
+  }
+}
+
+// Pool continuation. `coverage_to_pool` toggles the lovelace:
+//   True  -> own + policy_lovelace - refund - fee  (coverage REGAINED): ACCEPT
+//   False -> own            - refund - fee  (coverage LEAKED to insured): REJECT
+fn cancel_pool_continuation(coverage_to_pool: Bool) -> Output {
+  let lovelace =
+    if coverage_to_pool {
+      nna4_pool_in_lovelace + nna4_coverage - cancel_refund - cancel_fee_total
+    } else {
+      nna4_pool_in_lovelace - cancel_refund - cancel_fee_total
+    }
+  Output {
+    address: nna4_pool_addr(),
+    value: assets.from_lovelace(lovelace)
+      |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+    datum: InlineDatum(cancel_pool_new_datum()),
+    reference_script: None,
+  }
+}
+
+// Insured payout output. NOT inspected by the pool arm (the policy arm checks
+// `sum_to_insured >= refund`), but modelled for tx fidelity: refund-only on the
+// correct path; refund + coverage on the exploit path.
+fn cancel_insured_output(coverage_to_pool: Bool) -> Output {
+  let lovelace =
+    if coverage_to_pool {
+      cancel_refund
+    } else {
+      cancel_refund + nna4_coverage
+    }
+  Output {
+    address: Address {
+      payment_credential: VerificationKey(nna4_attacker_pkh),
+      stake_credential: None,
+    },
+    value: assets.from_lovelace(lovelace),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+fn cancel_team_output() -> Output {
+  Output {
+    address: team_address,
+    value: assets.from_lovelace(cancel_team_cut),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+// Marker burn (-1) — the only mint. No aLP.
+fn cancel_mint() -> assets.Value {
+  assets.from_asset(nna4_marker_policy_id, policy_marker_asset_name, -1)
+}
+
+// BurnForCancel marker redeemer threaded through `redeemers`.
+fn cancel_marker_redeemers() -> Pairs<ScriptPurpose, Redeemer> {
+  let r: Data = BurnForCancel
+  [Pair(Mint(nna4_marker_policy_id), r)]
+}
+
+fn cancel_tx(coverage_to_pool: Bool) -> Transaction {
+  Transaction {
+    ..transaction.placeholder,
+    inputs: [nna4_pool_input(), cancel_policy_input()],
+    reference_inputs: [],
+    outputs: [
+      cancel_pool_continuation(coverage_to_pool),
+      cancel_insured_output(coverage_to_pool),
+      cancel_team_output(),
+    ],
+    mint: cancel_mint(),
+    treasury_donation: Some(cancel_donation),
+    validity_range: nna4_validity(),
+    redeemers: cancel_marker_redeemers(),
+  }
+}
+
+fn cancel_spend(tx: Transaction) -> Bool {
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    Some(nna4_pool_datum()),
+    AcceptCancellation,
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    tx,
+  )
+}
+
+// ACCEPT: coverage routed back to the POOL (cont == own + policy_lovelace -
+// refund - fee). The pool regains the funded coverage; the insured gets the
+// refund only. This is the post-fix correct value flow.
+test accept_cancellation_coverage_to_pool_accepted() {
+  cancel_spend(cancel_tx(True)) == True
+}
+
+// REJECT: coverage paid to the INSURED (the OLD buyer-collateralized form,
+// cont == own - refund - fee). The pool is left short by `coverage` every
+// cancel — the SEC FINDING-1 full-coverage drain. `value_ok` rejects.
+//
+// This is the load-bearing negative proof of the CRITICAL fix: the exact
+// pre-fix routing is now REJECTED by a real validator invocation.
+test accept_cancellation_coverage_to_insured_rejected() {
+  cancel_spend(cancel_tx(False)) == False
 }
 

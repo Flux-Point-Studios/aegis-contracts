@@ -23,8 +23,11 @@ pub const aegis_self_publisher_vkh: ByteArray =
 
 // AegisSelf publisher NFT allowlist (one-shot policy ids minted under
 // publisher VKH bb09f432). Slots 0-4: ADA/BTC/ETH/USDC/USDT spot feeds;
-// slot 5: Indigo iUSD CDP relay feed (AEGIS_PRICE_FEED_IUSD_USD_V1). The
-// validator gates on policy-id membership only.
+// slot 5: Indigo iUSD CDP relay feed (AEGIS_PRICE_FEED_IUSD_USD_V1);
+// slots 6-9: Surf event-trigger slots (AEGIS_PRICE_FEED_SURF<N>_EVT_V1,
+// minted tx eff6efe8… 2026-06-13) — binary liquidation-state feeds
+// ($1.00 armed / $0.10 on a classified on-chain liquidation; policies
+// strike at $0.50). The validator gates on policy-id membership only.
 pub const aegis_self_canonical_nfts: List<ByteArray> =
   [
     #"f0f14cd0dd1cae52398360e3e4001375000032cb392cb3efeb342301",
@@ -33,6 +36,10 @@ pub const aegis_self_canonical_nfts: List<ByteArray> =
     #"a8231f0c10b514659fd590f6ee7420acf4e145cce36909a7f5fe1c5e",
     #"82a324a3de0be7bc9c4b8450db5350cf0479fa1393eb8eee2481c652",
     #"f6458f3b7a6b2027fe89c39a622956336ec3253b7d65971f0cb64b02",
+    #"c2f62874c860e1fc87bae0043066e551153f30fcc5d9944a370e8f8d",
+    #"f4e78f3636248838c2d5c6578062cfb78f385482b0078de7aff5cc3b",
+    #"68a1b0c1dab38159e9aae015c2c577a8da3661f921410dbad6276b2f",
+    #"47c16934540cdead6045f947b1a7fd4b910bc0352a269b11800d0bed",
   ]
 
 // Indigo canonical iAsset oracle NFT policy ids on mainnet (live, Koios-
@@ -52,6 +59,15 @@ pub const indigo_oracle_script_hashes: List<ByteArray> =
     #"d27ad3ed7b073018d429e57c2f8d1f52445aa241e280e6da149a91b4",
     #"f350350cd40d0d8e8744f2c6cad54a0abc9d51f107f57fb95c181a3f",
     #"e3c50817e0fbaab03e4411249cfcb22aa004844e9ad86ca4d76524bc",
+  ]
+
+// [POOL-FUNDED REPRICE] Established-stablecoin feeds eligible for the Depeg
+// premium floor (USDC, USDT — slots 3,4 of the mainnet AegisSelf allowlist).
+// See preprod.ak for the rationale: pins risk_class=Depeg to a genuine $1 feed.
+pub const depeg_eligible_nfts: List<ByteArray> =
+  [
+    #"a8231f0c10b514659fd590f6ee7420acf4e145cce36909a7f5fe1c5e",
+    #"82a324a3de0be7bc9c4b8450db5350cf0479fa1393eb8eee2481c652",
   ]
 
 // Flux Point Studios mainnet team wallet

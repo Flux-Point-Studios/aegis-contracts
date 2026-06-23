@@ -7,7 +7,7 @@
 
 use aegis/oracle.{create_oracle_datum}
 use aegis/types.{
-  Charli3, Orcfax, PolicyDatum, PoolDatum, orcfax_ada_usd_feed_id,
+  Barrier, Charli3, Orcfax, PolicyDatum, PoolDatum, orcfax_ada_usd_feed_id,
   orcfax_fs_asset_name, orcfax_fsp_asset_name,
 }
 use aiken/crypto.{ScriptHash}
@@ -95,6 +95,7 @@ pub fn default_policy_datum() -> PolicyDatum {
     // spread.
     partner_address: None,
     partner_share_bps: 0,
+    risk_class: Barrier,
   }
 }
 
@@ -115,6 +116,7 @@ pub fn synthetic_attack_policy_datum() -> PolicyDatum {
     oracle_provider: Charli3,
     partner_address: None,
     partner_share_bps: 0,
+    risk_class: Barrier,
   }
 }
 

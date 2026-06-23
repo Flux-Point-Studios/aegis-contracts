@@ -17,6 +17,29 @@ pub type OracleProvider {
   Indigo
 }
 
+/// Risk class of a policy — selects which on-chain premium-floor table the
+/// Underwrite branch dispatches to (and how the trigger is parameterized).
+///
+///   * `Barrier` — one-touch down-and-in barrier on a *price* (ADA crash,
+///     Indigo CDP liquidation, Surf liquidation). Pays `coverage` if the
+///     underlying touches `strike = spot × (1 − d)` at any fresh oracle
+///     observation in `[start, expiry]`. Premium floor is strike-distance-,
+///     duration- and vol-aware (GBM first-passage at the conservative σ=85%
+///     grade), and Underwrite reads a fresh oracle reference input to derive
+///     the strike distance `d`.
+///   * `Depeg` — a stablecoin leaving its peg. The trigger strike is a fixed
+///     band below the peg (e.g. 0.95 × peg); the premium is hazard- (Poisson-)
+///     driven and duration-only, so Underwrite does NOT need a spot read for
+///     this class — only a strike-band sanity check.
+///
+/// Set at Underwrite, immutable for the policy's life. Folding both classes
+/// into one datum lets a single pool-funded validator back every product line
+/// while charging each its correct actuarial floor.
+pub type RiskClass {
+  Barrier
+  Depeg
+}
+
 pub type PolicyDatum {
   policy_id: ByteArray,
   insured: VerificationKeyHash,
@@ -31,6 +54,7 @@ pub type PolicyDatum {
   oracle_provider: OracleProvider,
   partner_address: Option<Address>,
   partner_share_bps: Int,
+  risk_class: RiskClass,
 }
 
 pub type PoolDatum {
@@ -132,6 +156,12 @@ pub const aegis_self_canonical_nfts: List<ByteArray> =
 
 pub const indigo_canonical_nfts: List<ByteArray> = network.indigo_canonical_nfts
 
+// [POOL-FUNDED REPRICE] Established-stablecoin feeds eligible for the Depeg
+// premium floor. The Underwrite Depeg branch pins the policy's oracle_nft to
+// this set so the cheap duration-only floor can't be applied to a price
+// barrier (ADA/BTC/CDP) or an under-priced Cardano-native depeg.
+pub const depeg_eligible_nfts: List<ByteArray> = network.depeg_eligible_nfts
+
 pub const indigo_oracle_script_hashes: List<ByteArray> =
   network.indigo_oracle_script_hashes
 
@@ -157,6 +187,7 @@ test policy_datum_construction() {
       oracle_provider: Charli3,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
     }
   datum.strike_price == 350_000 && datum.coverage_amount == 5_000_000_000
 }
@@ -205,6 +236,7 @@ test policy_datum_aegis_self_variant_constructs() {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
     }
   let is_aegis_self =
     when datum.oracle_provider is {
@@ -260,8 +292,19 @@ test allowlist_rejects_empty_nft() {
   !list.has(aegis_self_canonical_nfts, #"")
 }
 
-test allowlist_size_is_exactly_five() {
-  list.length(aegis_self_canonical_nfts) == 5
+// Drift guard: any allowlist change must consciously edit this pin.
+// Preprod = 9 (5 spot + 4 Surf event slots); mainnet = 10 (5 spot + iUSD
+// relay + 4 Surf event slots). Discriminated on the profile's publisher
+// VKH so the same test is correct under either shim.
+test allowlist_size_pinned_per_profile() {
+  let n = list.length(aegis_self_canonical_nfts)
+  if aegis_self_publisher_vkh == #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152" {
+    // preprod
+    n == 9
+  } else {
+    // mainnet (publisher vkh bb09f432…)
+    n == 10
+  }
 }
 
 test team_address_payment_credential_28_bytes() {
@@ -295,6 +338,7 @@ test policy_datum_v12_no_partner() {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
     }
   datum.partner_share_bps == 0 && datum.partner_address == None
 }
@@ -315,6 +359,7 @@ test policy_datum_v12_with_partner() {
       oracle_provider: AegisSelf,
       partner_address: Some(team_address),
       partner_share_bps: 2_000,
+      risk_class: Barrier,
     }
   datum.partner_share_bps == 2_000
 }
@@ -335,6 +380,7 @@ test policy_datum_indigo_variant_constructs() {
       oracle_provider: Indigo,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
     }
   let is_indigo =
     when datum.oracle_provider is {
@@ -415,6 +461,25 @@ test indigo_canonical_nft_first_entry_is_28_bytes() {
   }
 }
 
-test aegis_self_canonical_nfts_unchanged_at_five_in_v12_2() {
-  list.length(aegis_self_canonical_nfts) == 5
+// Structural guards that hold across every legitimate allowlist size: all
+// entries are 28-byte policy ids and the Surf event slots are present on
+// the active profile (preprod slot 5 / mainnet slot 6 = SURF1).
+test aegis_self_canonical_nfts_all_entries_28_bytes() {
+  list.all(aegis_self_canonical_nfts, fn(n) { bytearray.length(n) == 28 })
+}
+
+test allowlist_accepts_surf_event_slot_1() {
+  if aegis_self_publisher_vkh == #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152" {
+    // preprod SURF1/EVT (mint tx bdff0f13…)
+    list.has(
+      aegis_self_canonical_nfts,
+      #"7b53817a1cda197ca26883a25adb51631f3368094c721751ae9ceb23",
+    )
+  } else {
+    // mainnet SURF1/EVT (mint tx eff6efe8…)
+    list.has(
+      aegis_self_canonical_nfts,
+      #"c2f62874c860e1fc87bae0043066e551153f30fcc5d9944a370e8f8d",
+    )
+  }
 }

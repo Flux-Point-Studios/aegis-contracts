@@ -157,8 +157,13 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
             datum.oracle_nft,
           )
 
-        // Crash detected: oracle price at or below the strike.
-        let price_below_strike = price.value <= datum.strike_price
+        // Crash detected: spot at/below strike, OR the trailing-12h low
+        // touched the strike — the latter keeps a barrier policy claimable
+        // for ~12h after a dip even if spot recovered. `min_price_12h`
+        // equals `value` for every provider except AegisSelf, so
+        // non-AegisSelf policies retain pure spot-at-claim semantics.
+        let barrier_touched =
+          price.value <= datum.strike_price || price.min_price_12h <= datum.strike_price && price.low_observed_at >= datum.start_time
 
         // Both validity-range legs must sit inside the freshness window,
         // and tx_lower must be at or after the observed_at of the reading.
@@ -197,7 +202,7 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
             _ -> False
           }
 
-        single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_present && has_marker && marker_redeemer_ok
+        single_policy_input && barrier_touched && oracle_fresh && within_start && within_expiry && payout_valid && pool_present && has_marker && marker_redeemer_ok
       }
 
       // -----------------------------------------------------------------------
@@ -298,13 +303,27 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
         // Same freshness rule as Claim.
         let oracle_fresh =
           tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
-        let not_in_the_money = price.value > datum.strike_price
+        // [12h grace] Mirror Claim's barrier definition: a policy counts as
+        // in-the-money — and is therefore NOT cancellable — when spot OR the
+        // trailing-12h low is at/under the strike. Gating on spot alone would
+        // hand the insured free optionality (Cancel for a refund even though
+        // the barrier was touched in the window and they could Claim).
+        let not_in_the_money =
+          price.value > datum.strike_price && ( price.min_price_12h > datum.strike_price || price.low_observed_at < datum.start_time )
 
         let refund_amount = calculate_refund(datum.premium_paid)
-        let policy_utxo_lovelace = assets.lovelace_of(own_value)
 
+        // [POOL-FUNDED REPRICE] The policy UTxO's lovelace is now the POOL's
+        // coverage (pool-funded at Underwrite), NOT the buyer's collateral. On
+        // Cancel it must return to the POOL — the insured receives ONLY the
+        // premium refund. The coverage->pool routing is enforced exactly by the
+        // pool's AcceptCancellation value_ok (cont == own + policy_lovelace -
+        // refund - fee); Cancel is single-input + branch-paired so that always
+        // runs. Paying the insured `refund + coverage` here (the old
+        // buyer-collateralized semantics) let any user drain the pool by
+        // underwrite->cancel — SEC FINDING-1.
         let insured_payout_valid =
-          sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= refund_amount + policy_utxo_lovelace
+          sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= refund_amount
 
         let pool_present =
           when find_canonical_pool_output(
@@ -355,6 +374,94 @@ test claim_price_check_at_boundary() {
   let strike = 350_000
   let oracle_price = 350_000
   oracle_price <= strike
+}
+
+// barrier_touched := spot <= strike || (min_price_12h <= strike && low_observed_at >= start_time)
+// not_in_the_money := spot > strike && (min_price_12h > strike || low_observed_at < start_time)
+
+test claim_barrier_touched_via_12h_low() {
+  // Spot recovered OTM ($0.50) but the 12h low ($0.30) was observed DURING
+  // the policy (after start) -> claimable.
+  let strike = 350_000
+  let spot = 500_000
+  let min_price_12h = 300_000
+  let start_time = 1_000_000
+  let low_observed_at = 1_500_000
+  spot <= strike || min_price_12h <= strike && low_observed_at >= start_time
+}
+
+test claim_barrier_pre_start_touch_rejected() {
+  // SEC F-1: the 12h low touched the strike, but the touch happened BEFORE
+  // the policy started -> NOT claimable (can't insure a past event).
+  let strike = 350_000
+  let spot = 500_000
+  let min_price_12h = 300_000
+  let start_time = 2_000_000
+  let low_observed_at = 1_500_000
+  !(spot <= strike || min_price_12h <= strike && low_observed_at >= start_time)
+}
+
+test claim_barrier_both_above_strike_rejected() {
+  // Spot AND 12h-low both above strike -> no claim (timestamp irrelevant).
+  let strike = 350_000
+  let spot = 500_000
+  let min_price_12h = 400_000
+  let start_time = 1_000_000
+  let low_observed_at = 1_500_000
+  !(spot <= strike || min_price_12h <= strike && low_observed_at >= start_time)
+}
+
+test claim_barrier_spot_itm_still_triggers() {
+  // Spot at/below strike triggers regardless of the 12h-low or its time.
+  let strike = 350_000
+  let spot = 300_000
+  let min_price_12h = 500_000
+  let start_time = 1_000_000
+  let low_observed_at = 500_000
+  spot <= strike || min_price_12h <= strike && low_observed_at >= start_time
+}
+
+test claim_barrier_non_aegisself_spot_only() {
+  // Non-AegisSelf: min_price_12h == spot, low_observed_at == observed_at, so
+  // the OR reduces to spot-at-claim. Spot above strike -> no claim.
+  let strike = 350_000
+  let spot = 500_000
+  let min_price_12h = 500_000
+  let start_time = 1_000_000
+  let low_observed_at = 1_500_000
+  !(spot <= strike || min_price_12h <= strike && low_observed_at >= start_time)
+}
+
+test cancel_rejected_when_12h_low_itm() {
+  // Spot OTM but the 12h low touched the strike DURING the policy -> the
+  // barrier fired, so Cancel must be REJECTED. not_in_the_money == False.
+  let strike = 350_000
+  let spot = 500_000
+  let min_price_12h = 300_000
+  let start_time = 1_000_000
+  let low_observed_at = 1_500_000
+  !(spot > strike && ( min_price_12h > strike || low_observed_at < start_time ))
+}
+
+test cancel_allowed_when_pre_start_touch() {
+  // The only dip in the 12h window predates the policy -> barrier never fired
+  // during its life -> Cancel IS allowed. not_in_the_money == True.
+  let strike = 350_000
+  let spot = 500_000
+  let min_price_12h = 300_000
+  let start_time = 2_000_000
+  let low_observed_at = 1_500_000
+  spot > strike && ( min_price_12h > strike || low_observed_at < start_time )
+}
+
+test cancel_allowed_when_fully_otm() {
+  // Both spot and the 12h low are above strike -> Cancel allowed.
+  let strike = 350_000
+  let spot = 500_000
+  let min_price_12h = 400_000
+  let start_time = 1_000_000
+  let low_observed_at = 1_500_000
+  spot > strike && ( min_price_12h > strike || low_observed_at < start_time )
 }
 
 test expire_time_check() {

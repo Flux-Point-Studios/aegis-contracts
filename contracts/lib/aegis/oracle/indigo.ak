@@ -265,6 +265,9 @@ pub fn resolve(reference_inputs: List<Input>, oracle_nft: ByteArray) -> Price {
     value: datum.price.value,
     observed_at: datum.expiration - indigo_typical_lookahead_ms,
     valid_until: datum.expiration,
+    // Indigo has no 12h-low; spot-only fallback (never 0).
+    min_price_12h: datum.price.value,
+    low_observed_at: datum.expiration - indigo_typical_lookahead_ms,
   }
 }
 
@@ -307,6 +310,8 @@ test indigo_resolve_uses_datum_expiration_as_valid_until() {
       value: 3_685_313,
       observed_at: exp - indigo_typical_lookahead_ms,
       valid_until: exp,
+      min_price_12h: 3_685_313,
+      low_observed_at: exp - indigo_typical_lookahead_ms,
     }
   p.valid_until == exp
 }
@@ -320,6 +325,8 @@ test indigo_observed_at_derives_from_expiration_minus_lookahead() {
       value: 3_685_313,
       observed_at: exp - indigo_typical_lookahead_ms,
       valid_until: exp,
+      min_price_12h: 3_685_313,
+      low_observed_at: exp - indigo_typical_lookahead_ms,
     }
   p.valid_until - p.observed_at == 49 * 60 * 1_000 && indigo_typical_lookahead_ms == 49 * 60 * 1_000
 }

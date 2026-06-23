@@ -52,6 +52,28 @@ pub type Price {
   /// POSIX milliseconds beyond which the reading is stale. Validator's
   /// freshness check: `tx_lower <= valid_until`.
   valid_until: Int,
+  /// Trailing-12h LOW price, scaled by 1e6. Lets a barrier policy stay
+  /// claimable for ~12h after spot touches the strike, even if spot
+  /// recovers. Only AegisSelf populates a real value (publisher datum key
+  /// 3); every other provider's parser sets this EQUAL TO `value` (a
+  /// spot-only fallback), so the Claim branch's `min_price_12h <= strike`
+  /// leg can never spuriously pass for them.
+  ///
+  /// SECURITY: parsers MUST default this to `value` (or a high sentinel)
+  /// whenever no real 12h-low is available — NEVER 0. A 0 default would
+  /// make `min_price_12h <= strike` true for every policy and drain the
+  /// pool. The AegisSelf accessor defaults a missing key 3 to key 0
+  /// (the spot price) for exactly this reason.
+  min_price_12h: Int,
+  /// POSIX milliseconds when the `min_price_12h` low was observed (publisher
+  /// datum key 4). The Claim branch requires `low_observed_at >= start_time`
+  /// so the 12h-grace leg only honours a barrier touch that happened DURING
+  /// the policy's life (closes SEC F-1: a policy bought after a dip claiming
+  /// on that pre-purchase dip). Parsers default this to the reading's
+  /// `observed_at` (key 1) when key 4 is absent; with the
+  /// `min_price_12h == value` spot fallback that collapses the 12h leg to
+  /// spot-at-claim for non-AegisSelf providers and legacy datums.
+  low_observed_at: Int,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +86,8 @@ test price_record_construction() {
       value: 350_000,
       observed_at: 1_700_000_000_000,
       valid_until: 1_700_001_800_000,
+      min_price_12h: 350_000,
+      low_observed_at: 1_700_000_000_000,
     }
   p.value == 350_000 && p.valid_until == 1_700_001_800_000
 }

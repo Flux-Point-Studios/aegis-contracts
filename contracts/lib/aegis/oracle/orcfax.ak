@@ -236,7 +236,14 @@ pub fn resolve_with_feed(
   let valid_until =
     fs_dat.statement.created_at + aegis_types.orcfax_freshness_window_ms
 
-  Price { value: scaled, observed_at: fs_dat.statement.created_at, valid_until }
+  Price {
+    value: scaled,
+    observed_at: fs_dat.statement.created_at,
+    valid_until,
+    // Orcfax has no 12h-low; spot-only fallback (never 0).
+    min_price_12h: scaled,
+    low_observed_at: fs_dat.statement.created_at,
+  }
 }
 
 /// Default Orcfax resolver — pinned to the CER/ADA-USD feed prefix because

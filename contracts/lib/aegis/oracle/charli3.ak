@@ -86,6 +86,37 @@ pub fn get_expiry(price_data: PriceData) -> Int {
   }
 }
 
+/// Extract the trailing-12h LOW from PriceData (key 3), scaled by 1e6.
+/// SAFETY: defaults to the current price (key 0) when key 3 is absent —
+/// NEVER 0 — so a legacy 3-key datum degrades to spot-only behaviour and
+/// can never make the Claim branch's `min_price_12h <= strike` leg
+/// spuriously pass.
+pub fn get_min_price_12h(price_data: PriceData) -> Int {
+  when price_data is {
+    GenericData { price_map } ->
+      when pairs.get_first(price_map, 3) is {
+        Some(min12h) -> min12h
+        None -> get_price(price_data)
+      }
+    _ -> fail @"Invalid PriceData variant: expected GenericData"
+  }
+}
+
+/// Extract the timestamp (POSIX ms) at which the trailing-12h low was
+/// observed (key 4). SAFETY: defaults to the reading's own timestamp (key 1)
+/// when key 4 is absent, so a legacy datum's 12h leg ties to `observed_at`
+/// (and, paired with the min==spot fallback, collapses to spot-at-claim).
+pub fn get_min_low_observed_at(price_data: PriceData) -> Int {
+  when price_data is {
+    GenericData { price_map } ->
+      when pairs.get_first(price_map, 4) is {
+        Some(low_at) -> low_at
+        None -> get_timestamp(price_data)
+      }
+    _ -> fail @"Invalid PriceData variant: expected GenericData"
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Oracle Datum Accessors
 // ---------------------------------------------------------------------------
@@ -103,6 +134,18 @@ pub fn get_oracle_timestamp(datum: OracleDatum) -> Int {
 /// Get the expiry from an OracleDatum (convenience wrapper)
 pub fn get_oracle_expiry(datum: OracleDatum) -> Int {
   get_expiry(datum.price_data)
+}
+
+/// Get the trailing-12h low from an OracleDatum (convenience wrapper).
+/// Defaults to the spot price when key 3 is absent (see `get_min_price_12h`).
+pub fn get_oracle_min_price_12h(datum: OracleDatum) -> Int {
+  get_min_price_12h(datum.price_data)
+}
+
+/// Get the trailing-12h-low observation timestamp from an OracleDatum.
+/// Defaults to the reading's timestamp when key 4 is absent.
+pub fn get_oracle_min_low_observed_at(datum: OracleDatum) -> Int {
+  get_min_low_observed_at(datum.price_data)
 }
 
 /// Check if oracle data is still valid at the given time.
@@ -193,6 +236,28 @@ pub fn create_oracle_datum(
   OracleDatum {
     price_data: GenericData {
       price_map: [Pair(0, price), Pair(1, timestamp), Pair(2, expiry)],
+    },
+  }
+}
+
+/// Create an OracleDatum that also carries the trailing-12h low at key 3.
+/// Useful for constructing AegisSelf-style test fixtures.
+pub fn create_oracle_datum_with_min(
+  price: Int,
+  timestamp: Int,
+  expiry: Int,
+  min_price_12h: Int,
+  low_observed_at: Int,
+) -> OracleDatum {
+  OracleDatum {
+    price_data: GenericData {
+      price_map: [
+        Pair(0, price),
+        Pair(1, timestamp),
+        Pair(2, expiry),
+        Pair(3, min_price_12h),
+        Pair(4, low_observed_at),
+      ],
     },
   }
 }
@@ -297,4 +362,33 @@ test charli3_resolve_freshness_uses_datum_expiry() {
   let observed_at: Int = 1_707_172_554_600
   let derived_if_orcfax_logic = observed_at + 30 * 60 * 1_000
   publisher_expiry != derived_if_orcfax_logic
+}
+
+test min_price_12h_present_returns_key3() {
+  // AegisSelf-style datum carrying the trailing-12h low at key 3.
+  let datum =
+    create_oracle_datum_with_min(
+      500_000,
+      1_700_000_000_000,
+      1_700_004_200_000,
+      300_000,
+      1_700_002_000_000,
+    )
+  get_oracle_min_price_12h(datum) == 300_000 && get_oracle_min_low_observed_at(
+    datum,
+  ) == 1_700_002_000_000
+}
+
+test min_price_12h_absent_defaults_to_spot() {
+  // SAFETY: a legacy 3-key datum (no key 3) must default min_price_12h to
+  // the spot price (key 0), NEVER 0.
+  let datum = create_oracle_datum(500_000, 1_700_000_000_000, 1_700_004_200_000)
+  get_oracle_min_price_12h(datum) == 500_000
+}
+
+test min_low_observed_at_absent_defaults_to_timestamp() {
+  // A legacy 3-key datum (no key 4) defaults the low-observation time to the
+  // reading's own timestamp (key 1).
+  let datum = create_oracle_datum(500_000, 1_700_000_000_000, 1_700_004_200_000)
+  get_oracle_min_low_observed_at(datum) == 1_700_000_000_000
 }

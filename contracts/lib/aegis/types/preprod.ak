@@ -16,6 +16,11 @@ pub const orcfax_fsp_script_hash: ByteArray =
 pub const aegis_self_publisher_vkh: ByteArray =
   #"6096332c3f9c18805fdb1d189b74d54497049ffb254659cd45622152"
 
+// Slots 0-4: ADA/BTC/ETH/USDC/USDT spot feeds. Slots 5-8: Surf event-trigger
+// slots (AEGIS_PRICE_FEED_SURF<N>_EVT_V1, minted tx bdff0f13… 2026-06-13) —
+// binary liquidation-state feeds ($1.00 armed / $0.10 on a classified
+// on-chain liquidation; policies strike at $0.50). The validator gates on
+// policy-id membership only.
 pub const aegis_self_canonical_nfts: List<ByteArray> =
   [
     #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
@@ -23,6 +28,10 @@ pub const aegis_self_canonical_nfts: List<ByteArray> =
     #"d80aa1a72a46813b5045e163751076d54551fac4a6f8d720e15807ad",
     #"860faa663d8a3ae3071d61f95464340c0e49c1f47f56db76441df7a0",
     #"a4093bfc7758b86ca1b96df842367bce96cb954650a392020246c0cb",
+    #"7b53817a1cda197ca26883a25adb51631f3368094c721751ae9ceb23",
+    #"6ee32803e472cbc636bf0d7073f1f54ad0f73b536c69b1f0d6771fe4",
+    #"485eea6e0f21b6eac798088f9ca8a2aca5bd88efd6f176d9b9a2a53f",
+    #"544ddf337bdbbe27962de6d62c6177043b3ef6d229ee2b641c480025",
   ]
 
 pub const indigo_canonical_nfts: List<ByteArray> =
@@ -31,6 +40,20 @@ pub const indigo_canonical_nfts: List<ByteArray> =
     #"1e66200fca30b83d5937b67b896fa46f1adac98922555f9e791c1c83",
     #"e81e84a5d34137bcbc2ba73f1b4e735ac0cc375f0bfeb5e98a397102",
     #"875cea49cb6963ad462187f77dcc5b4d458a66d7eb9a646c2c5405a7",
+  ]
+
+// [POOL-FUNDED REPRICE] Established-stablecoin feeds eligible for the cheap
+// duration-only Depeg premium floor (USDC, USDT — slots 3,4 of the AegisSelf
+// allowlist). The Underwrite Depeg branch requires the policy's oracle_nft to
+// be a member; this pins risk_class=Depeg to a genuine $1-pegged feed so it
+// CANNOT be applied to an ADA/BTC price barrier (which would bypass the
+// barrier floor) or to a fatter-tail Cardano-native coin (which the λ=0.08
+// established floor under-prices). Native depeg stays blocked on-chain until a
+// native-tier floor ships.
+pub const depeg_eligible_nfts: List<ByteArray> =
+  [
+    #"860faa663d8a3ae3071d61f95464340c0e49c1f47f56db76441df7a0",
+    #"a4093bfc7758b86ca1b96df842367bce96cb954650a392020246c0cb",
   ]
 
 pub const indigo_oracle_script_hashes: List<ByteArray> =

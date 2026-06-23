@@ -308,30 +308,68 @@ test green_a_008_find_canonical_pool_output_returns_none_if_only_fake() {
 // policy's datum, derives the canonical refund (90% of premium) on-chain,
 // and enforces the resulting state transition.
 //
-// The tests below mirror the validator's invariants because the validator
-// branches are inline (cannot be invoked across modules in Aiken). Each test
-// names the specific invariant it exercises.
+// [POOL-FUNDED REPRICE / SEC FINDING-1] These arithmetic locks were REWRITTEN
+// for the pool-funded coverage model. Under the OLD buyer-collateralized
+// model the policy UTxO's lovelace was the BUYER's collateral, so on cancel it
+// flowed to the insured and the pool released the refund only
+// (`new_pool == old_pool - refund`). That is now a FULL-COVERAGE POOL DRAIN:
+// the coverage is the POOL's capital (pool-funded at Underwrite), so on cancel
+// it must return to the POOL. The validator's `value_ok` now requires
+//   cont.lovelace == own.lovelace + policy_lovelace - refund - fee_total_cancel
+// (the pool REGAINS the coverage) and the insured receives the premium refund
+// ONLY. The locks below encode that post-flip relationship; the load-bearing
+// proof is the full-ScriptContext pair in validators/pool.ak
+// (accept_cancellation_coverage_to_{pool,insured}_*), which invokes the
+// validator. These remain honest arithmetic locks pinned to the SAME pricing
+// helpers (`calculate_refund`, `calculate_fee_total`) the validator uses, so a
+// silent fee/refund formula drift trips them.
+//
+// Default-fixture economics (premium 200 ADA, 200 bps fee, coverage 5_000 ADA):
+//   refund           = calculate_refund(200 ADA)               = 180 ADA
+//   cancellation_fee = 200 ADA - 180 ADA                       = 20 ADA
+//   fee_total_cancel = max(2 ADA, 20 ADA * 200/10_000=0.4 ADA) = 2 ADA
+//   policy_lovelace  = coverage_amount                         = 5_000 ADA
 // ---------------------------------------------------------------------------
 
 test green_a_020_canonical_refund_derived_from_premium() {
   // The refund is computed on-chain from the policy's premium_paid; a hostile
   // builder cannot inflate it because the redeemer carries no refund field.
   let p = fixtures.default_policy_datum()
-  // p.premium_paid = 200_000_000 (0.2 ADA)
-  // calculate_refund = premium - (premium * 1000 / 10_000) = premium * 0.9
-  let expected = p.premium_paid - p.premium_paid * 1_000 / 10_000
+  // p.premium_paid = 200_000_000 (200 ADA); refund = 90% = 180 ADA.
+  let expected = calculate_refund(p.premium_paid)
   expected == 180_000_000
 }
 
-test green_a_020_pool_value_decreases_by_refund_only() {
-  // Pool's lovelace decreases by exactly `refund_amount` — NOT by the
-  // policy's pre-funded value. That value flows directly to the insured via
-  // policy.Cancel (which checks `sum_to_insured >= refund`); the pool's
-  // continuation only releases the refund.
+test green_a_020_pool_value_regains_coverage_minus_refund_and_fee() {
+  // [POOL-FUNDED] On cancel the pool's lovelace REGAINS the policy's
+  // pool-funded coverage and releases (refund + cancellation fee_total):
+  //   new_pool == old_pool + policy_lovelace - refund - fee_total_cancel.
+  // (The OLD buyer-collateralized lock asserted `new_pool == old_pool - refund`
+  // — that left the pool short by `coverage` every cancel: SEC FINDING-1.)
+  let p = fixtures.default_policy_datum()
+  let refund = calculate_refund(p.premium_paid)
+  let cancellation_fee = p.premium_paid - refund
+  let fee_total_cancel =
+    calculate_fee_total(cancellation_fee, 200, min_utxo_lovelace)
+  // policy_lovelace == coverage (the policy UTxO is funded at coverage).
+  let policy_lovelace = p.coverage_amount
   let old_pool_value = 1_000_000_000_000
-  let refund_amount = 180_000_000
-  let new_pool_value = old_pool_value - refund_amount
-  new_pool_value == 999_820_000_000
+  let new_pool_value =
+    old_pool_value + policy_lovelace - refund - fee_total_cancel
+  // 1_000_000_000_000 + 5_000_000_000 - 180_000_000 - 2_000_000
+  new_pool_value == 1_004_818_000_000 && new_pool_value > old_pool_value
+}
+
+test green_a_020_insured_receives_refund_only_not_coverage() {
+  // [POOL-FUNDED] The insured's payout floor on cancel is the premium refund
+  // ALONE (policy.Cancel: `sum_to_insured >= refund`). The pre-fix floor was
+  // `refund + policy_utxo_lovelace` (refund + coverage) — paying the insured
+  // the pool's coverage. This lock pins the insured entitlement to refund only.
+  let p = fixtures.default_policy_datum()
+  let refund = calculate_refund(p.premium_paid)
+  let insured_entitlement = refund
+  let old_buggy_entitlement = refund + p.coverage_amount
+  insured_entitlement == 180_000_000 && insured_entitlement < old_buggy_entitlement
 }
 
 test green_a_020_active_coverage_decrements_by_policy_coverage() {
@@ -344,17 +382,42 @@ test green_a_020_active_coverage_decrements_by_policy_coverage() {
   new_active == old_active - 5_000_000_000
 }
 
-test green_a_020_total_liquidity_decrements_by_refund() {
-  // total_liquidity drops by the canonical refund (90% of premium). The
-  // 10% retention is the cancellation fee that stays in the pool's lovelace
-  // surplus (it was originally counted into total_liquidity at Underwrite as
-  // part of net_premium; we only return 90% on cancel, so the 10% stays put
-  // implicitly).
+test green_a_020_total_liquidity_decrements_by_refund_plus_fee() {
+  // [POOL-FUNDED] total_liquidity drops by `refund + fee_total_cancel`
+  // (the validator's datum_ok: total_liquidity -= refund + fee_total_cancel).
+  // The OLD lock dropped it by the refund ONLY, ignoring the fee leg — which
+  // also let the datum drift from the physical value flow. Pinned to the same
+  // pricing helpers the validator uses.
   let p = fixtures.default_policy_datum()
-  let refund = p.premium_paid - p.premium_paid * 1_000 / 10_000
+  let refund = calculate_refund(p.premium_paid)
+  let cancellation_fee = p.premium_paid - refund
+  let fee_total_cancel =
+    calculate_fee_total(cancellation_fee, 200, min_utxo_lovelace)
   let old_total = 1_000_000_000_000
-  let new_total = old_total - refund
-  new_total == old_total - 180_000_000
+  let new_total = old_total - refund - fee_total_cancel
+  // 1_000_000_000_000 - 180_000_000 - 2_000_000
+  new_total == 999_818_000_000
+}
+
+test green_a_020_solvency_invariant_balanced_on_cancel() {
+  // [POOL-FUNDED] Cross-check the physical/datum solvency invariant
+  //   pool_lovelace == total_liquidity - active_coverage
+  // is PRESERVED across a cancel: both sides must shift by the SAME delta.
+  //   Δ(pool_lovelace)            = +coverage - refund - fee
+  //   Δ(total_liq) - Δ(active)    = (-refund - fee) - (-coverage)
+  //                               = +coverage - refund - fee
+  // If these diverged, the pool would be physically over- or under-funded
+  // relative to its accounting after every cancel.
+  let p = fixtures.default_policy_datum()
+  let refund = calculate_refund(p.premium_paid)
+  let cancellation_fee = p.premium_paid - refund
+  let fee_total_cancel =
+    calculate_fee_total(cancellation_fee, 200, min_utxo_lovelace)
+  let policy_lovelace = p.coverage_amount
+  let delta_pool_lovelace = policy_lovelace - refund - fee_total_cancel
+  let delta_total_liquidity = -refund - fee_total_cancel
+  let delta_active_coverage = -p.coverage_amount
+  delta_pool_lovelace == delta_total_liquidity - delta_active_coverage
 }
 
 test green_a_020_lp_supply_unchanged_on_cancel() {

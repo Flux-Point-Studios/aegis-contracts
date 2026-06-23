@@ -21,7 +21,8 @@
 // =============================================================================
 
 use aegis/oracle/charli3.{
-  OracleDatum, create_oracle_datum, get_oracle_expiry, get_oracle_price,
+  OracleDatum, create_oracle_datum, get_oracle_expiry,
+  get_oracle_min_low_observed_at, get_oracle_min_price_12h, get_oracle_price,
   get_oracle_timestamp,
 }
 use aegis/oracle/types.{Price}
@@ -112,6 +113,10 @@ pub fn resolve(reference_inputs: List<Input>, oracle_nft: ByteArray) -> Price {
     value: get_oracle_price(datum),
     observed_at: get_oracle_timestamp(datum),
     valid_until: get_oracle_expiry(datum),
+    // Real trailing-12h low (publisher key 3); defaults to spot if absent.
+    min_price_12h: get_oracle_min_price_12h(datum),
+    // When that low occurred (key 4); defaults to observed_at if absent.
+    low_observed_at: get_oracle_min_low_observed_at(datum),
   }
 }
 
