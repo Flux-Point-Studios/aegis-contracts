@@ -27,11 +27,13 @@ use aiken/collection/pairs
 //   Cancel - Cancel policy within the cancellation window
 // =============================================================================
 
+use aegis/test_helpers/fixtures
 use aiken/collection/list
 use cardano/address.{Script}
 use cardano/assets
 use cardano/transaction.{
-  InlineDatum, Input, Mint, OutputReference, Transaction,
+  InlineDatum, Input, Mint, Output, OutputReference, Redeemer, ScriptPurpose,
+  Transaction,
 }
 
 // Every policy UTxO consumed at this validator must declare the same
@@ -435,4 +437,313 @@ test claim_at_exact_strike_triggers() {
   let strike = 350_000
   let oracle_price = 350_000
   oracle_price <= strike
+}
+
+// ===========================================================================
+// [N1] EVENT_SLOT claims from a Materios-fed feed (Barrier-on-event verified)
+//
+// A Materios-fed EVENT_SLOT settles through the EXISTING AegisSelf rail. The
+// SDK publishes a binary event (`value <= strike` when fired) into the SAME
+// Charli3-compatible GenericData datum AegisSelf already uses, at the same
+// publisher VKH address, under a canonical AegisSelf NFT. The Claim branch's
+// price check is generic over the resolved oracle value:
+//
+//     let price_below_strike = price.value <= datum.strike_price
+//
+// so the existing Barrier path settles the event with NO new on-chain
+// RiskClass and NO version bump. These end-to-end tests drive the real
+// `policy_validator.spend` over a full transaction to lock that in:
+//   * triggered (value <= strike)  -> Claim ACCEPTED, pays >= coverage,
+//                                      pool present, marker burns (BurnForClaim)
+//   * alive     (value >  strike)  -> Claim REJECTED
+//   * stale feed (tx past valid_until) -> Claim REJECTED
+//   * wrong oracle-NFT pin (non-canonical) -> resolver aborts -> REJECTED
+//
+// Conservation: the policy side requires the canonical pool output is present
+// and that >= coverage flows to the insured; the residual conservation
+// equation (cont == own + policy_lovelace - payout) is owned by the pool side
+// (ProcessClaim) and is exercised in pool.ak's tests. Here we pin the policy
+// side's contribution to that invariant.
+// ===========================================================================
+
+// Canonical marker policy id used by these EVENT_SLOT claim tests (28 bytes).
+const n1_marker_policy_id: ByteArray =
+  #"feedface00112233445566778899aabbccddeeff0011223344556677"
+
+// Strike for the event policy: $0.35 (1e6 scale). For a binary EVENT_SLOT the
+// SDK encodes "fired" as a value <= strike and "not fired" as a value > strike.
+const n1_strike: Int = 350_000
+
+// Lovelace locked in the policy UTxO (coverage + min-utxo headroom).
+const n1_policy_lovelace: Int = 5_002_000_000
+
+// Coverage the insured is owed on a triggered claim.
+const n1_coverage: Int = 5_000_000_000
+
+// Feed timing. The publisher stamps created/expiry; the tx validity range must
+// sit inside [created, expiry] and inside the policy period.
+const n1_created_ms: Int = 1_700_100_000_000
+
+const n1_expiry_ms: Int = 1_700_103_600_000
+
+// Tx validity range, fresh and inside the policy window.
+const n1_tx_lower: Int = 1_700_100_100_000
+
+const n1_tx_upper: Int = 1_700_100_400_000
+
+// The event policy datum: AegisSelf-bound (the Materios rail), strike $0.35,
+// coverage 5000 ADA, period straddling the tx validity range.
+fn n1_policy_datum() -> PolicyDatum {
+  PolicyDatum {
+    ..fixtures.default_policy_datum_aegis_self(),
+    strike_price: n1_strike,
+    coverage_amount: n1_coverage,
+    start_time: 1_700_000_000_000,
+    expiry_time: 1_700_604_800_000,
+  }
+}
+
+fn n1_own_ref() -> OutputReference {
+  OutputReference { transaction_id: fixtures.tx_id_one, output_index: 0 }
+}
+
+// The policy input under spend: at the policy script, ADA + exactly one marker.
+fn n1_policy_input() -> Input {
+  fixtures.policy_input_with_marker(
+    fixtures.tx_id_one,
+    0,
+    n1_policy_lovelace,
+    n1_marker_policy_id,
+    n1_policy_datum(),
+  )
+}
+
+// Payout to the insured enterprise address (>= coverage).
+fn n1_insured_output() -> Output {
+  fixtures.pkh_output(fixtures.insured_pkh, n1_coverage)
+}
+
+// Canonical pool continuation output (carries the pool NFT). Its presence is
+// the policy-side leg of conservation; lovelace bookkeeping lives on the pool.
+fn n1_pool_output() -> Output {
+  fixtures.pool_continuation(
+    n1_policy_lovelace - n1_coverage,
+    True,
+    fixtures.default_pool_datum(),
+  )
+}
+
+// Marker mint redeemer pair: Claim REQUIRES `BurnForClaim` under the marker
+// policy id. Any other variant fails `marker_redeemer_ok`.
+fn n1_marker_redeemers(
+  marker_policy_id: ByteArray,
+) -> Pairs<ScriptPurpose, Redeemer> {
+  let r: Data = BurnForClaim
+  [Pair(Mint(marker_policy_id), r)]
+}
+
+// Assemble the full Claim transaction. `feed_value` sets the EVENT_SLOT
+// reading; `feed_nft` sets which NFT the feed UTxO carries; `created`/`expiry`
+// set feed freshness; `marker_policy_id` sets the burn redeemer's policy id.
+fn n1_claim_tx(
+  feed_value: Int,
+  feed_nft: ByteArray,
+  created: Int,
+  expiry: Int,
+  marker_policy_id: ByteArray,
+) -> Transaction {
+  Transaction {
+    ..transaction.placeholder,
+    inputs: [n1_policy_input()],
+    reference_inputs: [
+      fixtures.aegis_self_feed_input(feed_nft, feed_value, created, expiry),
+    ],
+    outputs: [n1_pool_output(), n1_insured_output()],
+    validity_range: fixtures.finite_range(n1_tx_lower, n1_tx_upper),
+    redeemers: n1_marker_redeemers(marker_policy_id),
+  }
+}
+
+// Drive the real validator over the Claim path.
+fn n1_claim_spend(tx: Transaction) -> Bool {
+  policy_validator.spend(
+    n1_marker_policy_id,
+    Some(n1_policy_datum()),
+    Claim,
+    n1_own_ref(),
+    tx,
+  )
+}
+
+// GREEN: a triggered EVENT_SLOT (value == strike, the boundary) settles via
+// the Barrier path. value <= strike => payout to insured, pool present,
+// marker burns. This is the core Barrier-on-EVENT_SLOT acceptance.
+test n1_event_slot_triggered_at_strike_pays() {
+  let tx =
+    n1_claim_tx(
+      n1_strike,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      n1_expiry_ms,
+      n1_marker_policy_id,
+    )
+  n1_claim_spend(tx) == True
+}
+
+// GREEN: strictly below strike (deeper in-the-money event) also settles.
+test n1_event_slot_triggered_below_strike_pays() {
+  let tx =
+    n1_claim_tx(
+      n1_strike - 50_000,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      n1_expiry_ms,
+      n1_marker_policy_id,
+    )
+  n1_claim_spend(tx) == True
+}
+
+// GREEN: the insured actually receives >= coverage. This pins the policy-side
+// leg of conservation (payout sufficiency) for the event case.
+test n1_event_slot_payout_covers_coverage() {
+  let tx =
+    n1_claim_tx(
+      n1_strike,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      n1_expiry_ms,
+      n1_marker_policy_id,
+    )
+  let paid =
+    sum_lovelace_to_enterprise_pkh(tx.outputs, fixtures.insured_pkh)
+  paid >= n1_coverage && n1_claim_spend(tx) == True
+}
+
+// GREEN: the canonical pool output is present (policy-side conservation leg).
+test n1_event_slot_pool_present() {
+  let tx =
+    n1_claim_tx(
+      n1_strike,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      n1_expiry_ms,
+      n1_marker_policy_id,
+    )
+  when
+    find_canonical_pool_output(
+      tx.outputs,
+      fixtures.pool_script_hash,
+      fixtures.pool_nft_policy,
+    )
+  is {
+    Some(_) -> True
+    None -> False
+  }
+}
+
+// RED -> REJECT: an EVENT_SLOT that did NOT fire (value > strike) leaves the
+// policy alive; Claim must fail. Same generic Barrier check, opposite side.
+test n1_event_slot_alive_above_strike_claim_fails() {
+  let tx =
+    n1_claim_tx(
+      n1_strike + 1,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      n1_expiry_ms,
+      n1_marker_policy_id,
+    )
+  n1_claim_spend(tx) == False
+}
+
+// RED -> REJECT: a stale feed (tx validity range past the publisher expiry)
+// must fail freshness even though the event fired. Here valid_until is set
+// BEFORE tx_lower so `tx_lower <= valid_until` is false.
+test n1_event_slot_stale_feed_claim_fails() {
+  let tx =
+    n1_claim_tx(
+      n1_strike,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      // expiry well before the tx lower bound -> stale.
+      n1_tx_lower - 1,
+      n1_marker_policy_id,
+    )
+  n1_claim_spend(tx) == False
+}
+
+// RED -> ABORT: a feed UTxO carrying a NON-canonical NFT must cause the
+// resolver to abort. The datum's `oracle_nft` stays canonical (so the policy
+// is well-formed), but the only feed reference input carries a non-canonical
+// NFT, so `find_feed_output` finds no match and `find_feed_datum` hits
+// `fail @"Aegis-self feed UTxO not found in reference inputs"`. A validator
+// abort is NOT the same as returning False — the `fail` test annotation is the
+// Aiken idiom asserting that this code path panics (fails closed), which is
+// the audit-grade behavior for a wrong-pin feed.
+test n1_event_slot_wrong_oracle_nft_pin_claim_fails() fail {
+  let tx =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [n1_policy_input()],
+      reference_inputs: [
+        fixtures.aegis_self_feed_input(
+          fixtures.aegis_self_noncanonical_nft,
+          n1_strike,
+          n1_created_ms,
+          n1_expiry_ms,
+        ),
+      ],
+      outputs: [n1_pool_output(), n1_insured_output()],
+      validity_range: fixtures.finite_range(n1_tx_lower, n1_tx_upper),
+      redeemers: n1_marker_redeemers(n1_marker_policy_id),
+    }
+  n1_claim_spend(tx)
+}
+
+// RED -> REJECT: marker burn redeemer must be exactly BurnForClaim. A wrong
+// marker redeemer (BurnForCancel) under an otherwise-valid triggered event
+// fails `marker_redeemer_ok`.
+test n1_event_slot_wrong_marker_redeemer_claim_fails() {
+  let bad: Data = BurnForCancel
+  let tx =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [n1_policy_input()],
+      reference_inputs: [
+        fixtures.aegis_self_feed_input(
+          fixtures.aegis_self_ada_nft,
+          n1_strike,
+          n1_created_ms,
+          n1_expiry_ms,
+        ),
+      ],
+      outputs: [n1_pool_output(), n1_insured_output()],
+      validity_range: fixtures.finite_range(n1_tx_lower, n1_tx_upper),
+      redeemers: [Pair(Mint(n1_marker_policy_id), bad)],
+    }
+  n1_claim_spend(tx) == False
+}
+
+// RED -> REJECT: missing the policy marker (has_marker == False) fails even a
+// well-formed triggered event. Models the synthetic-policy attack surface on
+// the event rail.
+test n1_event_slot_missing_marker_claim_fails() {
+  let unmarked_input =
+    fixtures.policy_input(fixtures.tx_id_one, 0, n1_policy_lovelace, n1_policy_datum())
+  let tx =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [unmarked_input],
+      reference_inputs: [
+        fixtures.aegis_self_feed_input(
+          fixtures.aegis_self_ada_nft,
+          n1_strike,
+          n1_created_ms,
+          n1_expiry_ms,
+        ),
+      ],
+      outputs: [n1_pool_output(), n1_insured_output()],
+      validity_range: fixtures.finite_range(n1_tx_lower, n1_tx_upper),
+      redeemers: n1_marker_redeemers(n1_marker_policy_id),
+    }
+  n1_claim_spend(tx) == False
 }
