@@ -470,9 +470,11 @@ test claim_at_exact_strike_triggers() {
 const n1_marker_policy_id: ByteArray =
   #"feedface00112233445566778899aabbccddeeff0011223344556677"
 
-// Strike for the event policy: $0.35 (1e6 scale). For a binary EVENT_SLOT the
-// SDK encodes "fired" as a value <= strike and "not fired" as a value > strike.
-const n1_strike: Int = 350_000
+// Strike for the event policy: $0.50 (1e6 scale) — the CANONICAL Materios event
+// strike, matching the Python bridge (materios_bridge), the C# InsuranceConstants,
+// the aegis-sdk geometry, and surf_watch. For a binary EVENT_SLOT the SDK encodes
+// "fired" as a value <= strike and "not fired" as a value > strike.
+const n1_strike: Int = 500_000
 
 // Lovelace locked in the policy UTxO (coverage + min-utxo headroom).
 const n1_policy_lovelace: Int = 5_002_000_000
@@ -491,7 +493,7 @@ const n1_tx_lower: Int = 1_700_100_100_000
 
 const n1_tx_upper: Int = 1_700_100_400_000
 
-// The event policy datum: AegisSelf-bound (the Materios rail), strike $0.35,
+// The event policy datum: AegisSelf-bound (the Materios rail), strike $0.50,
 // coverage 5000 ADA, period straddling the tx validity range.
 fn n1_policy_datum() -> PolicyDatum {
   PolicyDatum {
@@ -647,6 +649,39 @@ test n1_event_slot_alive_above_strike_claim_fails() {
   let tx =
     n1_claim_tx(
       n1_strike + 1,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      n1_expiry_ms,
+      n1_marker_policy_id,
+    )
+  n1_claim_spend(tx) == False
+}
+
+// GREEN: the DEPLOYED Materios magnitude for a fired event — $0.10 = 100_000
+// (1e6 scale) — settles the Claim against the canonical $0.50 = 500_000 strike.
+// Pins the ON-CHAIN side of the exact geometry the Python bridge, the C#
+// InsuranceConstants, and the aegis-sdk predicate all pin, using the literal
+// deployed value (not a relative `n1_strike`-derived one) so a drift in the
+// magnitudes is caught here.
+test n1_event_slot_deployed_triggered_value_pays() {
+  let tx =
+    n1_claim_tx(
+      100_000,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      n1_expiry_ms,
+      n1_marker_policy_id,
+    )
+  n1_claim_spend(tx) == True
+}
+
+// RED -> REJECT: the DEPLOYED Materios magnitude for a LIVE event — $1.00 =
+// 1_000_000 — is above the $0.50 strike, so the Claim must fail. Together with
+// the test above this straddles the 500_000 strike with the real values.
+test n1_event_slot_deployed_alive_value_claim_fails() {
+  let tx =
+    n1_claim_tx(
+      1_000_000,
       fixtures.aegis_self_ada_nft,
       n1_created_ms,
       n1_expiry_ms,
