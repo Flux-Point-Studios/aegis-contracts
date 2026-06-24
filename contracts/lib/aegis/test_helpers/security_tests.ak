@@ -28,7 +28,8 @@ use aegis/pricing.{
 use aegis/test_helpers/fixtures
 use aegis/types.{
   AegisSelf, BatchClaim, BatchExpire, BurnForCancel, BurnForClaim, BurnForExpire,
-  Cancel, Charli3, Claim, Expire, Indigo, MarkerRedeemer, MintMarkers, Orcfax,
+  Cancel, Charli3, Claim, ClaimWithReceipt, Expire, Indigo, MarkerRedeemer,
+  MintMarkers, Orcfax,
   PolicyDatum, PoolDatum, cancellation_window, charli3_oracle_script_hash,
   min_utxo_lovelace, orcfax_ada_usd_feed_id, orcfax_freshness_window_ms,
   orcfax_fsp_script_hash, partner_share_cap_bps, policy_marker_asset_name,
@@ -2106,6 +2107,7 @@ test batch_claim_redeemer_still_in_type_universe() {
     Expire -> False
     BatchExpire -> False
     Cancel -> False
+    ClaimWithReceipt { .. } -> False
   }
 }
 

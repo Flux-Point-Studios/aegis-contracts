@@ -96,6 +96,7 @@ pub fn default_policy_datum() -> PolicyDatum {
     // spread.
     partner_address: None,
     partner_share_bps: 0,
+    receipt_commitment: None,
   }
 }
 
@@ -116,6 +117,7 @@ pub fn synthetic_attack_policy_datum() -> PolicyDatum {
     oracle_provider: Charli3,
     partner_address: None,
     partner_share_bps: 0,
+    receipt_commitment: None,
   }
 }
 

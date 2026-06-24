@@ -2140,6 +2140,7 @@ fn nna4_policy_output() -> Output {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      receipt_commitment: None,
     }
   Output {
     address: Address {

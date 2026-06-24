@@ -1,5 +1,5 @@
 use aiken/collection/list
-use aiken/crypto.{Blake2b_224, Hash, Script, VerificationKey}
+use aiken/crypto.{Blake2b_224, Hash, Script, VerificationKey, blake2b_256}
 use aiken/primitive/bytearray
 use cardano/address.{Address, VerificationKey as PaymentVKCred}
 use aegis/types/preprod as network
@@ -31,6 +31,13 @@ pub type PolicyDatum {
   oracle_provider: OracleProvider,
   partner_address: Option<Address>,
   partner_share_bps: Int,
+  // N5 AI-cover binding: a commitment to the Materios receipt this policy covers
+  // — blake2b-256(receipt_id ++ threshold_be8 ++ config_hash). `None` for every
+  // non-AI policy (price/depeg/barrier/plain-event), which keeps the existing
+  // Claim path unchanged. When `Some`, the policy can ONLY be claimed via
+  // `ClaimWithReceipt`, revealing a preimage that hashes to this value — so the
+  // payout is bound to the exact attested receipt + threshold, on-chain.
+  receipt_commitment: Option<ByteArray>,
 }
 
 pub type PoolDatum {
@@ -48,6 +55,41 @@ pub type PolicyRedeemer {
   Expire
   BatchExpire
   Cancel
+  // N5: claim an AI-cover policy by REVEALING the receipt preimage bound at
+  // creation. Appended LAST so existing constructor indices 0-4 (and every
+  // off-chain redeemer that encodes them) are unchanged.
+  ClaimWithReceipt { receipt: ReceiptWitness }
+}
+
+/// The revealed preimage of a policy's `receipt_commitment` (N5 AI-cover). The
+/// `ClaimWithReceipt` path recomputes the commitment from these fields and
+/// requires it to equal `PolicyDatum.receipt_commitment`, so a committed policy
+/// names the exact Materios receipt + threshold it settles against, on-chain.
+pub type ReceiptWitness {
+  /// Materios receiptId (Bytes32, exactly 32 bytes).
+  receipt_id: ByteArray,
+  /// The PUBLIC risk threshold (Uint64) proven by the Midnight circuit.
+  threshold: Int,
+  /// Hash of the AI-cover config the proof was produced under (Bytes32, 32 bytes).
+  config_hash: ByteArray,
+}
+
+/// Canonical on-chain receipt commitment: blake2b-256 over
+/// `receipt_id (32B) ++ threshold (Uint64 big-endian, 8B) ++ config_hash (32B)`.
+/// Off-chain builders MUST reproduce this byte layout exactly to bind a policy.
+pub fn receipt_commitment_hash(w: ReceiptWitness) -> ByteArray {
+  blake2b_256(
+    w.receipt_id
+      |> bytearray.concat(bytearray.from_int_big_endian(w.threshold, 8))
+      |> bytearray.concat(w.config_hash),
+  )
+}
+
+/// Fail-closed structural check on a revealed witness: a 32-byte receiptId, a
+/// 32-byte config hash, and a non-negative Uint64 threshold (so the 8-byte
+/// big-endian encoding above is well-defined and unambiguous).
+pub fn receipt_witness_ok(w: ReceiptWitness) -> Bool {
+  bytearray.length(w.receipt_id) == 32 && bytearray.length(w.config_hash) == 32 && w.threshold >= 0 && w.threshold < 18_446_744_073_709_551_616
 }
 
 pub type PoolRedeemer {
@@ -157,6 +199,7 @@ test policy_datum_construction() {
       oracle_provider: Charli3,
       partner_address: None,
       partner_share_bps: 0,
+      receipt_commitment: None,
     }
   datum.strike_price == 350_000 && datum.coverage_amount == 5_000_000_000
 }
@@ -205,6 +248,7 @@ test policy_datum_aegis_self_variant_constructs() {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      receipt_commitment: None,
     }
   let is_aegis_self =
     when datum.oracle_provider is {
@@ -295,6 +339,7 @@ test policy_datum_v12_no_partner() {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      receipt_commitment: None,
     }
   datum.partner_share_bps == 0 && datum.partner_address == None
 }
@@ -315,6 +360,7 @@ test policy_datum_v12_with_partner() {
       oracle_provider: AegisSelf,
       partner_address: Some(team_address),
       partner_share_bps: 2_000,
+      receipt_commitment: None,
     }
   datum.partner_share_bps == 2_000
 }
@@ -335,6 +381,7 @@ test policy_datum_indigo_variant_constructs() {
       oracle_provider: Indigo,
       partner_address: None,
       partner_share_bps: 0,
+      receipt_commitment: None,
     }
   let is_indigo =
     when datum.oracle_provider is {

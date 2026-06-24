@@ -2,8 +2,10 @@ use aegis/oracle.{resolve_oracle_price}
 use aegis/pricing.{calculate_refund}
 use aegis/types.{
   AegisSelf, BatchClaim, BatchExpire, BurnForCancel, BurnForClaim, BurnForExpire,
-  Cancel, Charli3, Claim, Expire, Indigo, MarkerRedeemer, OracleProvider, Orcfax,
-  PolicyDatum, PolicyRedeemer, cancellation_window, policy_marker_asset_name,
+  Cancel, Charli3, Claim, ClaimWithReceipt, Expire, Indigo, MarkerRedeemer,
+  OracleProvider, Orcfax, PolicyDatum, PolicyRedeemer, ReceiptWitness,
+  cancellation_window, policy_marker_asset_name, receipt_commitment_hash,
+  receipt_witness_ok,
 }
 use aegis/validation.{
   count_script_inputs, find_canonical_pool_output, get_lower_bound,
@@ -77,6 +79,69 @@ fn batch_oracles_uniform(
 // Policy Validator
 // ---------------------------------------------------------------------------
 
+/// Shared Claim settlement check. The funds-critical settlement logic
+/// (single-input pin, oracle price <= strike, freshness, policy period, payout
+/// sufficiency, canonical pool present, marker burn) lives in ONE place; the two
+/// claim arms (`Claim`, `ClaimWithReceipt`) differ ONLY in `binding_ok` — the
+/// receipt-commitment gate. This keeps the AI-cover binding from forking the
+/// audited settlement path.
+fn claim_settles(
+  datum: PolicyDatum,
+  inputs: List<Input>,
+  reference_inputs: List<Input>,
+  outputs: List<Output>,
+  tx_lower: Int,
+  tx_upper: Int,
+  own_script_hash: ByteArray,
+  has_marker: Bool,
+  marker_redeemer: MarkerRedeemer,
+  binding_ok: Bool,
+) -> Bool {
+  // Prevent double satisfaction: only one policy UTxO from this script per tx.
+  let single_policy_input = count_script_inputs(inputs, own_script_hash) == 1
+
+  // Resolve the oracle price via the provider-uniform dispatcher.
+  let price =
+    resolve_oracle_price(reference_inputs, datum.oracle_provider, datum.oracle_nft)
+
+  // Crash detected: oracle price at or below the strike.
+  let price_below_strike = price.value <= datum.strike_price
+
+  // Both validity-range legs must sit inside the freshness window, and tx_lower
+  // must be at or after the observed_at of the reading.
+  let oracle_fresh =
+    tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
+
+  // Transaction must sit inside the policy period.
+  let within_start = tx_lower >= datum.start_time
+  let within_expiry = tx_upper <= datum.expiry_time
+
+  // Aggregate payout to insured must be sufficient (enterprise outputs only).
+  let payout_valid =
+    sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= datum.coverage_amount
+
+  // Require the canonical pool output is present in the tx. The pool side
+  // (ProcessClaim) owns the residual conservation equation, so any leak to
+  // "change" is impossible; the policy side only ensures the canonical co-spend.
+  let pool_present =
+    when find_canonical_pool_output(
+      outputs,
+      datum.pool_script_hash,
+      datum.pool_nft,
+    ) is {
+      Some(_) -> True
+      None -> False
+    }
+
+  let marker_redeemer_ok =
+    when marker_redeemer is {
+      BurnForClaim -> True
+      _ -> False
+    }
+
+  single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_present && has_marker && marker_redeemer_ok && binding_ok
+}
+
 /// Policy validator parameterized by the policy marker minting policy id.
 ///
 /// [V12.2+R12 / EXT-08, EXT-09] Every spend path (Claim, Cancel, Expire,
@@ -146,60 +211,56 @@ validator policy_validator(policy_marker_policy_id: ByteArray) {
       // CLAIM: Oracle price <= strike price -> payout to insured
       // -----------------------------------------------------------------------
       Claim -> {
-        // Prevent double satisfaction: only one policy UTxO from this
-        // script may be consumed per transaction.
-        let single_policy_input =
-          count_script_inputs(inputs, own_script_hash) == 1
-
-        // Resolve the oracle price via the provider-uniform dispatcher.
-        let price =
-          resolve_oracle_price(
-            reference_inputs,
-            datum.oracle_provider,
-            datum.oracle_nft,
-          )
-
-        // Crash detected: oracle price at or below the strike.
-        let price_below_strike = price.value <= datum.strike_price
-
-        // Both validity-range legs must sit inside the freshness window,
-        // and tx_lower must be at or after the observed_at of the reading.
+        // A committed (AI-cover) policy MUST be claimed via `ClaimWithReceipt`,
+        // revealing its receipt — so the plain Claim path is valid ONLY when the
+        // policy carries no commitment. Non-AI policies are unaffected (None).
         let tx_lower = get_lower_bound(validity_range)
         let tx_upper = get_upper_bound(validity_range)
-        let oracle_fresh =
-          tx_lower >= price.observed_at && tx_lower <= price.valid_until && tx_upper <= price.valid_until
+        claim_settles(
+          datum,
+          inputs,
+          reference_inputs,
+          outputs,
+          tx_lower,
+          tx_upper,
+          own_script_hash,
+          has_marker,
+          marker_redeemer,
+          datum.receipt_commitment == None,
+        )
+      }
 
-        // Transaction must sit inside the policy period.
-        let within_start = tx_lower >= datum.start_time
-        let within_expiry = tx_upper <= datum.expiry_time
-
-        // Aggregate payout to insured must be sufficient, and every payout
-        // output must be an enterprise address.
-        let payout_valid =
-          sum_lovelace_to_enterprise_pkh(outputs, datum.insured) >= datum.coverage_amount
-
-        // Require the canonical pool output is present in the tx. The
-        // pool side (ProcessClaim) now owns the residual conservation
-        // equation: cont == own + policy_lovelace - payout, so any leak
-        // to "change" is impossible. Policy side only ensures the tx is
-        // co-spent with the canonical pool.
-        let pool_present =
-          when find_canonical_pool_output(
-            outputs,
-            datum.pool_script_hash,
-            datum.pool_nft,
-          ) is {
-            Some(_) -> True
+      // -----------------------------------------------------------------------
+      // CLAIM WITH RECEIPT (N5): settle an AI-cover policy by REVEALING the
+      // receipt preimage bound into PolicyDatum at creation. Identical
+      // settlement to Claim, plus the binding gate: the revealed witness must be
+      // well-formed AND hash to the policy's `receipt_commitment`, so the payout
+      // names the exact attested Materios receipt + threshold on-chain.
+      // -----------------------------------------------------------------------
+      ClaimWithReceipt { receipt } -> {
+        let tx_lower = get_lower_bound(validity_range)
+        let tx_upper = get_upper_bound(validity_range)
+        let binding_ok =
+          when datum.receipt_commitment is {
+            Some(commitment) ->
+              receipt_witness_ok(receipt) && commitment == receipt_commitment_hash(
+                receipt,
+              )
+            // A policy with NO commitment cannot use the receipt path.
             None -> False
           }
-
-        let marker_redeemer_ok =
-          when marker_redeemer is {
-            BurnForClaim -> True
-            _ -> False
-          }
-
-        single_policy_input && price_below_strike && oracle_fresh && within_start && within_expiry && payout_valid && pool_present && has_marker && marker_redeemer_ok
+        claim_settles(
+          datum,
+          inputs,
+          reference_inputs,
+          outputs,
+          tx_lower,
+          tx_upper,
+          own_script_hash,
+          has_marker,
+          marker_redeemer,
+          binding_ok,
+        )
       }
 
       // -----------------------------------------------------------------------
@@ -781,4 +842,173 @@ test n1_event_slot_missing_marker_claim_fails() {
       redeemers: n1_marker_redeemers(n1_marker_policy_id),
     }
   n1_claim_spend(tx) == False
+}
+
+// ===========================================================================
+// N5 — AI-cover receipt-commitment binding (ClaimWithReceipt)
+//
+// A policy that carries `receipt_commitment: Some(c)` (an AI-cover binding) can
+// ONLY be claimed by revealing the receipt preimage that hashes to `c`. These
+// tests drive the REAL validator over the committed-claim path.
+// ===========================================================================
+
+// A canonical 32-byte receiptId / config hash for the binding tests.
+const ai_receipt_id: ByteArray =
+  #"1111111111111111111111111111111111111111111111111111111111111111"
+
+const ai_receipt_id_alt: ByteArray =
+  #"3333333333333333333333333333333333333333333333333333333333333333"
+
+const ai_config_hash: ByteArray =
+  #"2222222222222222222222222222222222222222222222222222222222222222"
+
+const ai_threshold: Int = 700_000
+
+fn ai_witness() -> ReceiptWitness {
+  ReceiptWitness {
+    receipt_id: ai_receipt_id,
+    threshold: ai_threshold,
+    config_hash: ai_config_hash,
+  }
+}
+
+// An AI-cover policy: identical to the N1 event policy but BOUND to the receipt
+// commitment derived from `ai_witness()`.
+fn ai_policy_datum() -> PolicyDatum {
+  PolicyDatum {
+    ..n1_policy_datum(),
+    receipt_commitment: Some(receipt_commitment_hash(ai_witness())),
+  }
+}
+
+fn ai_policy_input() -> Input {
+  fixtures.policy_input_with_marker(
+    fixtures.tx_id_one,
+    0,
+    n1_policy_lovelace,
+    n1_marker_policy_id,
+    ai_policy_datum(),
+  )
+}
+
+// A triggered ($0.10 <= $0.50 strike) Claim tx whose policy input is the
+// committed AI-cover policy. The marker burns BurnForClaim, pool present.
+fn ai_triggered_tx() -> Transaction {
+  Transaction {
+    ..transaction.placeholder,
+    inputs: [ai_policy_input()],
+    reference_inputs: [
+      fixtures.aegis_self_feed_input(
+        fixtures.aegis_self_ada_nft,
+        100_000,
+        n1_created_ms,
+        n1_expiry_ms,
+      ),
+    ],
+    outputs: [n1_pool_output(), n1_insured_output()],
+    validity_range: fixtures.finite_range(n1_tx_lower, n1_tx_upper),
+    redeemers: n1_marker_redeemers(n1_marker_policy_id),
+  }
+}
+
+fn ai_spend(tx: Transaction, redeemer: PolicyRedeemer, datum: PolicyDatum) -> Bool {
+  policy_validator.spend(
+    n1_marker_policy_id,
+    Some(datum),
+    redeemer,
+    n1_own_ref(),
+    tx,
+  )
+}
+
+// GREEN: a committed AI-cover policy settles when ClaimWithReceipt reveals the
+// EXACT receipt preimage bound at creation.
+test n5_ai_cover_claim_with_matching_receipt_pays() {
+  ai_spend(ai_triggered_tx(), ClaimWithReceipt { receipt: ai_witness() }, ai_policy_datum()) == True
+}
+
+// RED -> REJECT: a WRONG receiptId (commitment mismatch) cannot settle the
+// policy — the payout is bound to the exact attested receipt.
+test n5_ai_cover_wrong_receipt_id_claim_fails() {
+  let wrong = ReceiptWitness { ..ai_witness(), receipt_id: ai_receipt_id_alt }
+  ai_spend(ai_triggered_tx(), ClaimWithReceipt { receipt: wrong }, ai_policy_datum()) == False
+}
+
+// RED -> REJECT: a WRONG threshold (commitment mismatch) cannot settle. Binds
+// the proven public threshold, not just the receiptId.
+test n5_ai_cover_wrong_threshold_claim_fails() {
+  let wrong = ReceiptWitness { ..ai_witness(), threshold: ai_threshold + 1 }
+  ai_spend(ai_triggered_tx(), ClaimWithReceipt { receipt: wrong }, ai_policy_datum()) == False
+}
+
+// RED -> REJECT: the binding cannot be BYPASSED via the plain Claim path — a
+// committed policy requires receipt_commitment == None there, which it is not.
+test n5_ai_cover_plain_claim_bypass_fails() {
+  ai_spend(ai_triggered_tx(), Claim, ai_policy_datum()) == False
+}
+
+// RED -> REJECT: a NON-committed (ordinary) policy cannot use the receipt path —
+// the None arm of the binding gate is False.
+test n5_non_committed_policy_via_receipt_path_fails() {
+  let tx =
+    n1_claim_tx(
+      100_000,
+      fixtures.aegis_self_ada_nft,
+      n1_created_ms,
+      n1_expiry_ms,
+      n1_marker_policy_id,
+    )
+  ai_spend(tx, ClaimWithReceipt { receipt: ai_witness() }, n1_policy_datum()) == False
+}
+
+// RED -> REJECT: a structurally malformed witness (receiptId not 32 bytes) is
+// rejected even when the policy is committed to that malformed witness's own
+// hash — proving `receipt_witness_ok` is load-bearing, not just the hash match.
+test n5_ai_cover_malformed_receipt_id_rejected() {
+  let bad =
+    ReceiptWitness { receipt_id: #"00", threshold: ai_threshold, config_hash: ai_config_hash }
+  let datum =
+    PolicyDatum {
+      ..n1_policy_datum(),
+      receipt_commitment: Some(receipt_commitment_hash(bad)),
+    }
+  let input =
+    fixtures.policy_input_with_marker(
+      fixtures.tx_id_one,
+      0,
+      n1_policy_lovelace,
+      n1_marker_policy_id,
+      datum,
+    )
+  let tx =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [input],
+      reference_inputs: [
+        fixtures.aegis_self_feed_input(
+          fixtures.aegis_self_ada_nft,
+          100_000,
+          n1_created_ms,
+          n1_expiry_ms,
+        ),
+      ],
+      outputs: [n1_pool_output(), n1_insured_output()],
+      validity_range: fixtures.finite_range(n1_tx_lower, n1_tx_upper),
+      redeemers: n1_marker_redeemers(n1_marker_policy_id),
+    }
+  ai_spend(tx, ClaimWithReceipt { receipt: bad }, datum) == False
+}
+
+// UNIT: the commitment distinguishes different receipts (binds receiptId) and
+// the structural guard enforces the Bytes32 sizes.
+test n5_receipt_commitment_distinguishes_receipts() {
+  let a = receipt_commitment_hash(ai_witness())
+  let b = receipt_commitment_hash(ReceiptWitness { ..ai_witness(), receipt_id: ai_receipt_id_alt })
+  a != b
+}
+
+test n5_receipt_witness_ok_enforces_sizes() {
+  receipt_witness_ok(ai_witness()) && !receipt_witness_ok(
+    ReceiptWitness { ..ai_witness(), receipt_id: #"00" },
+  )
 }
