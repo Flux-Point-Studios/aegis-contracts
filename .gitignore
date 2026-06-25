@@ -50,3 +50,6 @@ _work_*
 # Note: plutus.json IS committed because it's the parameter-free blueprint
 # that downstream tools and auditors verify against.
 aiken-out
+
+# agent settings + isolation worktrees
+.claude/
