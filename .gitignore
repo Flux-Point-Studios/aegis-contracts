@@ -53,3 +53,4 @@ aiken-out
 
 # agent settings + isolation worktrees
 .claude/
+docs/architecture/founders_pass_architecture.md
