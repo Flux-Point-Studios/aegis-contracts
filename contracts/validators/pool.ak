@@ -8,7 +8,7 @@ use aegis/pricing.{
   calculate_refund, calculate_treasury_cut, is_premium_adequate, net_premium,
 }
 use aegis/types.{
-  AcceptCancellation, AddLiquidity, AegisSelf, BatchExpireProcess,
+  AcceptCancellation, AddLiquidity, AegisSelf, Barrier, BatchExpireProcess,
   BatchUnderwrite, BurnForCancel, BurnForClaim, BurnForExpire, MarkerRedeemer,
   MintMarkers, PolicyDatum, PoolDatum, PoolRedeemer, ProcessClaim,
   RemoveLiquidity, Underwrite, min_utxo_lovelace, partner_share_cap_bps,
@@ -2140,6 +2140,7 @@ fn nna4_policy_output() -> Output {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
       receipt_commitment: None,
     }
   Output {

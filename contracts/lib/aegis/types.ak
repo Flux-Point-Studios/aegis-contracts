@@ -1,3 +1,4 @@
+use aiken/cbor
 use aiken/collection/list
 use aiken/crypto.{Blake2b_224, Hash, Script, VerificationKey, blake2b_256}
 use aiken/primitive/bytearray
@@ -17,6 +18,15 @@ pub type OracleProvider {
   Indigo
 }
 
+/// On-chain risk classification carried by every policy. Mirrors the live
+/// mainnet V4 schema: `Barrier` = `Constr 0 []` (CBOR `d87980`), `Depeg` =
+/// `Constr 1 []` (CBOR `d87a80`). Carried metadata — settlement does not branch
+/// on it — so existing claim logic is unchanged.
+pub type RiskClass {
+  Barrier
+  Depeg
+}
+
 pub type PolicyDatum {
   policy_id: ByteArray,
   insured: VerificationKeyHash,
@@ -31,6 +41,11 @@ pub type PolicyDatum {
   oracle_provider: OracleProvider,
   partner_address: Option<Address>,
   partner_share_bps: Int,
+  // Risk classification (Barrier | Depeg) — field index 13. This is the LAST
+  // field of the live mainnet V4 datum (verified against on-chain policy
+  // dd56e6df, whose datum ends `…00 d87980` = partner_share_bps 0, Barrier).
+  // Carried metadata; settlement does not branch on it.
+  risk_class: RiskClass,
   // N5 AI-cover binding: a commitment to the Materios receipt this policy covers
   // — blake2b-256(receipt_id ++ threshold_be8 ++ config_hash). `None` for every
   // non-AI policy (price/depeg/barrier/plain-event), which keeps the existing
@@ -199,9 +214,71 @@ test policy_datum_construction() {
       oracle_provider: Charli3,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
       receipt_commitment: None,
     }
   datum.strike_price == 350_000 && datum.coverage_amount == 5_000_000_000
+}
+
+// Cross-stack wire pin: receipt_commitment is the LAST positional field (index
+// 14), serialised AFTER risk_class. This is the on-chain counterpart of the SDK
+// `encodePolicyDatumV5` golden and the verified live-V4 lineage (dd56e6df ends
+// `…00 d87980`). Guards against re-introducing the field-order collision.
+test policy_datum_v5_none_receipt_serialises_after_risk_class() {
+  let datum =
+    PolicyDatum {
+      policy_id: #"aabb",
+      insured: #"0011223344556677889900112233445566778899001122334455667788",
+      strike_price: 350_000,
+      coverage_amount: 5_000_000_000,
+      premium_paid: 100_000_000,
+      start_time: 1_700_000_000_000,
+      expiry_time: 1_700_604_800_000,
+      oracle_nft: #"886dcb2363e160c944e63cf544ce6f6265b22ef7c4e2478dd975078e",
+      pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
+      pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
+      oracle_provider: Charli3,
+      partner_address: None,
+      partner_share_bps: 0,
+      risk_class: Barrier,
+      receipt_commitment: None,
+    }
+  let bytes = cbor.serialise(datum)
+  let n = bytearray.length(bytes)
+  // …, partner_share_bps 0 (00), risk_class Barrier (d87980),
+  // receipt_commitment None (d87a80), Constr indefinite-array break (ff).
+  bytearray.drop(bytes, n - 7) == #"d87980d87a80ff"
+}
+
+test policy_datum_v5_some_receipt_is_the_last_field() {
+  let commitment =
+    #"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+  let datum =
+    PolicyDatum {
+      policy_id: #"aabb",
+      insured: #"0011223344556677889900112233445566778899001122334455667788",
+      strike_price: 350_000,
+      coverage_amount: 5_000_000_000,
+      premium_paid: 100_000_000,
+      start_time: 1_700_000_000_000,
+      expiry_time: 1_700_604_800_000,
+      oracle_nft: #"886dcb2363e160c944e63cf544ce6f6265b22ef7c4e2478dd975078e",
+      pool_script_hash: #"aabbccdd11223344556677889900112233445566778899001122334455",
+      pool_nft: #"deadbeef00112233445566778899aabbccddeeff00112233445566",
+      oracle_provider: Charli3,
+      partner_address: None,
+      partner_share_bps: 0,
+      risk_class: Barrier,
+      receipt_commitment: Some(commitment),
+    }
+  let bytes = cbor.serialise(datum)
+  let n = bytearray.length(bytes)
+  // risk_class Barrier (d87980), Some(commitment) = d8799f 5820 <32B> ff, then
+  // the outer Constr break (ff). Expected tail = 8 + 32 + 2 = 42 bytes.
+  bytearray.drop(bytes, n - 42) == bytearray.concat(
+    #"d87980d8799f5820",
+    bytearray.concat(commitment, #"ffff"),
+  )
 }
 
 test pool_datum_construction() {
@@ -248,6 +325,7 @@ test policy_datum_aegis_self_variant_constructs() {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
       receipt_commitment: None,
     }
   let is_aegis_self =
@@ -339,6 +417,7 @@ test policy_datum_v12_no_partner() {
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
       receipt_commitment: None,
     }
   datum.partner_share_bps == 0 && datum.partner_address == None
@@ -360,6 +439,7 @@ test policy_datum_v12_with_partner() {
       oracle_provider: AegisSelf,
       partner_address: Some(team_address),
       partner_share_bps: 2_000,
+      risk_class: Barrier,
       receipt_commitment: None,
     }
   datum.partner_share_bps == 2_000
@@ -381,6 +461,7 @@ test policy_datum_indigo_variant_constructs() {
       oracle_provider: Indigo,
       partner_address: None,
       partner_share_bps: 0,
+      risk_class: Barrier,
       receipt_commitment: None,
     }
   let is_indigo =
