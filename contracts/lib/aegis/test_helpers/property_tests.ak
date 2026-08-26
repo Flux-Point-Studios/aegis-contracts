@@ -59,14 +59,6 @@ const below_min_premium: Fuzzer<Int> =
 const legal_pool_liquidity: Fuzzer<Int> =
   fuzz.int_between(1_000_000_000, 1_000_000_000_000_000)
 
-/// A strike price in the Aegis-published 1e6-scaled domain. Range covers
-/// $0.001 .. $1000 per ADA, which spans every feasible ADA/USD print.
-const legal_strike: Fuzzer<Int> = fuzz.int_between(1_000, 1_000_000_000)
-
-/// A POSIX-millisecond timestamp in the year-2024..2030 range.
-const legal_posix_ms: Fuzzer<Int> =
-  fuzz.int_between(1_700_000_000_000, 1_900_000_000_000)
-
 /// A small positive int — used for "batch size" or "drift" magnitudes.
 const small_pos: Fuzzer<Int> = fuzz.int_between(1, 1_000_000)
 
@@ -427,9 +419,11 @@ test prop_cancel_refund_non_negative(premium via legal_premium) {
   calculate_refund(premium) >= 0
 }
 
-test prop_cancel_window_is_one_hour_pinned() {
-  // The cancellation window must equal 3_600_000 ms regardless of inputs.
-  cancellation_window == 3_600_000
+test prop_cancel_window_closes_before_the_claim_opens() {
+  // [#391 R2 F2c] The window is 1_800_000 ms, and the VALUE is not the point —
+  // the RELATION is. While it equalled the Depeg waiting period and exceeded
+  // Barrier's, a hindsight bet that lost was refunded 90% of its premium.
+  cancellation_window == 1_800_000
 }
 
 // ---------------------------------------------------------------------------

@@ -28,8 +28,9 @@ use aegis/pricing.{
 use aegis/test_helpers/fixtures
 use aegis/types.{
   AegisSelf, BatchClaim, BatchExpire, BurnForCancel, BurnForClaim, BurnForExpire,
-  Cancel, Charli3, Claim, Expire, Indigo, MarkerRedeemer, MintMarkers, Orcfax,
-  PolicyDatum, PoolDatum, cancellation_window, charli3_oracle_script_hash,
+  Cancel, Charli3, Claim, ClaimWithReceipt, Expire, Indigo, MarkerRedeemer,
+  MintMarkers, Orcfax, Pyth, PolicyDatum, PoolDatum, cancellation_window,
+  charli3_oracle_script_hash, max_coverage_ratio, min_premium,
   min_utxo_lovelace, orcfax_ada_usd_feed_id, orcfax_freshness_window_ms,
   orcfax_fsp_script_hash, partner_share_cap_bps, policy_marker_asset_name,
   team_address, treasury_share_bps,
@@ -39,9 +40,10 @@ use aegis/validation.{
   sum_lovelace_to_enterprise_pkh, sum_lovelace_to_pkh,
 }
 use aiken/collection/list
+use aiken/primitive/bytearray
 use cardano/address.{Address, Script}
 use cardano/assets
-use cardano/transaction.{InlineDatum, Input, NoDatum, Output, OutputReference}
+use cardano/transaction.{Input, NoDatum, Output, OutputReference}
 
 // ---------------------------------------------------------------------------
 // A-001 — ProcessClaim must enforce payout == consumed-policy.coverage_amount
@@ -152,8 +154,6 @@ test green_a_004_underwrite_with_no_policy_output_rejected() {
   // present. Mirror: if the list of outputs has nothing pointing at the
   // policy validator with the right datum, the helper rejects.
   let outputs_without_policy: List<Output> = []
-  // sum of cov_amounts in matching outputs for this pool = 0 vs requested 100M
-  let _expected_coverage = 100_000_000
   outputs_without_policy == []
 }
 
@@ -580,10 +580,12 @@ test green_a_010_cancel_at_strike_boundary_is_in_the_money() {
   not_in_the_money == False
 }
 
-test green_a_010_cancel_window_constant_is_one_hour() {
-  // Sanity: the cancellation window remains 1 hour. The A-010 fix narrows
-  // *what* can be cancelled within that window without altering its length.
-  cancellation_window == 3_600_000
+test green_a_010_cancel_window_constant_is_half_an_hour() {
+  // [#391 R2 F2c] Was one hour, which EQUALLED the Depeg claim waiting period
+  // and EXCEEDED Barrier's — so the losing half of a hindsight bet cancelled
+  // for a 90% refund. The A-010 fix narrows *what* can be cancelled within the
+  // window; this narrows the window itself to half the shortest wait.
+  cancellation_window == 1_800_000
 }
 
 // ---------------------------------------------------------------------------
@@ -706,7 +708,7 @@ test green_a_021_underwrite_correct_donation_accepted() {
   let donation_ok =
     when donation is {
       Some(amt) -> amt >= required
-      None -> required == 0
+      None -> True
     }
   donation_ok == True && required == 500_000
 }
@@ -722,7 +724,7 @@ test green_a_021_underwrite_short_donation_rejected() {
   let donation_ok =
     when donation is {
       Some(amt) -> amt >= required
-      None -> required == 0
+      None -> True
     }
   donation_ok == False
 }
@@ -739,7 +741,7 @@ test green_a_021_underwrite_zero_donation_rejected_when_required() {
   let donation_ok =
     when donation is {
       Some(amt) -> amt >= required
-      None -> required == 0
+      None -> True
     }
   donation_ok == False && required > 0
 }
@@ -757,15 +759,16 @@ test green_a_021_underwrite_overshoot_donation_accepted() {
   let donation_ok =
     when donation is {
       Some(amt) -> amt >= required
-      None -> required == 0
+      None -> True
     }
   donation_ok == True
 }
 
-test green_a_021_underwrite_none_donation_rejected_when_required() {
-  // Omitting the donation field entirely (None) when a positive cut is
-  // required must fail. The validator's pattern is `None -> required == 0`,
-  // which evaluates to `False` here because the cut is 500_000 > 0.
+test a_021_underwrite_none_donation_accepted_conditional() {
+  // [conditional donation] Omitting key-22 (None) is now ACCEPTED even when a
+  // positive cut would be owed: a composed/covered-swap underwrite can't carry
+  // the Conway donation, so the per-tx cut is optional (the sweep reconciles it).
+  // The validator's pattern is `None -> True`.
   let pool = fixtures.default_pool_datum()
   let premium = 100_000_000
   let required =
@@ -774,9 +777,9 @@ test green_a_021_underwrite_none_donation_rejected_when_required() {
   let donation_ok =
     when donation is {
       Some(amt) -> amt >= required
-      None -> required == 0
+      None -> True
     }
-  donation_ok == False && required > 0
+  donation_ok == True && required > 0
 }
 
 test green_a_021_batch_underwrite_aggregate_donation_correct() {
@@ -946,7 +949,9 @@ test green_a_014_one_lovelace_over_now_rejected() {
 }
 
 test green_a_014_exactly_50x_still_accepted() {
-  is_premium_adequate(2_000_000, 100_000_000) == True
+  // [#363 F5] Expressed relative to the active profile's `min_premium`; the
+  // literal 2 ADA was preprod-only and made this unpassable on mainnet.
+  is_premium_adequate(min_premium, min_premium * max_coverage_ratio) == True
 }
 
 // ---------------------------------------------------------------------------
@@ -998,14 +1003,48 @@ test green_a_016_oracle_at_canonical_address_accepted() {
   get_oracle_price(datum) == 420_000
 }
 
-test green_a_016_oracle_at_wrong_address_rejected() {
-  // A reference input with the right NFT but at a NON-canonical script
-  // address must NOT be returned by the oracle finder. We assert the
-  // hash gate: the spoofed script hash differs from the canonical one.
-  let spoofed_hash = #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-  let canonical_hash =
-    #"221ee21e9607f766e1e1223248f67320014825169a1d98eb34c6f658"
-  spoofed_hash != canonical_hash
+// [#363 R4] A reference input carrying the CANONICAL oracle NFT but parked at a
+// non-canonical script address must NOT be resolved by the finder. `test … fail`
+// asserts the abort: `find_oracle_datum` returns None from `find_oracle_output`
+// and hits its `fail`.
+//
+// This test has been vacuous twice. It first compared two hardcoded literals
+// (`deadbeef… != 221ee21e…`). The F5 pass "fixed" it to compare the spoof
+// against the ACTIVE constant — still two constants, still never invoking the
+// finder, and under the mainnet module `charli3_oracle_script_hash` is the
+// all-zero soft-disable placeholder so it degenerated to `deadbeef… != 0000…`.
+//
+// PROVEN load-bearing by mutation: replacing the gate at
+// oracle/charli3.ak:213 with `Script(h) -> h == h` (accept the NFT at ANY
+// address) leaves the whole suite green in the old form and REDDENS this one.
+test green_a_016_oracle_at_wrong_address_rejected() fail {
+  let spoofed = #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  let ref_input =
+    fixtures.oracle_ref_input_at(
+      spoofed,
+      420_000,
+      1_700_000_000_000,
+      1_700_999_999_999,
+    )
+  let datum = find_oracle_datum([ref_input], fixtures.oracle_nft_policy)
+  get_oracle_price(datum) == 420_000
+}
+
+// The positive twin, so the pair proves the finder DISCRIMINATES on address
+// rather than simply always aborting: the identical UTxO at the canonical
+// address resolves. (`green_a_016_oracle_at_canonical_address_accepted` above
+// covers the same ground via `oracle_ref_input`; this states the contrast
+// explicitly against the same builder the reject case uses.)
+test green_a_016_same_utxo_at_canonical_address_resolves() {
+  let ref_input =
+    fixtures.oracle_ref_input_at(
+      charli3_oracle_script_hash,
+      420_000,
+      1_700_000_000_000,
+      1_700_999_999_999,
+    )
+  let datum = find_oracle_datum([ref_input], fixtures.oracle_nft_policy)
+  get_oracle_price(datum) == 420_000
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,14 +1151,18 @@ test green_v6_orcfax_fsp_script_hash_check_matches_constant() {
   orcfax_fsp_script_hash == mainnet_expected || orcfax_fsp_script_hash == preview_expected
 }
 
-test green_v6_charli3_oracle_script_hash_unchanged_from_v5() {
-  // The v6 refactor must NOT rotate the canonical Charli3 oracle script hash
-  // — that is a Charli3-controlled handle, immutable by Aegis. Pin the byte
-  // string here so any accidental in-Aiken edit to the constant breaks this
-  // test.
-  let v5_pin: ByteArray =
-    #"221ee21e9607f766e1e1223248f67320014825169a1d98eb34c6f658"
-  charli3_oracle_script_hash == v5_pin
+test green_v6_charli3_handle_is_well_formed() {
+  // The Charli3 oracle script hash is a Charli3-CONTROLLED handle that Aegis
+  // must never rotate on its own.
+  //
+  // [#363 F5] The old byte pin held the preprod value, so it was unpassable
+  // under the mainnet module — where Charli3 is deliberately soft-disabled
+  // behind an all-zero fail-closed placeholder. A per-network VALUE pin cannot
+  // be written as a test that must be green under BOTH modules; the value guard
+  // is the #361 deploy-time network-flip fingerprint. What holds on either
+  // profile is well-formedness: a 28-byte Blake2b-224 hash, so the constant can
+  // never be a truncated or empty paste.
+  bytearray.length(charli3_oracle_script_hash) == 28
 }
 
 test green_v6_a012_uniform_provider_required_in_batch() {
@@ -1231,6 +1274,8 @@ test green_v6_policy_datum_has_11_fields_post_migration() {
       AegisSelf -> True
       // Indigo arm added as 4th provider variant.
       Indigo -> True
+      // [Pyth Wave 1] Pyth added as 5th provider variant.
+      Pyth -> True
     }
   // Sanity: the other 10 fields are still present and reachable.
   let other_fields_intact =
@@ -1930,81 +1975,10 @@ test redteam_round_7_r7_a_attacker_burn_below_lp_loss() {
   attacker_burn == 200_000 && lp_loss == 3_800_000 && lp_loss > attacker_burn * 10
 }
 
-// ---------------------------------------------------------------------------
-// R7-B — BatchClaim with 2+ Indigo policies is
-// rejected by the validator due to a non-exhaustive switch in
-// `policy.ak::batch_oracles_uniform`. The `when (sent_provider, this_provider)
-// is { ... }` lists (Charli3, Charli3), (Orcfax, Orcfax), and (AegisSelf,
-// AegisSelf) but NOT (Indigo, Indigo), so a same-provider Indigo pair falls
-// through to the `_ -> False` wildcard. `same_provider` becomes False, the
-// fold sets `ok = False`, and `batch_oracles_uniform` returns False, which
-// rejects the entire BatchClaim tx.
-//
-// Availability bug, not a security drain. Two-policy Indigo batch claims
-// will fail at validator time. Single-Indigo-policy BatchClaim succeeds (the
-// `seen` sentinel guard skips the equality check on the first element).
-//
-// This positive test pins the buggy current state: it mirrors the validator's
-// switch exactly. With Indigo on the LHS+RHS, the result is False. When the
-// fix lands (adding `(Indigo, Indigo) -> True`), this test must be updated
-// to True, surfacing the fix in code review.
-// ---------------------------------------------------------------------------
-
-test redteam_round_7_r7_b_batch_oracles_uniform_accepts_indigo_pair() {
-  // After adding `(Indigo, Indigo) -> True` to the
-  // switch in `validators/policy.ak::batch_oracles_uniform`, two Indigo
-  // policies in a BatchClaim now correctly resolve to `same_provider =
-  // True` instead of falling through to the wildcard False arm. The
-  // test mirrors the validator's switch verbatim (kept in-test rather
-  // than calling the validator helper because the helper is private to
-  // the policy.ak module).
-  let p1 =
-    PolicyDatum {
-      ..fixtures.default_policy_datum(),
-      oracle_provider: Indigo,
-      oracle_nft: #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
-    }
-  let p2 =
-    PolicyDatum {
-      ..fixtures.default_policy_datum(),
-      oracle_provider: Indigo,
-      oracle_nft: #"b5b0ea68368eea547c79042a92a3779564e4987b4709d73b2e7e1ea5",
-    }
-  let same_provider =
-    when (p1.oracle_provider, p2.oracle_provider) is {
-      (Charli3, Charli3) -> True
-      (Orcfax, Orcfax) -> True
-      (AegisSelf, AegisSelf) -> True
-      (Indigo, Indigo) -> True
-      _ -> False
-    }
-  same_provider == True
-}
-
-test redteam_round_7_r7_b_batch_oracles_uniform_accepts_aegis_self_pair() {
-  // Regression-lock: AegisSelf same-pair stays True under the current switch.
-  // This test must continue to pass after the R7-B fix.
-  let p1 =
-    PolicyDatum {
-      ..fixtures.default_policy_datum(),
-      oracle_provider: AegisSelf,
-      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
-    }
-  let p2 =
-    PolicyDatum {
-      ..fixtures.default_policy_datum(),
-      oracle_provider: AegisSelf,
-      oracle_nft: #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f",
-    }
-  let same_provider =
-    when (p1.oracle_provider, p2.oracle_provider) is {
-      (Charli3, Charli3) -> True
-      (Orcfax, Orcfax) -> True
-      (AegisSelf, AegisSelf) -> True
-      _ -> False
-    }
-  same_provider == True
-}
+// R7-B (BatchClaim feed-uniformity) retired: BatchClaim is disabled in the
+// policy validator (single Claim per policy), and oracle prices are now read
+// per-policy via the observer attestation (`attested_price`), so the batch
+// feed-uniformity helper it exercised no longer exists.
 
 // ---------------------------------------------------------------------------
 // R7-C — Soft-disabled Orcfax with no in-tree
@@ -2169,6 +2143,7 @@ test batch_claim_redeemer_still_in_type_universe() {
     Expire -> False
     BatchExpire -> False
     Cancel -> False
+    ClaimWithReceipt { .. } -> False
   }
 }
 

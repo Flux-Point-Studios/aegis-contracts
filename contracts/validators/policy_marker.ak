@@ -1,6 +1,6 @@
 use aegis/types.{
   BurnForCancel, BurnForClaim, BurnForExpire, MarkerRedeemer, MintMarkers,
-  PolicyDatum, policy_marker_asset_name,
+  policy_marker_asset_name,
 }
 use aegis/validation.{pool_is_consumed_via_nft}
 // =============================================================================
@@ -71,10 +71,8 @@ use aegis/validation.{pool_is_consumed_via_nft}
 // =============================================================================
 
 use aiken/collection/dict
-use aiken/collection/list
-use cardano/address.{Script}
 use cardano/assets.{PolicyId}
-use cardano/transaction.{InlineDatum, Output, Transaction}
+use cardano/transaction.{Transaction}
 
 // ---------------------------------------------------------------------------
 // Policy Marker Minting Policy

@@ -74,6 +74,23 @@ pub type Price {
   /// `min_price_12h == value` spot fallback that collapses the 12h leg to
   /// spot-at-claim for non-AegisSelf providers and legacy datums.
   low_observed_at: Int,
+  /// [#403 FIX 4] Did the upstream reading actually CARRY a confidence
+  /// interval? Presence only — the MAGNITUDE is already gated where the
+  /// payload is parsed (`pyth.confidence_ok` against `pyth_max_confidence_bps`)
+  /// and a reading whose confidence is too wide never becomes a Price at all.
+  ///
+  /// This exists because presence is buyer-controlled and magnitude is not.
+  /// Lazer subscribers choose the `properties` list, so a payload can simply
+  /// omit confidence — which is why flipping the global
+  /// `pyth_reject_absent_confidence` to True BRICKS every real signed fixture
+  /// we hold, and why the flag stays False. Surfacing presence here lets the
+  /// SALE-side pull leg demand it PER-MANDATE without imposing it on the
+  /// settlement path, where a denied honest claimant is the worse failure.
+  ///
+  /// Every push provider sets this False: none of them publishes a confidence
+  /// interval, and claiming otherwise would let a mandate demand something
+  /// that cannot exist.
+  confidence_present: Bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +105,7 @@ test price_record_construction() {
       valid_until: 1_700_001_800_000,
       min_price_12h: 350_000,
       low_observed_at: 1_700_000_000_000,
+      confidence_present: False,
     }
   p.value == 350_000 && p.valid_until == 1_700_001_800_000
 }

@@ -185,16 +185,21 @@ pub fn calculate_refund(premium: Int) -> Int {
 // Tests
 // ---------------------------------------------------------------------------
 
+// [#363 F5] The premium-boundary tests below are expressed RELATIVE to
+// `min_premium`, not as the literal preprod 2 ADA. The literals made them
+// unpassable under the mainnet module (20 ADA) — and worse, made several of the
+// `== False` cases below pass for the WRONG REASON there: a coverage-ratio test
+// that trips the minimum check instead proves nothing about the ratio.
 test minimum_premium_met() {
-  is_above_minimum(2_000_000) == True
+  is_above_minimum(min_premium) == True
 }
 
 test minimum_premium_exceeded() {
-  is_above_minimum(5_000_000) == True
+  is_above_minimum(min_premium + 3_000_000) == True
 }
 
 test minimum_premium_not_met() {
-  is_above_minimum(1_999_999) == False
+  is_above_minimum(min_premium - 1) == False
 }
 
 test minimum_premium_zero() {
@@ -221,18 +226,20 @@ test ratio_unacceptable_zero_premium() {
 }
 
 test premium_adequate_valid() {
-  // 5 ADA premium, 100 ADA coverage -> above min, 20x ratio
-  is_premium_adequate(5_000_000, 100_000_000) == True
+  // At the minimum premium, 20x coverage -> above min, inside the 50x ratio.
+  is_premium_adequate(min_premium, min_premium * 20) == True
 }
 
 test premium_adequate_fails_minimum() {
-  // 1 ADA premium, 10 ADA coverage -> below minimum
-  is_premium_adequate(1_000_000, 10_000_000) == False
+  // One lovelace below the minimum, with an otherwise-fine 10x ratio, so the
+  // MINIMUM leg is the only thing that can reject it.
+  is_premium_adequate(min_premium - 1, ( min_premium - 1 ) * 10) == False
 }
 
 test premium_adequate_fails_ratio() {
-  // 2 ADA premium, 200 ADA coverage -> 100x ratio
-  is_premium_adequate(2_000_000, 200_000_000) == False
+  // Premium is exactly at the minimum, so the ratio leg is the only thing that
+  // can reject it: 100x is twice the 50x cap.
+  is_premium_adequate(min_premium, min_premium * ( max_coverage_ratio * 2 )) == False
 }
 
 test protocol_fee_calculation() {
@@ -281,28 +288,26 @@ test ratio_rejects_negative_premium() {
 // Verify that coverage / premium integer division can be exploited
 // at the boundary: 50 * premium exactly equals coverage passes
 test ratio_boundary_exactly_at_max() {
-  // premium = 2 ADA, coverage = 100 ADA -> ratio = 50x (exactly at max)
-  is_premium_adequate(2_000_000, 100_000_000) == True
+  // Minimum premium, coverage exactly 50x -> at the cap, accepted.
+  is_premium_adequate(min_premium, min_premium * max_coverage_ratio) == True
 }
 
-// [F-008] Integer division truncation: 100_000_001 / 2_000_000 = 50 (not 50.0000005)
-// After multiplication-style comparison, the 1-lovelace-over
-// case is now correctly REJECTED. Previously the truncation
-// `100_000_001 / 2_000_000 = 50` slipped through; the new check
-// `100_000_001 <= 2_000_000 * 50 = 100_000_000` evaluates False.
+// [F-008] Integer division truncation: `coverage / premium` floors, so one
+// lovelace past 50x used to truncate back to exactly 50 and slip through. The
+// multiplication form `coverage <= premium * 50` is exact and rejects it.
+// Premium sits AT the minimum so only the ratio leg can do the rejecting.
 test ratio_truncation_one_lovelace_over_now_rejected_a014() {
-  is_premium_adequate(2_000_000, 100_000_001) == False
+  is_premium_adequate(min_premium, min_premium * max_coverage_ratio + 1) == False
 }
 
 // Boundary: exactly 50× still passes.
 test ratio_at_exactly_50x_passes() {
-  is_premium_adequate(2_000_000, 100_000_000) == True
+  is_premium_adequate(min_premium, min_premium * max_coverage_ratio) == True
 }
 
 // But coverage clearly above max ratio is rejected
 test ratio_clearly_over_max() {
-  // premium = 2 ADA, coverage = 102 ADA -> ratio = 51x (rejected)
-  is_premium_adequate(2_000_000, 102_000_000) == False
+  is_premium_adequate(min_premium, min_premium * ( max_coverage_ratio + 1 )) == False
 }
 
 // Confirm the multiplication form rejects ALL fractional
@@ -319,10 +324,9 @@ test net_premium_zero_fee() {
   net_premium(10_000_000, 0) == 10_000_000
 }
 
-// Cancellation fee on minimum premium
+// Cancellation fee on the minimum premium is 10% of it, on either profile.
 test cancellation_fee_on_minimum_premium() {
-  // 10% of 2 ADA = 0.2 ADA
-  calculate_cancellation_fee(2_000_000) == 200_000
+  calculate_cancellation_fee(min_premium) == min_premium / 10
 }
 
 // Refund should always be less than premium

@@ -11,6 +11,11 @@ name = "aiken-lang/fuzz"
 version = "v2.1.1"
 source = "github"
 
+[[requirements]]
+name = "pyth-network/pyth-lazer-cardano"
+version = "217b5917228b17f015719b27dd616a75ad6bd800"
+source = "github"
+
 [[packages]]
 name = "aiken-lang/stdlib"
 version = "v3.0.0"
@@ -20,6 +25,12 @@ source = "github"
 [[packages]]
 name = "aiken-lang/fuzz"
 version = "v2.1.1"
+requirements = []
+source = "github"
+
+[[packages]]
+name = "pyth-network/pyth-lazer-cardano"
+version = "217b5917228b17f015719b27dd616a75ad6bd800"
 requirements = []
 source = "github"
 

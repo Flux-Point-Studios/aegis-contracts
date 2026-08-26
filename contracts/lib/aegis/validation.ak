@@ -11,9 +11,11 @@ use aegis/types.{ScriptHash, VerificationKeyHash}
 
 use aiken/collection/list
 use aiken/interval.{Finite}
-use cardano/address.{Address, Credential, Script, VerificationKey}
+use cardano/address.{Address, Inline, Script, VerificationKey}
 use cardano/assets
-use cardano/transaction.{Input, NoDatum, Output, OutputReference, ValidityRange}
+use cardano/transaction.{
+  InlineDatum, Input, NoDatum, Output, OutputReference, ValidityRange,
+}
 
 // ---------------------------------------------------------------------------
 // Signature Checks
@@ -140,6 +142,62 @@ pub fn sum_lovelace_to_enterprise_pkh(
     0,
     fn(out, acc) {
       if out.address.payment_credential == VerificationKey(pkh) && out.address.stake_credential == None {
+        acc + assets.lovelace_of(out.value)
+      } else {
+        acc
+      }
+    },
+  )
+}
+
+/// [V5] Sum lovelace across ALL outputs whose FULL address (payment AND stake
+/// credential) structurally equals `target`. This is the payout primitive for
+/// a `payout_address`-bound policy (e.g. a DAO treasury script).
+///
+/// The exact-Address match is load-bearing for A-009: the target is committed
+/// in the policy datum by the buyer at Underwrite, so a permissionless
+/// claim-bot cannot graft its own stake credential onto the payout (a grafted
+/// stake makes `out.address != target`, contributing 0). Matching only the
+/// payment credential would re-open A-009 for the key case. Like the enterprise
+/// helper it MUST sum via `foldl` — never first-match (the A-006 / A-013 lesson
+/// that retired `find_output_to_pkh`).
+pub fn sum_lovelace_to_address(outputs: List<Output>, target: Address) -> Int {
+  list.foldl(
+    outputs,
+    0,
+    fn(out, acc) {
+      if out.address == target {
+        acc + assets.lovelace_of(out.value)
+      } else {
+        acc
+      }
+    },
+  )
+}
+
+/// [V6 / #325 Plutus-treasury] Sum lovelace across ALL outputs whose FULL
+/// address structurally equals `target` AND that carry `InlineDatum(inline)`
+/// exactly. This is the payout primitive for a `payout_address`-bound policy
+/// that ALSO committed a `payout_datum` (a Plutus/V2-V3 DAO treasury).
+///
+/// The ledger requires a datum to invoke a Plutus spend script; a datum-less
+/// coverage output locks at such a treasury forever. Requiring the committed
+/// inline datum (buyer-committed at Underwrite, so a permissionless claim-bot
+/// cannot substitute its own) makes the coverage spendable by the treasury's
+/// own validator. Like `sum_lovelace_to_address` it MUST sum via `foldl` —
+/// never first-match (the A-006 / A-013 lesson) — and pins the FULL address
+/// (A-009). Datum equality is structural (`equalsData`), so a treasury that
+/// pattern-matches its datum gets exactly the value it expects.
+pub fn sum_lovelace_to_address_with_inline_datum(
+  outputs: List<Output>,
+  target: Address,
+  inline: Data,
+) -> Int {
+  list.foldl(
+    outputs,
+    0,
+    fn(out, acc) {
+      if out.address == target && out.datum == InlineDatum(inline) {
         acc + assets.lovelace_of(out.value)
       } else {
         acc
@@ -374,4 +432,150 @@ test count_script_inputs_pubkey_inputs_not_counted() {
       },
     }
   count_script_inputs([pkh_input], target_hash) == 0
+}
+
+// ---------------------------------------------------------------------------
+// [V5] sum_lovelace_to_address — exact full-Address payout primitive
+// ---------------------------------------------------------------------------
+
+fn addr_output(addr: Address, lovelace: Int) -> Output {
+  Output {
+    address: addr,
+    value: assets.from_lovelace(lovelace),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+test sum_to_address_exact_script_match_accepts() {
+  // A DAO treasury SCRIPT address (enterprise) is paid in full — the V4
+  // enterprise-PKH helper would have skipped this Script-credential output.
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  sum_lovelace_to_address([addr_output(target, 5_000_000)], target) == 5_000_000
+}
+
+test sum_to_address_grafted_stake_rejected() {
+  // A-009: a permissionless claim-bot grafts its own stake credential onto the
+  // committed script payout. Full-Address equality fails -> contributes 0.
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  let grafted =
+    Address {
+      payment_credential: Script(#"abcd"),
+      stake_credential: Some(Inline(VerificationKey(#"deadbeef"))),
+    }
+  sum_lovelace_to_address([addr_output(grafted, 5_000_000)], target) == 0
+}
+
+test sum_to_address_aggregates_split_outputs() {
+  // MUST sum (foldl), never first-match: split payout across two outputs
+  // to the exact target still aggregates (A-006 / A-013).
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  sum_lovelace_to_address(
+    [addr_output(target, 3_000_000), addr_output(target, 4_000_000)],
+    target,
+  ) == 7_000_000
+}
+
+test sum_to_address_ignores_unrelated() {
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  let other =
+    Address { payment_credential: Script(#"ef01"), stake_credential: None }
+  sum_lovelace_to_address([addr_output(other, 5_000_000)], target) == 0
+}
+
+test sum_to_address_delegated_target_accepts_exact() {
+  // A DAO may commit a DELEGATED (base) script address; the exact match
+  // including the committed stake credential is accepted.
+  let stake = Inline(VerificationKey(#"57a4e0"))
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: Some(stake) }
+  sum_lovelace_to_address([addr_output(target, 9_000_000)], target) == 9_000_000
+}
+
+// ---------------------------------------------------------------------------
+// [V6 / #325] sum_lovelace_to_address_with_inline_datum — datum-gated payout
+// ---------------------------------------------------------------------------
+
+fn addr_output_with_datum(addr: Address, inline: Data, lovelace: Int) -> Output {
+  Output {
+    address: addr,
+    value: assets.from_lovelace(lovelace),
+    datum: InlineDatum(inline),
+    reference_script: None,
+  }
+}
+
+test sum_with_datum_matching_inline_accepts() {
+  // Coverage to the committed script address carrying the EXACT committed
+  // inline datum is counted — the Plutus treasury can spend it.
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  let d: Data = 42
+  sum_lovelace_to_address_with_inline_datum(
+    [addr_output_with_datum(target, d, 5_000_000)],
+    target,
+    d,
+  ) == 5_000_000
+}
+
+test sum_with_datum_datumless_rejected() {
+  // A datum-less output to the committed address contributes 0: a Plutus
+  // treasury could not spend it, so the Claim must not count it.
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  let d: Data = 42
+  sum_lovelace_to_address_with_inline_datum(
+    [addr_output(target, 5_000_000)],
+    target,
+    d,
+  ) == 0
+}
+
+test sum_with_datum_mismatched_inline_rejected() {
+  // The output carries a DIFFERENT inline datum than committed -> 0.
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  let committed: Data = 42
+  let other: Data = 7
+  sum_lovelace_to_address_with_inline_datum(
+    [addr_output_with_datum(target, other, 5_000_000)],
+    target,
+    committed,
+  ) == 0
+}
+
+test sum_with_datum_grafted_stake_rejected() {
+  // Exact datum but a grafted stake credential -> full-Address mismatch -> 0.
+  let d: Data = 42
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  let grafted =
+    Address {
+      payment_credential: Script(#"abcd"),
+      stake_credential: Some(Inline(VerificationKey(#"deadbeef"))),
+    }
+  sum_lovelace_to_address_with_inline_datum(
+    [addr_output_with_datum(grafted, d, 5_000_000)],
+    target,
+    d,
+  ) == 0
+}
+
+test sum_with_datum_aggregates_split_outputs() {
+  // Split payout across two exact (address + datum) outputs still aggregates.
+  let target =
+    Address { payment_credential: Script(#"abcd"), stake_credential: None }
+  let d: Data = 42
+  sum_lovelace_to_address_with_inline_datum(
+    [
+      addr_output_with_datum(target, d, 3_000_000),
+      addr_output_with_datum(target, d, 4_000_000),
+    ],
+    target,
+    d,
+  ) == 7_000_000
 }

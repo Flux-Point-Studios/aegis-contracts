@@ -127,6 +127,37 @@ pub fn verify_claim_datum(
   payout >= 0 && payout <= old_active && new_total == old_total - payout && new_active == old_active - payout && new_total >= 0 && new_active >= 0
 }
 
+/// [P1] Verify a ProcessClaim datum transition that draws the payout from the
+/// first-loss `reserve` tranche BEFORE LP-attributable `total_liquidity`.
+///
+///   from_reserve = min(payout, old_reserve)
+///   reserve      -= from_reserve
+///   total        -= payout - from_reserve
+///   active       -= payout            (unchanged solvency accounting)
+///
+/// The reserve is a distinct tranche that is NOT part of `total_liquidity` and
+/// is EXCLUDED from `calculate_withdrawal` — so drawing it first protects LP
+/// redemption price. When `old_reserve == 0` this reduces EXACTLY to
+/// `verify_claim_datum` (every legacy claim-datum assertion still holds).
+pub fn verify_claim_datum_with_reserve(
+  old_total: Int,
+  old_active: Int,
+  old_reserve: Int,
+  new_total: Int,
+  new_active: Int,
+  new_reserve: Int,
+  payout: Int,
+) -> Bool {
+  let from_reserve =
+    if payout <= old_reserve {
+      payout
+    } else {
+      old_reserve
+    }
+  let from_total = payout - from_reserve
+  payout >= 0 && payout <= old_active && new_reserve == old_reserve - from_reserve && new_total == old_total - from_total && new_active == old_active - payout && new_reserve >= 0 && new_total >= 0 && new_active >= 0
+}
+
 /// Verify that pool datum is updated correctly for AddLiquidity.
 /// Now also enforces lp_supply increments by exactly the LP
 /// quantity that calculate_lp_mint produces for this deposit.
@@ -436,4 +467,98 @@ test verify_remove_liquidity_rejects_lp_burn_mismatch_a_003_fix() {
     200_000_000,
     1,
   ) == False
+}
+
+// ---------------------------------------------------------------------------
+// [P1] verify_claim_datum_with_reserve — reserve-first payout draw.
+// ---------------------------------------------------------------------------
+
+test claim_draws_reserve_before_total() {
+  // payout 300, reserve 200 → from_reserve = 200, from_total = 100.
+  // reserve 200 → 0; total 1000 → 900; active 500 → 200.
+  verify_claim_datum_with_reserve(
+    1_000_000_000,
+    500_000_000,
+    200_000_000,
+    900_000_000,
+    200_000_000,
+    0,
+    300_000_000,
+  ) == True
+}
+
+test claim_payout_under_reserve_leaves_total_untouched() {
+  // payout 50 <= reserve 200 → from_reserve = 50, from_total = 0.
+  // reserve 200 → 150; total UNCHANGED at 1000; active 500 → 450.
+  verify_claim_datum_with_reserve(
+    1_000_000_000,
+    500_000_000,
+    200_000_000,
+    1_000_000_000,
+    450_000_000,
+    150_000_000,
+    50_000_000,
+  ) == True
+}
+
+test claim_reserve_zero_matches_legacy() {
+  // With reserve == 0 the helper reduces to verify_claim_datum: payout 300
+  // draws entirely from total (reserve stays 0). Mirrors verify_claim_datum_correct.
+  verify_claim_datum_with_reserve(
+    1_000_000_000,
+    500_000_000,
+    0,
+    700_000_000,
+    200_000_000,
+    0,
+    300_000_000,
+  ) == verify_claim_datum(
+    1_000_000_000,
+    500_000_000,
+    700_000_000,
+    200_000_000,
+    300_000_000,
+  )
+}
+
+test claim_with_reserve_rejects_excessive_payout() {
+  // payout 600 > active 500 → reject, even with a fat reserve.
+  verify_claim_datum_with_reserve(
+    1_000_000_000,
+    500_000_000,
+    1_000_000_000,
+    400_000_000,
+    -100_000_000,
+    400_000_000,
+    600_000_000,
+  ) == False
+}
+
+test claim_with_reserve_rejects_total_not_drawn_when_reserve_short() {
+  // payout 300, reserve 200: total MUST drop by 100. An attacker who leaves
+  // total unchanged (only draining reserve by 300, impossible) is rejected
+  // because new_reserve would be -100 (< 0) — and total mismatch.
+  verify_claim_datum_with_reserve(
+    1_000_000_000,
+    500_000_000,
+    200_000_000,
+    1_000_000_000,
+    200_000_000,
+    -100_000_000,
+    300_000_000,
+  ) == False
+}
+
+// The capital invariant: reserve NEVER enters the LP redemption price. Two
+// pools with identical total_liquidity / lp_supply but different reserve
+// return the SAME withdrawal for the same LP burn.
+test lp_redemption_price_unaffected_by_reserve() {
+  let total = 2_000_000_000
+  let supply = 1_000_000_000
+  let burn = 250_000_000
+  // calculate_withdrawal reads total_liquidity ONLY — reserve is not even a
+  // parameter, so a 500-ADA reserve cannot move the price.
+  let w_no_reserve = calculate_withdrawal(burn, total, supply)
+  let w_with_reserve = calculate_withdrawal(burn, total, supply)
+  w_no_reserve == 500_000_000 && w_with_reserve == w_no_reserve
 }

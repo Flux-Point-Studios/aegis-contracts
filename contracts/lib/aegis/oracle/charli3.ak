@@ -103,15 +103,33 @@ pub fn get_min_price_12h(price_data: PriceData) -> Int {
 }
 
 /// Extract the timestamp (POSIX ms) at which the trailing-12h low was
-/// observed (key 4). SAFETY: defaults to the reading's own timestamp (key 1)
-/// when key 4 is absent, so a legacy datum's 12h leg ties to `observed_at`
-/// (and, paired with the min==spot fallback, collapses to spot-at-claim).
+/// observed (key 4), or `0` when the reading does not carry one.
+///
+/// [#391 R2 F1] `0` is the NO-PROVENANCE sentinel, and it is fail-closed on the
+/// CAPABILITY rather than on the reading. Three shapes have to be told apart:
+///
+///   * a reading that carries a real low_observed_at — it can say whether a
+///     touch fell during a policy, and `vault.has_trailing_low` answers True;
+///   * a reading that carries none — it can say nothing about WHEN, so the
+///     retro disjunct is unreachable (`0 >= start_time` is false for every
+///     real policy) and the pre-start-breach veto stays disarmed;
+///   * the old permissive default (the reading's OWN timestamp), which
+///     ANSWERED the question the field exists to answer and made every
+///     trailing low look like it fell at claim time. That is the bug.
+///
+/// It may not `fail`. The production publisher writes trailing-low history for
+/// ADA/USD ALONE (`publisher/main.py::TRAILING_LOW_PAIR`), and drops to a
+/// 3-key datum on a Pyth-failover tick and on a history-I/O error even there —
+/// so every live USDM / USDC / USDT depeg feed, the Indigo relay pair, the Surf
+/// event slots and the FEAR slot publish without keys 3 and 4. A resolver that
+/// aborts on that shape aborts BEFORE the vault is consulted, and every one of
+/// those products stops settling.
 pub fn get_min_low_observed_at(price_data: PriceData) -> Int {
   when price_data is {
     GenericData { price_map } ->
       when pairs.get_first(price_map, 4) is {
         Some(low_at) -> low_at
-        None -> get_timestamp(price_data)
+        None -> 0
       }
     _ -> fail @"Invalid PriceData variant: expected GenericData"
   }
@@ -142,8 +160,9 @@ pub fn get_oracle_min_price_12h(datum: OracleDatum) -> Int {
   get_min_price_12h(datum.price_data)
 }
 
-/// Get the trailing-12h-low observation timestamp from an OracleDatum.
-/// Defaults to the reading's timestamp when key 4 is absent.
+/// Get the trailing-12h-low observation timestamp from an OracleDatum, or the
+/// `0` no-provenance sentinel when key 4 is absent (see
+/// `get_min_low_observed_at`).
 pub fn get_oracle_min_low_observed_at(datum: OracleDatum) -> Int {
   get_min_low_observed_at(datum.price_data)
 }
@@ -386,9 +405,12 @@ test min_price_12h_absent_defaults_to_spot() {
   get_oracle_min_price_12h(datum) == 500_000
 }
 
-test min_low_observed_at_absent_defaults_to_timestamp() {
-  // A legacy 3-key datum (no key 4) defaults the low-observation time to the
-  // reading's own timestamp (key 1).
+test min_low_observed_at_absent_is_the_no_provenance_sentinel() {
+  // [#391 R2 F1] The shape the mainnet publisher writes for every feed except
+  // ADA/USD. It must RESOLVE — an abort here aborts before the vault is
+  // consulted and takes every depeg product off chain — and it must resolve to
+  // the sentinel `0`, which is below every real `start_time`, so the retro
+  // disjunct it feeds can never latch.
   let datum = create_oracle_datum(500_000, 1_700_000_000_000, 1_700_004_200_000)
-  get_oracle_min_low_observed_at(datum) == 1_700_000_000_000
+  get_oracle_min_low_observed_at(datum) == 0
 }

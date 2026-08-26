@@ -2,24 +2,31 @@ use aegis/floor_table.{
   depeg_strike_in_band, meets_barrier_floor, meets_depeg_floor,
   min_strike_distance_bps,
 }
-use aegis/oracle.{is_canonical_oracle_nft, resolve_oracle_price}
+use aegis/oracle.{attested_price, is_canonical_oracle_nft, resolve_oracle_price}
 // test-only: build a canonical AegisSelf feed UTxO for Underwrite fixtures.
-use aegis/oracle/charli3.{create_oracle_datum}
+use aegis/oracle/charli3.{create_oracle_datum_with_min}
+use aegis/oracle/types as oracle_types
+// test-only: oracle-observer attestation injector (#315 forwarding).
+use aegis/test_helpers/fixtures
 use aegis/pool.{
-  can_underwrite, can_withdraw, verify_add_liquidity_datum, verify_claim_datum,
-  verify_remove_liquidity_datum, verify_underwrite_datum,
+  can_underwrite, can_withdraw, verify_add_liquidity_datum,
+  verify_claim_datum_with_reserve, verify_remove_liquidity_datum,
+  verify_underwrite_datum,
 }
 use aegis/pricing.{
-  calculate_fee_total, calculate_protocol_fee, calculate_protocol_fee_split,
-  calculate_refund, calculate_treasury_cut, is_premium_adequate, net_premium,
+  calculate_fee_total, calculate_protocol_fee_split, calculate_refund,
+  calculate_treasury_cut, is_premium_adequate,
 }
 use aegis/types.{
   AcceptCancellation, AddLiquidity, AegisSelf, Barrier, BatchExpireProcess,
   BatchUnderwrite, BurnForCancel, BurnForClaim, BurnForExpire, Depeg,
-  MarkerRedeemer, MintMarkers, PolicyDatum, PoolDatum, PoolRedeemer,
-  ProcessClaim, RemoveLiquidity, Underwrite, aegis_self_publisher_vkh,
-  depeg_eligible_nfts, min_utxo_lovelace, partner_share_cap_bps,
-  policy_marker_asset_name, team_address, treasury_share_bps,
+  DepositRevenue, MarkerRedeemer, MintMarkers, PolicyDatum, PoolDatum,
+  PoolRedeemer, ProcessClaim, RemoveLiquidity, Underwrite,
+  aegis_self_canonical_nfts, aegis_self_publisher_vkh, depeg_eligible_nfts,
+  max_policy_term_ms, max_reading_validity_ms, min_policy_term_ms,
+  min_utxo_lovelace,
+  partner_share_cap_bps, policy_marker_asset_name, team_address,
+  treasury_share_bps,
 }
 use aegis/validation.{
   count_script_inputs, get_lower_bound, get_upper_bound, output_has_nft,
@@ -226,12 +233,19 @@ fn accumulate_partner(
 /// Any per-policy violation degrades `shares_ok` or `funded_ok` to False
 /// — the validator's top-level conjunction catches it.
 fn batch_policies_match_totals_v12(
+  // [V5 size #315] `self` is threaded so each Barrier policy reads the
+  // observer's attested Price via `attested_price(self, observer_script_hash,
+  // …)`; the oracle is no longer resolved inline here.
+  self: Transaction,
   outputs: List<Output>,
-  reference_inputs: List<Input>,
   own_pool_hash: ByteArray,
   own_pool_nft: ByteArray,
   policy_script_hash: ByteArray,
   policy_marker_policy_id: ByteArray,
+  observer_script_hash: ByteArray,
+  // [#327] Per-bucket Underwrite mandate, folded into each policy's
+  // `valid_policy` so a batch cannot smuggle one off-mandate policy.
+  allowed_oracle_nfts: List<ByteArray>,
   validity_range: ValidityRange,
   total_coverage: Int,
   total_premium: Int,
@@ -311,6 +325,17 @@ fn batch_policies_match_totals_v12(
                       own_address,
                       policy_script_hash,
                     )
+                  // [V5] Per-policy payout_address alias guard (mirror of the
+                  // single-Underwrite check). Folded into valid_policy below so
+                  // an aliased policy is walker-REJECTED (drops from cov/prem
+                  // sums and collapses all_policy_outputs_valid).
+                  let this_payout_alias_ok =
+                    payout_address_not_aliased(
+                      pdat.payout_address,
+                      team_address,
+                      own_address,
+                      policy_script_hash,
+                    )
                   // [V12.2+R13 / EXT-13] valid_policy: walker-accepted iff
                   // EVERY gate is True. Per auditor pseudo-code: pool
                   // binding + time + oracle + coverage > 0 + premium > 0 +
@@ -327,13 +352,32 @@ fn batch_policies_match_totals_v12(
                   // near-money / stale policy is walker-REJECTED — it then
                   // drops out of cov_sum/prem_sum (→ totals mismatch) AND
                   // collapses all_policy_outputs_valid, failing the batch.
+                  let this_price_opt =
+                    when pdat.risk_class is {
+                      Barrier ->
+                        Some(
+                          attested_price(
+                            self,
+                            observer_script_hash,
+                            pdat.oracle_provider,
+                            pdat.oracle_nft,
+                          ),
+                        )
+                      Depeg -> None
+                    }
                   let this_floor_ok =
-                    policy_floor_ok(pdat, reference_inputs, validity_range)
+                    policy_floor_ok(this_price_opt, pdat, validity_range)
+                  // [#327] Fold the per-bucket mandate per policy so a batch
+                  // cannot smuggle one off-mandate policy: an off-mandate output
+                  // is walker-REJECTED, dropping from cov_sum/prem_sum (→ totals
+                  // mismatch) AND collapsing all_policy_outputs_valid.
+                  let this_mandate_ok =
+                    list.has(allowed_oracle_nfts, pdat.oracle_nft)
                   let valid_policy =
                     pdat.pool_script_hash == own_pool_hash && pdat.pool_nft == own_pool_nft && time_ok && oracle_pinned && pdat.coverage_amount > 0 && pdat.premium_paid > 0 && is_premium_adequate(
                       pdat.premium_paid,
                       pdat.coverage_amount,
-                    ) && marker_qty_on_output == 1 && funded && this_shares_ok && this_alias_ok && this_floor_ok
+                    ) && marker_qty_on_output == 1 && funded && this_shares_ok && this_alias_ok && this_payout_alias_ok && this_floor_ok && this_mandate_ok
                   if valid_policy {
                     // §3.7 Per-policy Hybrid fee math (only accumulated
                     // for walker-accepted policies).
@@ -539,19 +583,31 @@ fn policy_output_matches_underwrite(
 /// `T` is the policy term in whole days, floored — matching the floor table's
 /// T-band flooring.
 fn policy_floor_ok(
+  // [V5 size #315] The Barrier floor reads the oracle Price ATTESTED by the
+  // oracle_observer (resolved out-of-line, via attested_price at the call site)
+  // rather than resolving inline — this is what removes resolve_oracle_price /
+  // Pyth from the pool's compiled size. `None` for Depeg (no price needed);
+  // `Some(price)` for Barrier. A Barrier with `None` fails closed.
+  price_opt: Option<oracle_types.Price>,
   pdat: PolicyDatum,
-  reference_inputs: List<Input>,
   validity_range: ValidityRange,
 ) -> Bool {
   let t_days = ( pdat.expiry_time - pdat.start_time ) / 86_400_000
-  when pdat.risk_class is {
+  // [KIMI F-DRIFT-2] Term bounds — the F6/N4 fixes landed only in the V8
+  // vault baseline; this V7 copy priced ANY term: t_days < 7 collapsed to
+  // floor-table band 0 (2-5 bps at near-money d — sub-7d crash cover with a
+  // ~10-23% touch probability), and t_days > 180 saturated the top band
+  // (priced AS 180d, the N4 ~45% under-pricing). Bound the term exactly as
+  // the V8 baseline does, for BOTH risk classes (the depeg band-0/ceiling
+  // cells under-price the same way).
+  let term_ms = pdat.expiry_time - pdat.start_time
+  let term_ok = and {
+      term_ms >= min_policy_term_ms,
+      term_ms <= max_policy_term_ms,
+    }
+  term_ok && when pdat.risk_class is {
     Barrier -> {
-      let price =
-        resolve_oracle_price(
-          reference_inputs,
-          pdat.oracle_provider,
-          pdat.oracle_nft,
-        )
+      expect Some(price) = price_opt
       let tx_lower = get_lower_bound(validity_range)
       let tx_upper = get_upper_bound(validity_range)
       // Freshness for the strike-distance read — TWO legs:
@@ -570,8 +626,22 @@ fn policy_floor_ok(
       //    NB this is the OPPOSITE direction from Claim's `tx_lower >= observed_at`
       //    (which false-rejected here because the back-pad predates observed_at).
       let max_feed_age_ms = 300_000
-      let fresh =
-        tx_lower <= price.observed_at + max_feed_age_ms && tx_upper <= price.valid_until
+      // [KIMI F-DRIFT-1] The claim/cancel copies of this predicate got the
+      // publisher-validity ceiling in f0849f1 (vault.reading_fresh) and
+      // 9544305 (policy.oracle_reading_fresh); THIS third copy — the live V7
+      // UNDERWRITE floor read — was left unbounded. tx_lower is ledger-
+      // back-datable, so the age leg (tx_lower <= observed_at + 300s) bounds
+      // nothing against an old feed, and tx_upper <= valid_until is satisfied
+      // forever by a long publisher-written validity: a months-old stale-HIGH
+      // spot passes "fresh", inflating d_bps so a near-money barrier prices at
+      // a deep-barrier floor (the SEC FINDING-2 class, re-opened through the
+      // copy the two freshness fixes did not touch). Bounded here exactly as
+      // in the two sibling copies.
+      let fresh = and {
+          tx_lower <= price.observed_at + max_feed_age_ms,
+          tx_upper <= price.valid_until,
+          price.valid_until <= price.observed_at + max_reading_validity_ms,
+        }
       let spot = price.value
       if !fresh || spot <= 0 {
         False
@@ -641,6 +711,31 @@ fn partner_address_not_aliased(
     None -> True
     Some(addr) ->
       addr != team_address && addr != pool_address && addr.payment_credential != Script(
+        policy_script_hash,
+      )
+  }
+}
+
+/// [V5] Reject a new policy's `payout_address` aliasing a privileged address.
+/// The Claim coverage routes to `payout_address` via `sum_lovelace_to_address`
+/// (a full-Address sum). The pool continuation output is forced to `own_address`
+/// and always holds >= coverage, so a buyer who set `payout_address` to the
+/// pool address would have the pool's OWN output satisfy the Claim payout —
+/// draining `coverage` per policy as free change (the §2.6 critical vector).
+/// We forbid the pool PAYMENT CREDENTIAL (any stake — stricter than the partner
+/// guard's full-address clause), the policy script credential, and the team
+/// address. Enforced at policy-creation (Underwrite / BatchUnderwrite), so no
+/// aliased policy can ever exist to be claimed.
+fn payout_address_not_aliased(
+  payout_address: Option<Address>,
+  team_address: Address,
+  pool_address: Address,
+  policy_script_hash: ByteArray,
+) -> Bool {
+  when payout_address is {
+    None -> True
+    Some(addr) ->
+      addr != team_address && addr.payment_credential != pool_address.payment_credential && addr.payment_credential != Script(
         policy_script_hash,
       )
   }
@@ -730,6 +825,19 @@ fn count_marker_tokens_in_outputs(
 validator pool_validator(
   policy_script_hash: ByteArray,
   policy_marker_policy_id: ByteArray,
+  // [V5 size #315] The oracle_observer script hash. The pool reads the attested
+  // oracle Price from the observer's withdrawal (via `attested_price`) instead
+  // of inlining resolve_oracle_price/Pyth — keeping the pool under 16 KB.
+  observer_script_hash: ByteArray,
+  // [#327 risk-bucketed pools] Per-bucket Underwrite MANDATE. The set of
+  // `oracle_nft` feed ids this pool instance is allowed to underwrite. Baked
+  // into the script hash (param, not datum) so the mandate is immutable by
+  // construction. Appended LAST so the existing 3-param `blueprint apply` order
+  // is unchanged; a bucket adds one trailing `apply` of its feed-NFT list.
+  // An EMPTY list is DENY-ALL (`list.has([], _) == False`): a misconfigured
+  // bucket underwrites nothing rather than everything (fail-closed). The live
+  // 3-param pools keep running on their own (unchanged) bytecode — no migration.
+  allowed_oracle_nfts: List<ByteArray>,
 ) {
   spend(
     datum_opt: Option<PoolDatum>,
@@ -748,7 +856,6 @@ validator pool_validator(
     // there is only ever one consumed pool input per tx.
     let Transaction {
       inputs,
-      reference_inputs,
       outputs,
       mint,
       treasury_donation,
@@ -849,8 +956,11 @@ validator pool_validator(
 
         // 6. Verify immutable fields are preserved (incl. lp_supply, which
         // does NOT change on Underwrite — only on Add/Remove Liquidity).
+        // [P1] reserve is pinned immutable: premium net-of-fee flows to
+        // total_liquidity, NEVER to the first-loss reserve. This is the proof
+        // that an Underwrite premium can never enter the reserve tranche.
         let immutable_ok =
-          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
+          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply && new_datum.reserve == datum.reserve
 
         // 7. [POOL-FUNDED COVERAGE] Pool value grows by `net_pool_growth`
         // (the premium net of fees) AND drops by `coverage`, which the pool
@@ -899,8 +1009,28 @@ validator pool_validator(
         // `policy_floor_ok`). Now that the POOL funds and bears the coverage,
         // a strike-blind premium is an adverse-selection drain; this gate
         // bounds underpricing against the baked floor tables.
+        let floor_price_opt =
+          when new_policy_datum.risk_class is {
+            Barrier ->
+              Some(
+                attested_price(
+                  self,
+                  observer_script_hash,
+                  new_policy_datum.oracle_provider,
+                  new_policy_datum.oracle_nft,
+                ),
+              )
+            Depeg -> None
+          }
         let floor_ok =
-          policy_floor_ok(new_policy_datum, reference_inputs, validity_range)
+          policy_floor_ok(floor_price_opt, new_policy_datum, validity_range)
+
+        // [#327 mandate gate] Fail-closed per-bucket admission — SAME shape as
+        // the CRITICAL-1 depeg gate. This pool may underwrite the policy ONLY
+        // if its oracle feed is in this bucket's mandate. An empty allowlist
+        // denies all (`list.has([], _) == False`).
+        let mandate_ok =
+          list.has(allowed_oracle_nfts, new_policy_datum.oracle_nft)
 
         // [POOL-FUNDED REPRICE] Portfolio accumulation cap: post-underwrite
         // active coverage must stay <= ~33% (1/3) of pool capital so one correlated
@@ -997,7 +1127,13 @@ validator pool_validator(
         let donation_ok =
           when treasury_donation is {
             Some(amt) -> amt >= required_donation
-            None -> required_donation == 0
+            // [conditional donation — composability] an ABSENT key-22 is
+            // accepted: a composed/covered-swap underwrite can't carry the
+            // Conway treasury_donation (it poisons a same-tx PlutusV2 script
+            // context), so the per-tx cut is optional and the treasury's share
+            // is reconciled by the periodic key-witnessed sweep. A PRESENT
+            // donation is still >= required (Some branch) — standalone enforced.
+            None -> True
           }
 
         // [FIX R8-DRAIN-1] Underwrite arm: reject partner_address aliasing
@@ -1006,6 +1142,16 @@ validator pool_validator(
         let partner_not_aliased =
           partner_address_not_aliased(
             new_partner_address,
+            team_address,
+            own_address,
+            policy_script_hash,
+          )
+
+        // [V5] Reject a new policy whose payout_address aliases the pool /
+        // policy script / team — closes the Claim-time pool-drain vector.
+        let payout_not_aliased =
+          payout_address_not_aliased(
+            new_policy_datum.payout_address,
             team_address,
             own_address,
             policy_script_hash,
@@ -1024,7 +1170,7 @@ validator pool_validator(
         let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
         let no_lp_mint = lp_mint_qty == 0
 
-        coverage_positive && premium_positive && coverage_min_utxo && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && floor_ok && accumulation_cap_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint && no_policy_inputs
+        coverage_positive && premium_positive && coverage_min_utxo && premium_ok && can_cover && datum_ok && immutable_ok && value_ok && floor_ok && mandate_ok && accumulation_cap_ok && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && payout_not_aliased && team_output_funded && partner_output_funded && marker_mint_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint && no_policy_inputs
       }
 
       // -----------------------------------------------------------------------
@@ -1115,17 +1261,24 @@ validator pool_validator(
           count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
         let marker_locality_ok = marker_inputs == 1 && marker_outputs == 0
 
-        // 3. Verify datum update is correct
+        // 3. [P1] Verify datum update with the reserve-first draw: the payout
+        // is taken from the first-loss `reserve` BEFORE LP-attributable
+        // `total_liquidity` (reserve -= min(payout, reserve); total -=
+        // remainder; active -= payout). When reserve == 0 this is byte-identical
+        // to the legacy claim transition (every live 6-field pool ran reserve 0).
         let datum_ok =
-          verify_claim_datum(
+          verify_claim_datum_with_reserve(
             datum.total_liquidity,
             datum.active_coverage,
+            datum.reserve,
             new_datum.total_liquidity,
             new_datum.active_coverage,
+            new_datum.reserve,
             payout,
           )
 
-        // 4. Verify immutable fields preserved
+        // 4. Verify immutable fields preserved. `reserve` is NOT here — it is a
+        // tracked-mutable field on Claim, pinned exactly by the helper above.
         let immutable_ok =
           new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
 
@@ -1135,17 +1288,16 @@ validator pool_validator(
         //   cont == own + policy_lovelace - payout
         // Total in: own + policy_lovelace. Total out: cont + payout.
         // Change (= total_in - total_out) must be 0 — no leak path to
-        // collateral residual.
+        // collateral residual. This PHYSICAL law is unchanged by P1: only the
+        // datum split of the payout across reserve→total moves.
         let policy_lovelace = assets.lovelace_of(policy_input.output.value)
         let value_ok =
           assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + policy_lovelace - payout
 
-        // Solvency is now enforced inside verify_claim_datum
-        // (which requires payout ≤ old_active and new_active ≥ 0). The previous
-        // `new_total >= new_active` check was tautological because both fields
-        // decrement by the same payout.
+        // Solvency is enforced inside verify_claim_datum_with_reserve
+        // (payout ≤ old_active, new_active ≥ 0, new_total ≥ 0, new_reserve ≥ 0).
         let remains_non_negative =
-          new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0
+          new_datum.total_liquidity >= 0 && new_datum.active_coverage >= 0 && new_datum.reserve >= 0
 
         let exactly_one_policy_input =
           count_script_inputs(inputs, policy_script_hash) == 1
@@ -1187,8 +1339,11 @@ validator pool_validator(
 
         // 4. Verify immutable fields preserved (lp_supply moves with the
         // deposit; verify_add_liquidity_datum enforces its delta).
+        // [P1] reserve is pinned immutable: an LP deposit lands wholly in
+        // total_liquidity and never the reserve, so the reserve cannot dilute
+        // the LP redemption price the depositor just paid into.
         let immutable_ok =
-          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft
+          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.reserve == datum.reserve
 
         // 5. Pool value must EQUAL old + amount exactly.
         let value_ok =
@@ -1295,8 +1450,11 @@ validator pool_validator(
 
         // 6. Verify immutable fields preserved (lp_supply changes per
         // verify_remove_liquidity_datum).
+        // [P1] reserve is pinned immutable: an LP can NEVER withdraw the
+        // first-loss reserve. Withdrawal price divides total_liquidity only
+        // (verify_remove_liquidity_datum), so the reserve is invisible here.
         let immutable_ok =
-          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft
+          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.reserve == datum.reserve
 
         // 7. Pool value must DECREASE by exactly `amount`.
         let value_ok =
@@ -1392,8 +1550,10 @@ validator pool_validator(
         // 4. Verify immutable fields preserved
         // (lp_supply is immutable for Underwrite/ProcessClaim/BatchUnderwrite/BatchExpireProcess
         //  — only AddLiquidity / RemoveLiquidity move it.)
+        // [P1] reserve pinned immutable — batch premium flows to total_liquidity,
+        // never the reserve (mirror of single Underwrite).
         let immutable_ok =
-          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
+          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply && new_datum.reserve == datum.reserve
 
         // 5. §3.7 Walk policy outputs ONCE, aggregating per-policy
         // fee_total_i (= max(min_utxo, premium_i × fee_bps / 10_000)) and
@@ -1406,12 +1566,14 @@ validator pool_validator(
           }
         let batch_totals =
           batch_policies_match_totals_v12(
+            self,
             outputs,
-            reference_inputs,
             own_pool_hash,
             datum.pool_nft,
             policy_script_hash,
             policy_marker_policy_id,
+            observer_script_hash,
+            allowed_oracle_nfts,
             validity_range,
             total_coverage,
             total_premium,
@@ -1540,7 +1702,13 @@ validator pool_validator(
         let donation_ok =
           when treasury_donation is {
             Some(amt) -> amt >= required_donation
-            None -> required_donation == 0
+            // [conditional donation — composability] an ABSENT key-22 is
+            // accepted: a composed/covered-swap underwrite can't carry the
+            // Conway treasury_donation (it poisons a same-tx PlutusV2 script
+            // context), so the per-tx cut is optional and the treasury's share
+            // is reconciled by the periodic key-witnessed sweep. A PRESENT
+            // donation is still >= required (Some branch) — standalone enforced.
+            None -> True
           }
 
         let no_policy_inputs =
@@ -1664,8 +1832,10 @@ validator pool_validator(
           new_datum.total_liquidity == datum.total_liquidity && new_datum.active_coverage == datum.active_coverage - total_returned
 
         // 5. Verify immutable fields preserved
+        // [P1] reserve pinned immutable — expiring policies de-reserve coverage
+        // and return their funded lovelace; the first-loss reserve is untouched.
         let immutable_ok =
-          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
+          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply && new_datum.reserve == datum.reserve
 
         // 6. Pool value must EQUAL old + total_returned exactly.
         let value_ok =
@@ -1870,8 +2040,11 @@ validator pool_validator(
 
         // 12. Immutable fields preserved (incl. lp_supply — LP supply does
         // NOT change on cancel; only Add/Remove Liquidity move it).
+        // [P1] reserve pinned immutable — a cancel returns the policy's funded
+        // coverage to total_liquidity and refunds the buyer; the first-loss
+        // reserve never moves on cancel.
         let immutable_ok =
-          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply
+          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft && new_datum.lp_supply == datum.lp_supply && new_datum.reserve == datum.reserve
 
         // 13. Solvency post-cancel.
         let remains_non_negative =
@@ -1912,7 +2085,13 @@ validator pool_validator(
         let donation_ok =
           when treasury_donation is {
             Some(amt) -> amt >= required_donation
-            None -> required_donation == 0
+            // [conditional donation — composability] an ABSENT key-22 is
+            // accepted: a composed/covered-swap underwrite can't carry the
+            // Conway treasury_donation (it poisons a same-tx PlutusV2 script
+            // context), so the per-tx cut is optional and the treasury's share
+            // is reconciled by the periodic key-witnessed sweep. A PRESENT
+            // donation is still >= required (Some branch) — standalone enforced.
+            None -> True
           }
 
         // [FIX R8-DRAIN-1] AcceptCancellation arm: reject if the
@@ -1937,6 +2116,78 @@ validator pool_validator(
         let no_lp_mint = lp_mint_qty == 0
 
         policy_targets_this_pool && bounds_ok && value_ok && datum_ok && immutable_ok && remains_non_negative && donation_ok && partner_share_in_bounds && partner_consistency && partner_not_aliased && team_output_funded && partner_output_funded && single_policy_input && policy_has_marker && marker_burn_ok && marker_redeemer_ok && marker_locality_ok && no_lp_mint
+      }
+
+      // -----------------------------------------------------------------------
+      // [V5/#265 P1] DEPOSIT REVENUE: credit the first-loss reserve.
+      //
+      // The yield-funded premium rail (premium_stake_validator) routes a slice
+      // of harvested staking rewards into the pool's first-loss `reserve` via
+      // this arm. It is the ONLY pool arm that adds lovelace WITHOUT minting LP
+      // or burning a marker — so it mirrors AddLiquidity's locality pins exactly
+      // but in the ZERO direction on BOTH the LP mint and the marker mint
+      // (default-deny: omit either and DepositRevenue reopens NN-A-3 / EXT-12).
+      //   * value:  cont == own + amount  (pool grows by exactly `amount`)
+      //   * datum:  reserve += amount; total_liquidity / active_coverage /
+      //             lp_supply ALL unchanged (the capital invariant: revenue can
+      //             ONLY land in the reserve — never in LP-attributable capital,
+      //             so it never raises the LP redemption price).
+      //   * mint:   aLP == 0 (NN-A-3) AND marker == 0 (EXT-12 default-deny).
+      //   * marker locality 0-in/0-out; pool continuation holds 0 aLP (NN-A-3);
+      //     no policy inputs.
+      // -----------------------------------------------------------------------
+      DepositRevenue { amount } -> {
+        expect Some(cont_output) = pool_output
+
+        expect InlineDatum(raw_new_datum) = cont_output.datum
+        expect new_datum: PoolDatum = raw_new_datum
+
+        let amount_positive = amount > 0
+
+        // Pool value grows by EXACTLY `amount` (mirror AddLiquidity value_ok).
+        let value_ok =
+          assets.lovelace_of(cont_output.value) == assets.lovelace_of(own_value) + amount
+
+        // reserve += amount; EVERYTHING else immutable (capital invariant).
+        let datum_ok =
+          new_datum.reserve == datum.reserve + amount && new_datum.total_liquidity == datum.total_liquidity && new_datum.active_coverage == datum.active_coverage && new_datum.lp_supply == datum.lp_supply
+
+        let immutable_ok =
+          new_datum.lp_token_policy == datum.lp_token_policy && new_datum.protocol_fee_bps == datum.protocol_fee_bps && new_datum.pool_nft == datum.pool_nft
+
+        // [NN-A-3] No aLP co-mint: revenue must not mint free LP claims against
+        // capital routed to the reserve.
+        let lp_mint_qty = assets.quantity_of(mint, datum.lp_token_policy, "aLP")
+        let no_lp_mint = lp_mint_qty == 0
+
+        // [EXT-12] DEFAULT-DENY marker mint. `pool_is_consumed_via_nft` is
+        // satisfied by this pool spend, so the marker policy would authorize a
+        // co-minted marker — pin it to 0 or DepositRevenue becomes a marker-
+        // authorization surface (the exact EXT-12 reopening).
+        let marker_qty =
+          assets.quantity_of(
+            mint,
+            policy_marker_policy_id,
+            policy_marker_asset_name,
+          )
+        let marker_qty_zero = marker_qty == 0
+
+        // EXT-18 marker locality: 0 marker inputs, 0 marker outputs.
+        let marker_inputs =
+          count_marker_tokens_in_inputs(inputs, policy_marker_policy_id)
+        let marker_outputs =
+          count_marker_tokens_in_outputs(outputs, policy_marker_policy_id)
+        let marker_locality_ok = marker_inputs == 0 && marker_outputs == 0
+
+        // [NN-A-3] pool continuation holds ZERO aLP.
+        let pool_out_aLP_qty =
+          assets.quantity_of(cont_output.value, datum.lp_token_policy, "aLP")
+        let pool_out_no_lp = pool_out_aLP_qty == 0
+
+        let no_policy_inputs =
+          count_script_inputs(inputs, policy_script_hash) == 0
+
+        amount_positive && value_ok && datum_ok && immutable_ok && no_lp_mint && marker_qty_zero && marker_locality_ok && pool_out_no_lp && no_policy_inputs
       }
     }
   }
@@ -2039,6 +2290,91 @@ test partner_aliasing_to_unrelated_passes() {
   partner_address_not_aliased(Some(benign), team, pool, #"cc")
 }
 
+// [V5] payout_address_not_aliased — the new-policy payout guard. Mirrors the
+// partner suite, but the pool clause is on the PAYMENT CREDENTIAL (any stake),
+// closing both the exact-pool-address drain and the pool-cred-different-stake
+// variant.
+
+test payout_aliasing_none_passes() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address { payment_credential: Script(#"bb"), stake_credential: None }
+  payout_address_not_aliased(None, team, pool, #"cc")
+}
+
+test payout_aliasing_to_team_fails() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address { payment_credential: Script(#"bb"), stake_credential: None }
+  payout_address_not_aliased(Some(team), team, pool, #"cc") == False
+}
+
+test payout_aliasing_to_exact_pool_fails() {
+  // The §2.6 critical drain vector: payout_address == the pool continuation
+  // address makes the pool's OWN output satisfy the Claim payout.
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address { payment_credential: Script(#"bb"), stake_credential: None }
+  payout_address_not_aliased(Some(pool), team, pool, #"cc") == False
+}
+
+test payout_aliasing_to_pool_cred_different_stake_fails() {
+  // Stricter than the partner guard: the pool PAYMENT credential with a
+  // DIFFERENT stake credential is also rejected.
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address { payment_credential: Script(#"bb"), stake_credential: None }
+  let pool_delegated =
+    Address {
+      payment_credential: Script(#"bb"),
+      stake_credential: Some(address.Inline(address.VerificationKey(#"dd"))),
+    }
+  payout_address_not_aliased(Some(pool_delegated), team, pool, #"cc") == False
+}
+
+test payout_aliasing_to_policy_script_fails() {
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address { payment_credential: Script(#"bb"), stake_credential: None }
+  let policy_addr =
+    Address { payment_credential: Script(#"cc"), stake_credential: None }
+  payout_address_not_aliased(Some(policy_addr), team, pool, #"cc") == False
+}
+
+test payout_aliasing_to_unrelated_dao_script_passes() {
+  // A genuine DAO treasury script (distinct from pool/policy/team) is allowed.
+  let team =
+    Address {
+      payment_credential: address.VerificationKey(#"aa"),
+      stake_credential: None,
+    }
+  let pool =
+    Address { payment_credential: Script(#"bb"), stake_credential: None }
+  let dao =
+    Address { payment_credential: Script(#"da0da0"), stake_credential: None }
+  payout_address_not_aliased(Some(dao), team, pool, #"cc")
+}
+
 test underwrite_coverage_check() {
   // Pool: 100 ADA total, 30 ADA active -> 70 ADA available
   // New policy wants 50 ADA coverage -> should pass
@@ -2083,6 +2419,31 @@ test withdrawal_unsafe_check() {
 // Canonical LP-token policy id used by these locality tests (mirrors
 // `lp_token_policy` in the pool datum). Arbitrary deterministic 28-byte
 // handle — the assertion only cares about (policy, "aLP") presence.
+const nna4_observer_hash: ByteArray =
+  #"0b5e0b5e0b5e0b5e0b5e0b5e0b5e0b5e0b5e0b5e0b5e0b5e0b5e0b5e"
+
+// [V5 size #315] The genuine forwarded Price the observer attests for the
+// fresh / too-old oracle reference inputs — resolved through the SAME
+// `resolve_oracle_price` the observer runs, so the isolation floor-gate tests
+// drive `policy_floor_ok` on byte-identical Prices to the full-tx path.
+fn nna4_fresh_price() -> oracle_types.Price {
+  resolve_oracle_price(
+    transaction.placeholder,
+    [nna4_oracle_ref_input()],
+    AegisSelf,
+    nna4_oracle_nft(),
+  )
+}
+
+fn nna4_too_old_price() -> oracle_types.Price {
+  resolve_oracle_price(
+    transaction.placeholder,
+    [nna4_oracle_ref_input_too_old()],
+    AegisSelf,
+    nna4_oracle_nft(),
+  )
+}
+
 const nna3_lp_policy: ByteArray =
   #"0402df9c420213421d894b00ee5b23391cb36dc3c2a436b48229c10a"
 
@@ -2180,8 +2541,35 @@ const nna4_marker_policy_id: ByteArray =
 // A canonical AegisSelf oracle NFT (preprod allowlist head). AegisSelf is the
 // only provider whose `is_canonical_oracle_nft` can return True for a fixed
 // handle, so the policy-output oracle pin uses it.
-const nna4_oracle_nft: ByteArray =
-  #"d2f08410f9f999b2afff902ec4ef47cc7b1677709887d20e0f13938f"
+/// [#363 F5] DERIVED from the active network module. Was pinned to the retired
+/// preprod ADA feed (d2f08410…), canonical on NEITHER profile after the V8B
+/// re-parameterization — which silently dark-failed all 19 nna4_/mandate_/
+/// conditional_ scenarios covering the LIVE mainnet V7 guards (payout aliasing,
+/// mandate gate, free-aLP co-mint).
+fn nna4_oracle_nft() -> ByteArray {
+  expect [nft, ..] = aegis_self_canonical_nfts
+  nft
+}
+
+// [#327] The barrier bucket's mandate: admits exactly the AegisSelf ADA feed
+// the nna4 green path underwrites. Threaded as the 4th validator param so every
+// existing green-path Underwrite/Batch test stays accepted (its feed is in the
+// set) and the off-mandate tests below have an explicit allow-set to fall out
+// of.
+const nna4_allowed: List<ByteArray> = [nna4_oracle_nft()]
+
+// [#327] A depeg-eligible feed NFT — in `depeg_eligible_nfts` AND (by the
+// `depeg_feeds_are_canonical` invariant) in `aegis_self_canonical_nfts`, but
+// NOT the barrier bucket's feed. The off-mandate / depeg-bucket feed for the
+// 2-bucket segregation tests.
+//
+// [#363 F5] Was the hardcoded preprod USDC policy id, so every test routing
+// through it went dark under the mainnet module. Derived from the ACTIVE
+// profile's depeg allowlist instead.
+fn mandate_depeg_nft() -> ByteArray {
+  expect [nft, ..] = depeg_eligible_nfts
+  nft
+}
 
 const nna4_attacker_pkh: ByteArray =
   #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
@@ -2216,6 +2604,14 @@ const nna4_treasury_cut: Int = 500_000
 const nna4_oracle_spot: Int = 1_000_000
 
 fn nna4_oracle_ref_input() -> Input {
+  mandate_oracle_ref_input(nna4_oracle_nft())
+}
+
+// [#327] Feed-parametric AegisSelf oracle reference input — same publisher VKH,
+// spot and freshness as `nna4_oracle_ref_input`, only the carried feed NFT
+// varies. Lets the 2-bucket mandate tests drive a fully-valid barrier
+// underwrite against an arbitrary canonical feed.
+fn mandate_oracle_ref_input(oracle_nft: ByteArray) -> Input {
   Input {
     output_reference: OutputReference {
       transaction_id: nna4_tx_id,
@@ -2227,12 +2623,14 @@ fn nna4_oracle_ref_input() -> Input {
         stake_credential: None,
       },
       value: assets.from_lovelace(min_utxo_lovelace)
-        |> assets.add(nna4_oracle_nft, #"", 1),
+        |> assets.add(oracle_nft, #"", 1),
       datum: InlineDatum(
-        create_oracle_datum(
+        create_oracle_datum_with_min(
           nna4_oracle_spot,
           1_700_100_000_000,
           1_700_104_200_000,
+          nna4_oracle_spot,
+          1_700_100_000_000,
         ),
       ),
       reference_script: None,
@@ -2266,6 +2664,7 @@ fn nna4_pool_datum() -> PoolDatum {
     protocol_fee_bps: 200,
     pool_nft: nna3_pool_nft_policy,
     lp_supply: 1_000_000_000_000,
+    reserve: 0,
   }
 }
 
@@ -2326,14 +2725,19 @@ fn nna4_policy_output_strike(strike: Int) -> Output {
       coverage_amount: nna4_coverage,
       premium_paid: nna4_premium,
       start_time: 1_700_100_100_000,
-      expiry_time: 1_700_604_800_000,
-      oracle_nft: nna4_oracle_nft,
+      expiry_time: 1_700_791_300_000,
+      oracle_nft: nna4_oracle_nft(),
       pool_script_hash: nna4_pool_script_hash,
       pool_nft: nna3_pool_nft_policy,
       oracle_provider: AegisSelf,
       partner_address: None,
       partner_share_bps: 0,
       risk_class: Barrier,
+      payout_address: None,
+      receipt_commitment: None,
+      payout_datum: None,
+      settlement_pins: None,
+      extension: None,
     }
   Output {
     address: Address {
@@ -2419,13 +2823,21 @@ fn nna4_marker_redeemers() -> Pairs<ScriptPurpose, Redeemer> {
 }
 
 fn nna4_spend(tx: Transaction) -> Bool {
+  let tx2 =
+    fixtures.with_observer_attestation(
+      tx,
+      nna4_observer_hash,
+      [(AegisSelf, nna4_oracle_nft())],
+    )
   pool_validator.spend(
     nna4_policy_script_hash,
     nna4_marker_policy_id,
+    nna4_observer_hash,
+    nna4_allowed,
     Some(nna4_pool_datum()),
     Underwrite { coverage: nna4_coverage, premium: nna4_premium },
     OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
-    tx,
+    tx2,
   )
 }
 
@@ -2442,16 +2854,24 @@ test nna4_underwrite_co_mint_alp_rejected() {
 }
 
 fn nna4_batch_spend(tx: Transaction) -> Bool {
+  let tx2 =
+    fixtures.with_observer_attestation(
+      tx,
+      nna4_observer_hash,
+      [(AegisSelf, nna4_oracle_nft())],
+    )
   pool_validator.spend(
     nna4_policy_script_hash,
     nna4_marker_policy_id,
+    nna4_observer_hash,
+    nna4_allowed,
     Some(nna4_pool_datum()),
     BatchUnderwrite {
       total_coverage: nna4_coverage,
       total_premium: nna4_premium,
     },
     OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
-    tx,
+    tx2,
   )
 }
 
@@ -2511,12 +2931,14 @@ fn nna4_oracle_ref_input_stale() -> Input {
         stake_credential: None,
       },
       value: assets.from_lovelace(min_utxo_lovelace)
-        |> assets.add(nna4_oracle_nft, #"", 1),
+        |> assets.add(nna4_oracle_nft(), #"", 1),
       datum: InlineDatum(
-        create_oracle_datum(
+        create_oracle_datum_with_min(
           nna4_oracle_spot,
           1_700_099_000_000,
           1_700_100_200_000,
+          nna4_oracle_spot,
+          1_700_099_000_000,
         ),
       ),
       reference_script: None,
@@ -2583,13 +3005,21 @@ fn nna4_tx_near_cap() -> Transaction {
 }
 
 fn nna4_spend_near_cap() -> Bool {
+  let tx2 =
+    fixtures.with_observer_attestation(
+      nna4_tx_near_cap(),
+      nna4_observer_hash,
+      [(AegisSelf, nna4_oracle_nft())],
+    )
   pool_validator.spend(
     nna4_policy_script_hash,
     nna4_marker_policy_id,
+    nna4_observer_hash,
+    nna4_allowed,
     Some(nna4_pool_datum_near_cap()),
     Underwrite { coverage: nna4_coverage, premium: nna4_premium },
     OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
-    nna4_tx_near_cap(),
+    tx2,
   )
 }
 
@@ -2660,14 +3090,16 @@ fn nna4_oracle_ref_input_too_old() -> Input {
         stake_credential: None,
       },
       value: assets.from_lovelace(min_utxo_lovelace)
-        |> assets.add(nna4_oracle_nft, #"", 1),
+        |> assets.add(nna4_oracle_nft(), #"", 1),
       datum: InlineDatum(
-        create_oracle_datum(
+        create_oracle_datum_with_min(
           nna4_oracle_spot,
           // observed_at: 1_000_000 ms (>> 300_000) before tx_lower.
           1_700_099_000_000,
           // valid_until: same as the fresh reading, still >= tx_upper.
           1_700_104_200_000,
+          nna4_oracle_spot,
+          1_700_099_000_000,
         ),
       ),
       reference_script: None,
@@ -2694,11 +3126,7 @@ test nna4_underwrite_too_old_oracle_rejected() {
 // bounded-freshness leg, not a side effect. Identical datum + validity range,
 // only `observed_at` moved past the +300_000 bound.
 test nna4_floor_too_old_oracle_rejected() {
-  policy_floor_ok(
-    nna4_barrier_policy_datum(),
-    [nna4_oracle_ref_input_too_old()],
-    nna4_validity(),
-  ) == False
+  policy_floor_ok(Some(nna4_too_old_price()), nna4_barrier_policy_datum(), nna4_validity()) == False
 }
 
 // ISOLATION (positive control): the SAME datum + validity range with a FRESH
@@ -2707,11 +3135,7 @@ test nna4_floor_too_old_oracle_rejected() {
 // sole discriminator (and that the bound does not false-reject a fresh
 // underwrite).
 test nna4_floor_fresh_oracle_accepted() {
-  policy_floor_ok(
-    nna4_barrier_policy_datum(),
-    [nna4_oracle_ref_input()],
-    nna4_validity(),
-  ) == True
+  policy_floor_ok(Some(nna4_fresh_price()), nna4_barrier_policy_datum(), nna4_validity()) == True
 }
 
 // Accumulation cap fires: post-underwrite active coverage > 50% of pool
@@ -2740,7 +3164,7 @@ fn pf_depeg_datum(oracle_nft: ByteArray, strike: Int) -> PolicyDatum {
     coverage_amount: 1_000_000_000,
     premium_paid: 80_000_000,
     start_time: 1_700_100_100_000,
-    expiry_time: 1_700_604_800_000,
+    expiry_time: 1_700_791_300_000,
     oracle_nft,
     pool_script_hash: nna4_pool_script_hash,
     pool_nft: nna3_pool_nft_policy,
@@ -2748,26 +3172,159 @@ fn pf_depeg_datum(oracle_nft: ByteArray, strike: Int) -> PolicyDatum {
     partner_address: None,
     partner_share_bps: 0,
     risk_class: Depeg,
+    payout_address: None,
+    receipt_commitment: None,
+    payout_datum: None,
+    settlement_pins: None,
+    extension: None,
   }
 }
 
-// A Depeg label on the ADA price feed (nna4_oracle_nft = d2f08410, NOT in the
+// A Depeg label on the ADA price feed (nna4_oracle_nft() = d2f08410, NOT in the
 // depeg allowlist) is REJECTED — the mislabel drain is closed.
 test depeg_mislabel_on_ada_feed_rejected() {
-  policy_floor_ok(pf_depeg_datum(nna4_oracle_nft, 950_000), [], nna4_validity()) == False
+  policy_floor_ok(None, pf_depeg_datum(nna4_oracle_nft(), 950_000), nna4_validity()) == False
 }
 
-// A Depeg policy on the canonical preprod USDC feed (860faa66, depeg-eligible)
-// with an in-band strike + adequate premium is ACCEPTED.
-test depeg_on_usdc_feed_accepted() {
+// A Depeg policy on a depeg-eligible stablecoin feed, with an in-band strike +
+// adequate premium, is ACCEPTED. [#363 F5] Feed derived from the active
+// profile's `depeg_eligible_nfts` rather than the preprod USDC literal.
+test depeg_on_eligible_stable_feed_accepted() {
   policy_floor_ok(
-    pf_depeg_datum(
-      #"860faa663d8a3ae3071d61f95464340c0e49c1f47f56db76441df7a0",
-      950_000,
-    ),
-    [],
+    None,
+    pf_depeg_datum(mandate_depeg_nft(), 950_000),
     nna4_validity(),
   ) == True
+}
+
+// ---------------------------------------------------------------------------
+// [#327 risk-bucketed pools] Per-bucket Underwrite MANDATE gate.
+//
+// The pool may underwrite a policy ONLY if its `oracle_nft` is in the bucket's
+// `allowed_oracle_nfts` param (`list.has`, the SAME fail-closed shape as the
+// CRITICAL-1 depeg gate). This is the spine for multi-pool risk segregation:
+// two buckets with DISJOINT feed sets cannot back each other's risk.
+//
+// These are FULL-CONTEXT tests over the otherwise-identical nna4 barrier
+// underwrite: only the policy's feed NFT and the bucket allowlist vary, so the
+// accept/reject flip is attributable to the mandate gate alone (the floor,
+// marker, fee and value gates all pass for either canonical feed).
+//
+//   * barrier bucket  = `nna4_allowed` (admits the AegisSelf ADA feed only)
+//   * depeg bucket    = `depeg_eligible_nfts` (USDC/USDT; the audited disjoint
+//                       set — proven disjoint from the barrier feed by the
+//                       CRITICAL-1 `depeg_mislabel_on_ada_feed_rejected` test)
+//
+// An EMPTY allowlist is DENY-ALL (`mandate_empty_allowlist_denies_all`): a
+// misconfigured bucket underwrites nothing, never everything.
+// ---------------------------------------------------------------------------
+
+// A policy output identical to the nna4 green path except its oracle feed NFT,
+// reusing the canonical barrier datum so only `oracle_nft` differs.
+fn mandate_policy_output(oracle_nft: ByteArray) -> Output {
+  let pdat = PolicyDatum { ..nna4_barrier_policy_datum(), oracle_nft }
+  Output {
+    address: Address {
+      payment_credential: Script(nna4_policy_script_hash),
+      stake_credential: None,
+    },
+    value: assets.from_lovelace(nna4_coverage)
+      |> assets.add(nna4_marker_policy_id, policy_marker_asset_name, 1),
+    datum: InlineDatum(pdat),
+    reference_script: None,
+  }
+}
+
+// The nna4 underwrite tx re-pointed at an arbitrary canonical feed (policy
+// output + oracle reference input both carry `oracle_nft`); every other field
+// (pool continuation, marker mint, team output, donation) is unchanged.
+fn mandate_tx(oracle_nft: ByteArray) -> Transaction {
+  Transaction {
+    ..nna4_tx(0),
+    outputs: [
+      nna4_pool_continuation(),
+      mandate_policy_output(oracle_nft),
+      nna4_team_output(),
+    ],
+    reference_inputs: [mandate_oracle_ref_input(oracle_nft)],
+  }
+}
+
+fn mandate_spend(oracle_nft: ByteArray, allowed: List<ByteArray>) -> Bool {
+  let tx2 =
+    fixtures.with_observer_attestation(
+      mandate_tx(oracle_nft),
+      nna4_observer_hash,
+      [(AegisSelf, oracle_nft)],
+    )
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    nna4_observer_hash,
+    allowed,
+    Some(nna4_pool_datum()),
+    Underwrite { coverage: nna4_coverage, premium: nna4_premium },
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    tx2,
+  )
+}
+
+fn mandate_batch_spend(oracle_nft: ByteArray, allowed: List<ByteArray>) -> Bool {
+  let tx2 =
+    fixtures.with_observer_attestation(
+      mandate_tx(oracle_nft),
+      nna4_observer_hash,
+      [(AegisSelf, oracle_nft)],
+    )
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    nna4_observer_hash,
+    allowed,
+    Some(nna4_pool_datum()),
+    BatchUnderwrite {
+      total_coverage: nna4_coverage,
+      total_premium: nna4_premium,
+    },
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    tx2,
+  )
+}
+
+// Barrier bucket ACCEPTS a policy on its mandated barrier feed.
+test mandate_barrier_pool_accepts_barrier_feed() {
+  mandate_spend(nna4_oracle_nft(), nna4_allowed) == True
+}
+
+// Barrier bucket REJECTS a depeg-feed policy (off-mandate) — the case a
+// `risk_class` key would wrongly admit (both feeds can be sold as Barrier).
+test mandate_barrier_pool_rejects_depeg_feed() {
+  mandate_spend(mandate_depeg_nft(), nna4_allowed) == False
+}
+
+// Depeg bucket ACCEPTS a policy on a feed in its mandate (positive control —
+// proves the off-mandate rejections are the gate, not a broken depeg fixture).
+test mandate_depeg_pool_accepts_depeg_feed() {
+  mandate_spend(mandate_depeg_nft(), depeg_eligible_nfts) == True
+}
+
+// Depeg bucket REJECTS a barrier-feed policy (off-mandate, the vice-versa).
+test mandate_depeg_pool_rejects_barrier_feed() {
+  mandate_spend(nna4_oracle_nft(), depeg_eligible_nfts) == False
+}
+
+// An EMPTY allowlist denies every feed (`list.has([], _) == False`).
+test mandate_empty_allowlist_denies_all() {
+  mandate_spend(nna4_oracle_nft(), []) == False
+}
+
+// The BatchUnderwrite walker folds the same gate per policy.
+test mandate_batch_accepts_on_mandate_feed() {
+  mandate_batch_spend(nna4_oracle_nft(), nna4_allowed) == True
+}
+
+test mandate_batch_rejects_off_mandate_feed() {
+  mandate_batch_spend(nna4_oracle_nft(), depeg_eligible_nfts) == False
 }
 
 // ---------------------------------------------------------------------------
@@ -2827,14 +3384,19 @@ fn cancel_policy_datum() -> PolicyDatum {
     coverage_amount: nna4_coverage,
     premium_paid: nna4_premium,
     start_time: 1_700_100_100_000,
-    expiry_time: 1_700_604_800_000,
-    oracle_nft: nna4_oracle_nft,
+    expiry_time: 1_700_791_300_000,
+    oracle_nft: nna4_oracle_nft(),
     pool_script_hash: nna4_pool_script_hash,
     pool_nft: nna3_pool_nft_policy,
     oracle_provider: AegisSelf,
     partner_address: None,
     partner_share_bps: 0,
     risk_class: Barrier,
+    payout_address: None,
+    receipt_commitment: None,
+    payout_datum: None,
+    settlement_pins: None,
+    extension: None,
   }
 }
 
@@ -2953,6 +3515,8 @@ fn cancel_spend(tx: Transaction) -> Bool {
   pool_validator.spend(
     nna4_policy_script_hash,
     nna4_marker_policy_id,
+    nna4_observer_hash,
+    nna4_allowed,
     Some(nna4_pool_datum()),
     AcceptCancellation,
     OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
@@ -2977,3 +3541,498 @@ test accept_cancellation_coverage_to_insured_rejected() {
   cancel_spend(cancel_tx(False)) == False
 }
 
+// ---------------------------------------------------------------------------
+// [V5/#265 P1] DepositRevenue — full-ScriptContext proofs.
+//
+// The yield-funded premium rail credits the first-loss reserve via this arm.
+// Each test changes exactly ONE thing vs the green path so the rejection is
+// attributable. The two negatives are the EXT-12 (co-mint marker) and NN-A-3
+// (aLP into continuation) reopenings the default-deny pins close.
+// ---------------------------------------------------------------------------
+
+const dr_amount: Int = 10_000_000
+
+// Pool continuation after a DepositRevenue of `dr_amount`: lovelace grows by
+// dr_amount, reserve 0 -> dr_amount, everything else (total/active/lp_supply)
+// UNCHANGED. `lp_qty` parks aLP in the continuation for the NN-A-3 negative.
+fn dr_pool_continuation(lp_qty: Int) -> Output {
+  let new_datum =
+    PoolDatum { ..nna4_pool_datum(), reserve: dr_amount }
+  let base =
+    assets.from_lovelace(nna4_pool_in_lovelace + dr_amount)
+      |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1)
+  let value =
+    if lp_qty == 0 {
+      base
+    } else {
+      assets.add(base, nna3_lp_policy, "aLP", lp_qty)
+    }
+  Output {
+    address: nna4_pool_addr(),
+    value,
+    datum: InlineDatum(new_datum),
+    reference_script: None,
+  }
+}
+
+// Mint value: empty (clean), or a single co-minted marker (EXT-12 negative).
+fn dr_mint(co_mint_marker: Bool) -> assets.Value {
+  if co_mint_marker {
+    assets.from_asset(nna4_marker_policy_id, policy_marker_asset_name, 1)
+  } else {
+    assets.zero
+  }
+}
+
+fn dr_tx(co_mint_marker: Bool, pool_lp_qty: Int) -> Transaction {
+  Transaction {
+    ..transaction.placeholder,
+    inputs: [nna4_pool_input()],
+    reference_inputs: [],
+    outputs: [dr_pool_continuation(pool_lp_qty)],
+    mint: dr_mint(co_mint_marker),
+    validity_range: nna4_validity(),
+    redeemers: [],
+  }
+}
+
+fn dr_spend(tx: Transaction) -> Bool {
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    nna4_observer_hash,
+    nna4_allowed,
+    Some(nna4_pool_datum()),
+    DepositRevenue { amount: dr_amount },
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    tx,
+  )
+}
+
+// GREEN: a well-formed DepositRevenue credits ONLY the reserve (reserve +=
+// amount, value +amount, total/active/lp_supply unchanged, no mint). ACCEPT.
+test depositrevenue_credits_reserve_only() {
+  dr_spend(dr_tx(False, 0)) == True
+}
+
+// EXT-12 NEGATIVE: DepositRevenue co-minting a marker must be REJECTED. The
+// pool spend satisfies `pool_is_consumed_via_nft`, so without the
+// marker_qty_zero default-deny pin the marker policy would authorize the mint.
+test depositrevenue_co_minting_marker_rejects() {
+  dr_spend(dr_tx(True, 0)) == False
+}
+
+// NN-A-3 NEGATIVE: DepositRevenue whose pool continuation carries aLP must be
+// REJECTED (pool_out_no_lp). Closes the orphaned-in-pool-LP vector.
+test depositrevenue_aLP_into_continuation_rejects() {
+  dr_spend(dr_tx(False, 5_000_000)) == False
+}
+
+// NEGATIVE: a DepositRevenue datum that bumps total_liquidity instead of
+// reserve (revenue leaking into LP-attributable capital) must be REJECTED —
+// the capital invariant is load-bearing, not advisory.
+fn dr_tx_leaks_to_total() -> Transaction {
+  let leaked_datum =
+    PoolDatum {
+      ..nna4_pool_datum(),
+      total_liquidity: 1_000_000_000_000 + dr_amount,
+    }
+  let cont =
+    Output {
+      address: nna4_pool_addr(),
+      value: assets.from_lovelace(nna4_pool_in_lovelace + dr_amount)
+        |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+      datum: InlineDatum(leaked_datum),
+      reference_script: None,
+    }
+  Transaction {
+    ..transaction.placeholder,
+    inputs: [nna4_pool_input()],
+    reference_inputs: [],
+    outputs: [cont],
+    mint: assets.zero,
+    validity_range: nna4_validity(),
+    redeemers: [],
+  }
+}
+
+test depositrevenue_leaking_to_total_liquidity_rejects() {
+  dr_spend(dr_tx_leaks_to_total()) == False
+}
+
+// ---------------------------------------------------------------------------
+// [V5/#265 P1] ProcessClaim reserve-first draw — full-ScriptContext proofs.
+//
+// A pool pre-loaded with a 300-ADA reserve pays a 100-ADA claim. The reserve
+// absorbs the FULL payout first: reserve 300 -> 200, total_liquidity UNCHANGED,
+// active_coverage -= 100. The physical law cont == own + policy_lovelace -
+// payout is preserved exactly. A second pool (reserve 60) pays the same 100:
+// reserve 60 -> 0, total -= 40. These prove the reserve-first split on the real
+// validator.
+// ---------------------------------------------------------------------------
+
+const pcr_reserve_big: Int = 300_000_000
+
+const pcr_reserve_small: Int = 60_000_000
+
+// Pool input carrying `reserve` in its datum. Physical lovelace holds the
+// unreserved capital + the reserve tranche; coverage lives in the policy UTxO.
+fn pcr_pool_input(reserve: Int) -> Input {
+  let d = PoolDatum { ..nna4_pool_datum(), reserve }
+  Input {
+    output_reference: OutputReference {
+      transaction_id: nna4_tx_id,
+      output_index: 0,
+    },
+    output: Output {
+      address: nna4_pool_addr(),
+      value: assets.from_lovelace(nna4_pool_in_lovelace + reserve)
+        |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+      datum: InlineDatum(d),
+      reference_script: None,
+    },
+  }
+}
+
+// The claimed policy: coverage == nna4_coverage (100 ADA), holds one marker.
+fn pcr_policy_input() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: nna4_tx_id,
+      output_index: 1,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: Script(nna4_policy_script_hash),
+        stake_credential: None,
+      },
+      value: assets.from_lovelace(nna4_coverage)
+        |> assets.add(nna4_marker_policy_id, policy_marker_asset_name, 1),
+      datum: InlineDatum(cancel_policy_datum()),
+      reference_script: None,
+    },
+  }
+}
+
+// Continuation after the claim. `from_reserve = min(payout, reserve)`; the
+// physical lovelace is own + policy_lovelace - payout REGARDLESS of the split
+// (the policy's funded coverage returns to the pool; payout leaves to insured).
+fn pcr_pool_continuation(reserve: Int) -> Output {
+  let from_reserve =
+    if nna4_coverage <= reserve {
+      nna4_coverage
+    } else {
+      reserve
+    }
+  let from_total = nna4_coverage - from_reserve
+  let new_datum =
+    PoolDatum {
+      ..nna4_pool_datum(),
+      total_liquidity: 1_000_000_000_000 - from_total,
+      active_coverage: 100_000_000_000 - nna4_coverage,
+      reserve: reserve - from_reserve,
+    }
+  // own (pool_in + reserve) + policy_lovelace (coverage) - payout (coverage).
+  let lovelace = nna4_pool_in_lovelace + reserve + nna4_coverage - nna4_coverage
+  Output {
+    address: nna4_pool_addr(),
+    value: assets.from_lovelace(lovelace)
+      |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+    datum: InlineDatum(new_datum),
+    reference_script: None,
+  }
+}
+
+fn pcr_insured_output() -> Output {
+  Output {
+    address: Address {
+      payment_credential: VerificationKey(nna4_attacker_pkh),
+      stake_credential: None,
+    },
+    value: assets.from_lovelace(nna4_coverage),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+fn pcr_claim_redeemers() -> Pairs<ScriptPurpose, Redeemer> {
+  let r: Data = BurnForClaim
+  [Pair(Mint(nna4_marker_policy_id), r)]
+}
+
+fn pcr_tx(reserve: Int) -> Transaction {
+  Transaction {
+    ..transaction.placeholder,
+    inputs: [pcr_pool_input(reserve), pcr_policy_input()],
+    reference_inputs: [],
+    outputs: [pcr_pool_continuation(reserve), pcr_insured_output()],
+    mint: assets.from_asset(nna4_marker_policy_id, policy_marker_asset_name, -1),
+    validity_range: nna4_validity(),
+    redeemers: pcr_claim_redeemers(),
+  }
+}
+
+fn pcr_spend(reserve: Int) -> Bool {
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    nna4_observer_hash,
+    nna4_allowed,
+    Some(PoolDatum { ..nna4_pool_datum(), reserve }),
+    ProcessClaim { payout: nna4_coverage },
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    pcr_tx(reserve),
+  )
+}
+
+// payout 100 <= reserve 300: reserve absorbs the FULL payout, total UNCHANGED.
+test claim_draws_from_reserve_first_total_untouched() {
+  pcr_spend(pcr_reserve_big) == True
+}
+
+// payout 100 > reserve 60: reserve drains to 0, total drops by the 40 remainder.
+test claim_splits_reserve_then_total() {
+  pcr_spend(pcr_reserve_small) == True
+}
+
+// NEGATIVE: a claim that draws from total_liquidity while leaving a sufficient
+// reserve untouched must be REJECTED — the reserve MUST be drawn first.
+fn pcr_tx_skips_reserve() -> Transaction {
+  let reserve = pcr_reserve_big
+  // Attacker datum: leaves reserve full, drains total by the full payout.
+  let bad_datum =
+    PoolDatum {
+      ..nna4_pool_datum(),
+      total_liquidity: 1_000_000_000_000 - nna4_coverage,
+      active_coverage: 100_000_000_000 - nna4_coverage,
+      reserve: reserve,
+    }
+  let cont =
+    Output {
+      address: nna4_pool_addr(),
+      value: assets.from_lovelace(nna4_pool_in_lovelace + reserve)
+        |> assets.add(nna3_pool_nft_policy, nna3_pool_nft_name, 1),
+      datum: InlineDatum(bad_datum),
+      reference_script: None,
+    }
+  Transaction {
+    ..transaction.placeholder,
+    inputs: [pcr_pool_input(reserve), pcr_policy_input()],
+    reference_inputs: [],
+    outputs: [cont, pcr_insured_output()],
+    mint: assets.from_asset(nna4_marker_policy_id, policy_marker_asset_name, -1),
+    validity_range: nna4_validity(),
+    redeemers: pcr_claim_redeemers(),
+  }
+}
+
+test claim_skipping_reserve_draw_rejects() {
+  pool_validator.spend(
+    nna4_policy_script_hash,
+    nna4_marker_policy_id,
+    nna4_observer_hash,
+    nna4_allowed,
+    Some(PoolDatum { ..nna4_pool_datum(), reserve: pcr_reserve_big }),
+    ProcessClaim { payout: nna4_coverage },
+    OutputReference { transaction_id: nna4_tx_id, output_index: 0 },
+    pcr_tx_skips_reserve(),
+  ) == False
+}
+
+// ---------------------------------------------------------------------------
+// [Conditional treasury donation — SaturnSwap composability] The Conway
+// treasury_donation (CDDL key-22) is OPTIONAL: a covered-swap underwrite that
+// carries no key-22 (a PlutusV2 cardano-swaps fill rides the same tx, which
+// would poison its script context) is ACCEPTED. A donation that IS present
+// must still be >= required (Some branch unchanged), so the standalone path
+// stays enforced on-chain; absent cuts are reconciled by the periodic
+// key-witnessed sweep. treasury_share_bps is UNCHANGED (2500).
+// ---------------------------------------------------------------------------
+
+// COMPOSED Underwrite: no key-22 (treasury_donation = None) — ACCEPTED.
+test conditional_underwrite_no_donation_accepted() {
+  nna4_spend(Transaction { ..nna4_tx(0), treasury_donation: None }) == True
+}
+
+// STANDALONE Underwrite still enforced: a PRESENT donation short of the cut is
+// REJECTED (the Some branch is unchanged — no free ride when you do donate).
+test conditional_underwrite_present_but_short_rejected() {
+  nna4_spend(
+    Transaction { ..nna4_tx(0), treasury_donation: Some(nna4_treasury_cut - 1) },
+  ) == False
+}
+
+// COMPOSED BatchUnderwrite: no key-22 — ACCEPTED.
+test conditional_batch_underwrite_no_donation_accepted() {
+  nna4_batch_spend(Transaction { ..nna4_tx(0), treasury_donation: None }) == True
+}
+
+// COMPOSED AcceptCancellation: no key-22 — ACCEPTED.
+test conditional_cancel_no_donation_accepted() {
+  cancel_spend(Transaction { ..cancel_tx(True), treasury_donation: None }) == True
+}
+
+// AcceptCancellation still enforced: a present donation short of the cut REJECTED.
+test conditional_cancel_present_but_short_rejected() {
+  cancel_spend(
+    Transaction { ..cancel_tx(True), treasury_donation: Some(cancel_donation - 1) },
+  ) == False
+}
+
+// ---------------------------------------------------------------------------
+// [KIMI F-DRIFT-1] The V7 UNDERWRITE floor-read freshness copy. The publisher
+// validity ceiling landed on the claim/cancel copies (9544305 policy.ak,
+// f0849f1 vault.reading_fresh) but NOT on this third copy — and tx_lower is
+// ledger-back-datable, so `tx_lower <= observed_at + 300s` bounds nothing and
+// `tx_upper <= valid_until` is satisfied forever by a long publisher-written
+// validity. A year-old stale-HIGH spot then passes "fresh": d_bps inflates,
+// a near-money barrier prices at a deep-barrier floor (SEC FINDING-2 class).
+// The twin tests pin the boundary of the fix: only the LONG validity rescues
+// the stale feed, and the ceiling now refuses it.
+// ---------------------------------------------------------------------------
+
+fn kimi_drift_price(observed_at: Int, valid_until: Int) -> oracle_types.Price {
+  oracle_types.Price {
+    value: 1_000_000,
+    observed_at,
+    valid_until,
+    min_price_12h: 1_000_000,
+    low_observed_at: observed_at,
+    confidence_present: False,
+  }
+}
+
+fn kimi_drift_pdat() -> PolicyDatum {
+  PolicyDatum {
+    ..fixtures.default_policy_datum(),
+    strike_price: 800_000,
+    premium_paid: 900_000_000_000,
+    coverage_amount: 50_000_000,
+  }
+}
+
+test kimi_v7_underwrite_rejects_stale_feed_behind_long_valid_until() {
+  // A feed from ~1 year ago with a publisher-written validity of +100 years,
+  // referenced with a back-dated tx_lower sitting within 300s of observed_at.
+  // Before the ceiling this returned True (the hole); it must be False.
+  let observed_at = 1_700_000_000_000
+  let far = observed_at + 100 * 365 * 86_400_000
+  // realistic attack shape: tx_lower back-dated to within 300s of the feed
+  // (ledger-legal), tx_upper ~ now, a year later (ledger-required ttl).
+  let range =
+    fixtures.finite_range(
+      observed_at + 299_000,
+      observed_at + 365 * 86_400_000 + 600_000,
+    )
+  !policy_floor_ok(
+    Some(kimi_drift_price(observed_at, far)),
+    kimi_drift_pdat(),
+    range,
+  )
+}
+
+test kimi_v7_underwrite_stale_feed_rejected_even_without_ceiling_leg() {
+  // Same year-old feed, honest 70-minute validity, same realistic attack
+  // shape: rejected by the anti-stale-HIGH leg (tx_upper <= valid_until)
+  // even without the ceiling — proving the LONG validity is the enabler.
+  let observed_at = 1_700_000_000_000
+  let range =
+    fixtures.finite_range(
+      observed_at + 299_000,
+      observed_at + 365 * 86_400_000 + 600_000,
+    )
+  !policy_floor_ok(
+    Some(kimi_drift_price(observed_at, observed_at + 4_200_000)),
+    kimi_drift_pdat(),
+    range,
+  )
+}
+
+test kimi_v7_underwrite_accepts_fresh_feed_honest_window() {
+  // Control: a fresh feed with the publisher's real 70-minute convention is
+  // ACCEPTED — the ceiling (2h) does not false-reject the honest cadence.
+  let observed_at = 1_700_099_900_000
+  let range =
+    fixtures.finite_range(1_700_100_000_000, 1_700_100_300_000)
+  policy_floor_ok(
+    Some(kimi_drift_price(observed_at, observed_at + 4_200_000)),
+    kimi_drift_pdat(),
+    range,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// [KIMI F-DRIFT-2] V7 has NO term bounds: the F6/N4 fixes landed only in the
+// V8 vault baseline (underwrite_baseline_ok term floor + ceiling). This V7
+// floor-read copy prices any term: t_days < 7 collapses to band 0 (a literal
+// 2-5 bps in every near-money d-band — sub-7d 15%-distance crash cover for a
+// ~23% touch probability), and t_days > 180 saturates the table's top band
+// (priced AS 180d — the N4 ~45% under-pricing). Only the ratio cap (200 bps)
+// stands in for a floor. The fix mirrors the V8 baseline: term_ms inside
+// [min_policy_term_ms, max_policy_term_ms] for BOTH risk classes.
+// ---------------------------------------------------------------------------
+
+fn kimi_term_pdat(start: Int, expiry: Int) -> PolicyDatum {
+  // premium deliberately generous (90% of coverage) so the floor clears at
+  // every term length and ONLY the term/freshness legs decide — a cheap
+  // premium would make the boundary tests reject for the wrong reason.
+  PolicyDatum {
+    ..fixtures.default_policy_datum(),
+    strike_price: 800_000,
+    premium_paid: 999_000_000_000,
+    coverage_amount: 1_000_000_000_000,
+    start_time: start,
+    expiry_time: expiry,
+  }
+}
+
+test kimi_v7_underwrite_rejects_sub_seven_day_term() {
+  // 6-day 20%-distance barrier. touch(0.20, 6.9d) = 9.8% (1173 bps loaded),
+  // floor band 0 = 0 bps at d2000, premium at the 50x cap = 200 bps — LP
+  // expected loss ~7.8% of coverage per policy, repeatable. Must be REJECTED
+  // by the term floor (V8 parity); the shipped V7 copy ACCEPTS.
+  let start = 1_700_100_000_000
+  let pdat = kimi_term_pdat(start, start + 6 * 86_400_000)
+  let range = fixtures.finite_range(start - 300_000, start + 600_000)
+  !policy_floor_ok(
+    Some(kimi_drift_price(start - 100_000, start + 4_200_000)),
+    pdat,
+    range,
+  )
+}
+
+test kimi_v7_underwrite_rejects_over_max_term() {
+  // 400-day policy priced AS 180d (the table saturates) — the N4 class.
+  let start = 1_700_100_000_000
+  let pdat = kimi_term_pdat(start, start + 400 * 86_400_000)
+  let range = fixtures.finite_range(start - 300_000, start + 600_000)
+  !policy_floor_ok(
+    Some(kimi_drift_price(start - 100_000, start + 4_200_000)),
+    pdat,
+    range,
+  )
+}
+
+test kimi_v7_underwrite_accepts_min_term_boundary() {
+  // exactly 7 days is the V8 floor and must stay buyable (no false-reject).
+  let start = 1_700_100_000_000
+  let pdat = kimi_term_pdat(start, start + 7 * 86_400_000)
+  let range = fixtures.finite_range(start - 300_000, start + 600_000)
+  policy_floor_ok(
+    Some(kimi_drift_price(start - 100_000, start + 4_200_000)),
+    pdat,
+    range,
+  )
+}
+
+test kimi_v7_underwrite_accepts_max_term_boundary() {
+  // exactly 180 days is the V8 ceiling and must stay buyable.
+  let start = 1_700_100_000_000
+  let pdat = kimi_term_pdat(start, start + 180 * 86_400_000)
+  let range = fixtures.finite_range(start - 300_000, start + 600_000)
+  policy_floor_ok(
+    Some(kimi_drift_price(start - 100_000, start + 4_200_000)),
+    pdat,
+    range,
+  )
+}

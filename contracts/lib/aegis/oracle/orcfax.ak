@@ -241,8 +241,18 @@ pub fn resolve_with_feed(
     observed_at: fs_dat.statement.created_at,
     valid_until,
     // Orcfax has no 12h-low; spot-only fallback (never 0).
+    // [#391 R2 F1] `0` is the NO-PROVENANCE sentinel, not a price. This
+    // provider publishes no trailing low at all, so it cannot say WHEN one
+    // fell — and `low_observed_at = observed_at` was a claim it could not
+    // support. With `min_price_12h == value` the retro disjunct was already
+    // subsumed by `spot <= strike`, so nothing about what PAYS changes; what
+    // changes is that `vault.pre_start_breach` no longer reads a collapsed
+    // spot pair as a trailing low that pre-dates the policy, which would
+    // have vetoed an honest spot-at-claim settlement whenever the reading
+    // was published before coverage began.
     min_price_12h: scaled,
-    low_observed_at: fs_dat.statement.created_at,
+    low_observed_at: 0,
+    confidence_present: False,
   }
 }
 

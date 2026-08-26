@@ -20,4 +20,17 @@ name = "aiken-lang/fuzz"
 version = "v2.1.1"
 source = "github"
 
+# Pyth Lazer on-chain SDK for Cardano (trusted-signer Ed25519 model).
+# Provides `pyth.get_updates(pyth_id, self)` which reads the Pyth State
+# reference input + the withdraw-script redeemer and returns verified
+# price updates. NOTE: the lib verifies the Ed25519 signature but does NOT
+# enforce freshness or replay-protection — Aegis enforces both in
+# `aegis/oracle/pyth.ak`. See that module + V12.2 Pyth-provider notes.
+# Pinned to a COMMIT (not the moving `main` branch) so the validator build is
+# reproducible and its script hashes can serve as a deploy --expect-hashes pin.
+[[dependencies]]
+name = "pyth-network/pyth-lazer-cardano"
+version = "217b5917228b17f015719b27dd616a75ad6bd800"
+source = "github"
+
 [config]
