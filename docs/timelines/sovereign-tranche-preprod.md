@@ -1,6 +1,6 @@
 # Aegis sovereign tranche - proven live on Cardano preprod
 
-Every on-chain transaction below was read back from Koios (https://preprod.koios.rest/api/v1) when this file was generated (2026-09-14 02:01:30 UTC); every refused transaction was confirmed absent from the chain. The contract is `sovereign_position` (script hash `16c5b867c6c75c7dd49072ad04d3afb8506362b5166be8bed1084464`).
+Every on-chain transaction below was read back from Koios (https://preprod.koios.rest/api/v1) when this file was generated (2026-09-14 08:00:39 UTC); every refused transaction was confirmed absent from the chain. The contract is `sovereign_position` (script hash `16c5b867c6c75c7dd49072ad04d3afb8506362b5166be8bed1084464`).
 
 Prints marked SYNTHETIC are test prices published to the shared preprod feed to trigger the barrier; they are not market moves.
 
@@ -149,6 +149,78 @@ Underwriter stake key registered and delegated to pool15ff3v8y3m3c0rj3dksaqjy4qa
 - https://preprod.cexplorer.io/tx/50e91c3934c75a5a7bc650eea3fcae59ed7b4338c8ede19e4ed410b8fb923e85
 - https://preprod.cardanoscan.io/transaction/50e91c3934c75a5a7bc650eea3fcae59ed7b4338c8ede19e4ed410b8fb923e85
 - fee 0.174257 tADA
+
+### 17. Price print - 2026-09-14 06:28:25 UTC (block 5174940, epoch 313)
+
+Price print at the live price before sale C; that sale then lost the feed UTxO to the live publisher's next print and was refused as BadInputsUTxO before any script ran
+
+- tx `8330144ed6292b1c49904520155181e5fd3d08e9d651686ad8b393b09c2cb38e`
+- https://preprod.cexplorer.io/tx/8330144ed6292b1c49904520155181e5fd3d08e9d651686ad8b393b09c2cb38e
+- https://preprod.cardanoscan.io/transaction/8330144ed6292b1c49904520155181e5fd3d08e9d651686ad8b393b09c2cb38e
+- fee 0.175445 tADA
+
+### 18. Price print - 2026-09-14 06:34:29 UTC (block 5174962, epoch 313)
+
+Price print at the live price (spot 208578) before sale C
+
+- tx `1b37ad7ab377c312b07333ee675801173ba899c78deb7c910030f3b248b98f21`
+- https://preprod.cexplorer.io/tx/1b37ad7ab377c312b07333ee675801173ba899c78deb7c910030f3b248b98f21
+- https://preprod.cardanoscan.io/transaction/1b37ad7ab377c312b07333ee675801173ba899c78deb7c910030f3b248b98f21
+- fee 0.175445 tADA
+
+### 19. Sale - 2026-09-14 06:35:33 UTC (block 5174967, epoch 313)
+
+Position C sold: 40 tADA cover, strike 151801, premium 2.717626 tADA, with execution units declared from the chain's own measurement (+20%) instead of fixed ceilings: fee 0.827323 tADA against sale B's 1.946972
+
+- tx `f524fdd8f3cd0782c742e0bb03c64ff77677ce1642ac8bee180992b1c326d65f`
+- https://preprod.cexplorer.io/tx/f524fdd8f3cd0782c742e0bb03c64ff77677ce1642ac8bee180992b1c326d65f
+- https://preprod.cardanoscan.io/transaction/f524fdd8f3cd0782c742e0bb03c64ff77677ce1642ac8bee180992b1c326d65f
+- fee 0.827323 tADA
+
+### 20. Price print - 2026-09-14 07:46:20 UTC (block 5175175, epoch 313)
+
+SYNTHETIC crash print (spot 150801, below C's strike) - first claim C attempt; the driver's new ceiling check miscounted a spend index and refused to submit (fixed before the next attempt)
+
+- tx `d802f304d3522bd02d5b269beb48f79eae82010655a2ad9cd3cd2603d2f313d5`
+- https://preprod.cexplorer.io/tx/d802f304d3522bd02d5b269beb48f79eae82010655a2ad9cd3cd2603d2f313d5
+- https://preprod.cardanoscan.io/transaction/d802f304d3522bd02d5b269beb48f79eae82010655a2ad9cd3cd2603d2f313d5
+- fee 0.175445 tADA
+
+### 21. Price print - 2026-09-14 07:51:00 UTC (block 5175187, epoch 313)
+
+SYNTHETIC crash print (spot 150801) - second claim C attempt; the evaluator had not yet indexed the print, so the claim was not built (the driver now rebuilds while the evaluator lags)
+
+- tx `5fbb6a696e82024bf3a66d51385a7e66f43d2286ace8d49b54149530bf460134`
+- https://preprod.cexplorer.io/tx/5fbb6a696e82024bf3a66d51385a7e66f43d2286ace8d49b54149530bf460134
+- https://preprod.cardanoscan.io/transaction/5fbb6a696e82024bf3a66d51385a7e66f43d2286ace8d49b54149530bf460134
+- fee 0.175445 tADA
+
+### 22. Price print - 2026-09-14 07:54:43 UTC (block 5175202, epoch 313)
+
+SYNTHETIC crash print (spot 150801) - third claim C attempt; the claim lost this print to the live publisher and was refused as BadInputsUTxO before any script ran
+
+- tx `96da05e6931ff0771bcf725c7cac24abe75e02172acc04f09b1aea22a03915d4`
+- https://preprod.cexplorer.io/tx/96da05e6931ff0771bcf725c7cac24abe75e02172acc04f09b1aea22a03915d4
+- https://preprod.cardanoscan.io/transaction/96da05e6931ff0771bcf725c7cac24abe75e02172acc04f09b1aea22a03915d4
+- fee 0.175445 tADA
+
+### 23. Price print - 2026-09-14 07:56:34 UTC (block 5175207, epoch 313)
+
+SYNTHETIC crash print (spot 150801) for claim C
+
+- tx `5cb770957e6decee583ed55a0f575b39ac94df13f8df4b13586f2b69093cbba0`
+- https://preprod.cexplorer.io/tx/5cb770957e6decee583ed55a0f575b39ac94df13f8df4b13586f2b69093cbba0
+- https://preprod.cardanoscan.io/transaction/5cb770957e6decee583ed55a0f575b39ac94df13f8df4b13586f2b69093cbba0
+- fee 0.175445 tADA
+
+### 24. Claim - 2026-09-14 07:57:54 UTC (block 5175210, epoch 313)
+
+Position C claimed with measured execution units: 40 tADA paid to the insured, 5.717626 tADA remainder to the underwriter, both markers burned; fee 1.015358 tADA against claim A's 1.916456
+
+- tx `988e4758e91939d6e07dbd953d60e001afde4aee3f9d0af44ebb3dc06748a4c0`
+- https://preprod.cexplorer.io/tx/988e4758e91939d6e07dbd953d60e001afde4aee3f9d0af44ebb3dc06748a4c0
+- https://preprod.cardanoscan.io/transaction/988e4758e91939d6e07dbd953d60e001afde4aee3f9d0af44ebb3dc06748a4c0
+- fee 1.015358 tADA
 
 ## Refused by the validator (never on chain)
 
