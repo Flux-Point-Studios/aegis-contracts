@@ -1,0 +1,240 @@
+{
+ "title": "Aegis sovereign tranche - proven live on Cardano preprod",
+ "network": "preprod",
+ "generated_utc": "2026-09-14 02:01:30",
+ "verified_against": "https://preprod.koios.rest/api/v1",
+ "contract": {
+  "sovereign_position_script_hash": "16c5b867c6c75c7dd49072ad04d3afb8506362b5166be8bed1084464",
+  "reference_script_utxo": "d10b56fadc88557b8f4fb88a8627fe75514198527c096f17282f130a8711577a#0",
+  "beacon_policy": "c39d259f02027885c5a5de33869261f067310b338be8208e4875fce9",
+  "head_address": "addr_test1wqtvtwr8cmr4clw5jpe26pxn47u9qcmzk5txh6976yyygeq8qrhnr",
+  "underwriter_stake_address": "stake_test1uq5fs8a604htrwcxfzrlm74y0qgj5c98e3v78s9cr0cq77q92qj3n"
+ },
+ "on_chain": [
+  {
+   "kind": "launch",
+   "what": "Carve a right-sized 51.17 tADA UTxO to fund the reference-script publish",
+   "tx": "099e29788211a9f9cfc49e950c60f7fc566398d6be6fad555fc4058c747c6e0c",
+   "block": 5173450,
+   "epoch": 313,
+   "time_utc": "2026-09-13 20:43:48",
+   "fee_lovelace": 165677,
+   "cexplorer": "https://preprod.cexplorer.io/tx/099e29788211a9f9cfc49e950c60f7fc566398d6be6fad555fc4058c747c6e0c",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/099e29788211a9f9cfc49e950c60f7fc566398d6be6fad555fc4058c747c6e0c"
+  },
+  {
+   "kind": "launch",
+   "what": "Publish sovereign_position (script hash 16c5b867..., 11,278 B) as a reference script",
+   "tx": "d10b56fadc88557b8f4fb88a8627fe75514198527c096f17282f130a8711577a",
+   "block": 5173453,
+   "epoch": 313,
+   "time_utc": "2026-09-13 20:45:44",
+   "fee_lovelace": 660853,
+   "cexplorer": "https://preprod.cexplorer.io/tx/d10b56fadc88557b8f4fb88a8627fe75514198527c096f17282f130a8711577a",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/d10b56fadc88557b8f4fb88a8627fe75514198527c096f17282f130a8711577a"
+  },
+  {
+   "kind": "launch",
+   "what": "Mint the one-shot AEGIS_SOVEREIGN beacon (policy c39d259f...) into the Head UTxO, spending seed 839419...#1",
+   "tx": "34fbc39d5f99867adb75c72d753c4ff483156a247e94f0f2e5acea4179c13cf9",
+   "block": 5173467,
+   "epoch": 313,
+   "time_utc": "2026-09-13 20:49:53",
+   "fee_lovelace": 205155,
+   "cexplorer": "https://preprod.cexplorer.io/tx/34fbc39d5f99867adb75c72d753c4ff483156a247e94f0f2e5acea4179c13cf9",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/34fbc39d5f99867adb75c72d753c4ff483156a247e94f0f2e5acea4179c13cf9"
+  },
+  {
+   "kind": "setup",
+   "what": "Fund the underwriter and insured test accounts",
+   "tx": "b509187e80d9cf764bb031dd91f6deee9540c816f9a8e96302b7363fd8f5fca0",
+   "block": 5173507,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:04:03",
+   "fee_lovelace": 184069,
+   "cexplorer": "https://preprod.cexplorer.io/tx/b509187e80d9cf764bb031dd91f6deee9540c816f9a8e96302b7363fd8f5fca0",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/b509187e80d9cf764bb031dd91f6deee9540c816f9a8e96302b7363fd8f5fca0"
+  },
+  {
+   "kind": "oracle",
+   "what": "Price print on the preprod ADA/USD feed at the live price (spot 209191) before sale A",
+   "tx": "82eef851649a69730b02fd0131265c39b65d8da5dff0ccc0a9a1c91dc256b184",
+   "block": 5173516,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:07:34",
+   "fee_lovelace": 175445,
+   "cexplorer": "https://preprod.cexplorer.io/tx/82eef851649a69730b02fd0131265c39b65d8da5dff0ccc0a9a1c91dc256b184",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/82eef851649a69730b02fd0131265c39b65d8da5dff0ccc0a9a1c91dc256b184"
+  },
+  {
+   "kind": "position",
+   "what": "Position A sold: 40 tADA cover, strike 152613 (25% below the effective spot), premium 2.717543 tADA from the sovereign quote; C-leg escrowed under the underwriter's own stake credential",
+   "tx": "8eaa9985b2073644f9aa186a77baade741d1b59d60aa37422b0e4a69cf9e54ae",
+   "block": 5173524,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:08:53",
+   "fee_lovelace": 1946972,
+   "cexplorer": "https://preprod.cexplorer.io/tx/8eaa9985b2073644f9aa186a77baade741d1b59d60aa37422b0e4a69cf9e54ae",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/8eaa9985b2073644f9aa186a77baade741d1b59d60aa37422b0e4a69cf9e54ae"
+  },
+  {
+   "kind": "oracle",
+   "what": "Price print at the live price (spot 208765) before sale B",
+   "tx": "d12b61123b57b1023641d489e910647962dbcc702216e57a653cbc7d2896a508",
+   "block": 5173533,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:12:03",
+   "fee_lovelace": 175445,
+   "cexplorer": "https://preprod.cexplorer.io/tx/d12b61123b57b1023641d489e910647962dbcc702216e57a653cbc7d2896a508",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/d12b61123b57b1023641d489e910647962dbcc702216e57a653cbc7d2896a508"
+  },
+  {
+   "kind": "position",
+   "what": "Position B sold: 40 tADA cover, 7-day term (the Expire proof)",
+   "tx": "b2436f6fafcb8dd2f6bdc243e2a0b88636829dd90febfeebe8c99001c78bcc07",
+   "block": 5173538,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:13:38",
+   "fee_lovelace": 1946972,
+   "cexplorer": "https://preprod.cexplorer.io/tx/b2436f6fafcb8dd2f6bdc243e2a0b88636829dd90febfeebe8c99001c78bcc07",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/b2436f6fafcb8dd2f6bdc243e2a0b88636829dd90febfeebe8c99001c78bcc07"
+  },
+  {
+   "kind": "oracle",
+   "what": "Price print at the live price before the stranger-input refusal attempt",
+   "tx": "c32ff13092a50b344f1b05925eddf090531cec00db4c504f55fa4a483cb8365b",
+   "block": 5173552,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:19:55",
+   "fee_lovelace": 175445,
+   "cexplorer": "https://preprod.cexplorer.io/tx/c32ff13092a50b344f1b05925eddf090531cec00db4c504f55fa4a483cb8365b",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/c32ff13092a50b344f1b05925eddf090531cec00db4c504f55fa4a483cb8365b"
+  },
+  {
+   "kind": "setup",
+   "what": "Top up the parties: two 50 tADA UTxOs to the underwriter and two 12 tADA to the insured",
+   "tx": "e8e2e20954eabcd9dc141e9a0887ac90763f4307d929231ca9eee641fac5dff5",
+   "block": 5173556,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:22:26",
+   "fee_lovelace": 175489,
+   "cexplorer": "https://preprod.cexplorer.io/tx/e8e2e20954eabcd9dc141e9a0887ac90763f4307d929231ca9eee641fac5dff5",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/e8e2e20954eabcd9dc141e9a0887ac90763f4307d929231ca9eee641fac5dff5"
+  },
+  {
+   "kind": "oracle",
+   "what": "Price print at the live price before the stranger-input refusal",
+   "tx": "4ae483f4947044c9fd779369f31fe63e926c751bccad7b03c893ba26a8f761f1",
+   "block": 5173575,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:27:58",
+   "fee_lovelace": 175445,
+   "cexplorer": "https://preprod.cexplorer.io/tx/4ae483f4947044c9fd779369f31fe63e926c751bccad7b03c893ba26a8f761f1",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/4ae483f4947044c9fd779369f31fe63e926c751bccad7b03c893ba26a8f761f1"
+  },
+  {
+   "kind": "oracle",
+   "what": "SYNTHETIC crash print (spot 151613, below A's strike) - first claim-in-waiting attempt, which the driver declined to submit",
+   "tx": "f56b68999bfda7f6c1ded81935175eec1c588bf0db948f0e17050f7d9aeb7e97",
+   "block": 5173590,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:32:17",
+   "fee_lovelace": 175445,
+   "cexplorer": "https://preprod.cexplorer.io/tx/f56b68999bfda7f6c1ded81935175eec1c588bf0db948f0e17050f7d9aeb7e97",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/f56b68999bfda7f6c1ded81935175eec1c588bf0db948f0e17050f7d9aeb7e97"
+  },
+  {
+   "kind": "oracle",
+   "what": "SYNTHETIC crash print (spot 151613) for the claim-in-waiting refusal",
+   "tx": "d6cd87acb7f026e77408767a2be6dd254fe4845f131bbca397aa5b92eb783ea9",
+   "block": 5173608,
+   "epoch": 313,
+   "time_utc": "2026-09-13 21:37:05",
+   "fee_lovelace": 175445,
+   "cexplorer": "https://preprod.cexplorer.io/tx/d6cd87acb7f026e77408767a2be6dd254fe4845f131bbca397aa5b92eb783ea9",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/d6cd87acb7f026e77408767a2be6dd254fe4845f131bbca397aa5b92eb783ea9"
+  },
+  {
+   "kind": "oracle",
+   "what": "SYNTHETIC crash print (spot 151613) after A's one-hour waiting period",
+   "tx": "6cd097adeb4448704037e562addeb8e96906038d96ddb7c2a6f309f029c13885",
+   "block": 5173710,
+   "epoch": 313,
+   "time_utc": "2026-09-13 22:22:47",
+   "fee_lovelace": 175445,
+   "cexplorer": "https://preprod.cexplorer.io/tx/6cd097adeb4448704037e562addeb8e96906038d96ddb7c2a6f309f029c13885",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/6cd097adeb4448704037e562addeb8e96906038d96ddb7c2a6f309f029c13885"
+  },
+  {
+   "kind": "claim",
+   "what": "Position A claimed: 40 tADA paid to the insured, 5.717543 tADA remainder to the underwriter, both position markers burned, observer attested the reading",
+   "tx": "517d67ac4c00015553b4ce9865be02182fc1abfd85a809f168f8f904d95bc077",
+   "block": 5173713,
+   "epoch": 313,
+   "time_utc": "2026-09-13 22:24:05",
+   "fee_lovelace": 1916456,
+   "cexplorer": "https://preprod.cexplorer.io/tx/517d67ac4c00015553b4ce9865be02182fc1abfd85a809f168f8f904d95bc077",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/517d67ac4c00015553b4ce9865be02182fc1abfd85a809f168f8f904d95bc077"
+  },
+  {
+   "kind": "governance",
+   "what": "Underwriter stake key registered and delegated to pool15ff3v8y3m3c0rj3dksaqjy4qaj6j89s97qdnayugcjp6cp5z6ug and drep1y2qn0rf74zdk3u8upx2yk8un7tlts5f33uvklx96gq5a32qmwj3xg; Koios counts the escrowed C-leg under that stake account",
+   "tx": "50e91c3934c75a5a7bc650eea3fcae59ed7b4338c8ede19e4ed410b8fb923e85",
+   "block": 5174174,
+   "epoch": 313,
+   "time_utc": "2026-09-14 01:11:16",
+   "fee_lovelace": 174257,
+   "cexplorer": "https://preprod.cexplorer.io/tx/50e91c3934c75a5a7bc650eea3fcae59ed7b4338c8ede19e4ed410b8fb923e85",
+   "cardanoscan": "https://preprod.cardanoscan.io/transaction/50e91c3934c75a5a7bc650eea3fcae59ed7b4338c8ede19e4ed410b8fb923e85"
+  }
+ ],
+ "refused_by_the_node": [
+  {
+   "case": "forged-mint",
+   "what": "A pair mint with no Head spent (MintPair without the beacon input)",
+   "tx": "fdc521b87f23ed7ccd8fa551984f01e64792f8487e3aa317b4b12091c95a62b0",
+   "on_chain": false,
+   "refused_utc_approx": "2026-09-13 21:14:35",
+   "evidence": "Blockfrost's evaluator and the node both returned a phase-2 script failure (ValidationTagMismatch / PlutusFailure), so the transaction never reached the chain"
+  },
+  {
+   "case": "early-expire",
+   "what": "Expire on position B before its expiry",
+   "tx": "7ae92eaa4e5e3c99fe550d4aedd29abc526c0e43281af821045cd499c0f54b42",
+   "on_chain": false,
+   "refused_utc_approx": "2026-09-13 21:15:24",
+   "evidence": "Blockfrost's evaluator and the node both returned a phase-2 script failure (ValidationTagMismatch / PlutusFailure), so the transaction never reached the chain"
+  },
+  {
+   "case": "stranger-input",
+   "what": "An Underwrite carrying an input from a third party's key",
+   "tx": "e5d06f4e1a654c62bf707438e8d80dc6ca0b6617918679a0d69a5187ff25c011",
+   "on_chain": false,
+   "refused_utc_approx": "2026-09-13 21:29:03",
+   "evidence": "Blockfrost's evaluator and the node both returned a phase-2 script failure (ValidationTagMismatch / PlutusFailure), so the transaction never reached the chain"
+  },
+  {
+   "case": "claim-in-waiting",
+   "what": "A Claim on position A inside its one-hour waiting period, with the barrier touched",
+   "tx": "6f2f79af9063099f4b47aed665afcd2f4e34909d361320ebb96701d50d72663a",
+   "on_chain": false,
+   "refused_utc_approx": "2026-09-13 21:38:07",
+   "evidence": "Blockfrost's evaluator and the node both returned a phase-2 script failure (ValidationTagMismatch / PlutusFailure), so the transaction never reached the chain"
+  }
+ ],
+ "still_owed": [
+  {
+   "what": "Expire on position B",
+   "when": "after 2026-09-20 21:21:29 UTC"
+  },
+  {
+   "what": "First staking rewards on the underwriter's delegated stake account",
+   "when": "from the start of epoch 317 (~2026-10-02), only if the pool mints blocks in epoch 315"
+  }
+ ],
+ "links": {
+  "underwriter_stake_account": "https://preprod.cexplorer.io/stake/stake_test1uq5fs8a604htrwcxfzrlm74y0qgj5c98e3v78s9cr0cq77q92qj3n",
+  "head_address": "https://preprod.cexplorer.io/address/addr_test1wqtvtwr8cmr4clw5jpe26pxn47u9qcmzk5txh6976yyygeq8qrhnr",
+  "beacon": "https://preprod.cexplorer.io/asset/c39d259f02027885c5a5de33869261f067310b338be8208e4875fce941454749535f534f5645524549474e"
+ }
+}
