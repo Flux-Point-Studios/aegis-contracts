@@ -1,0 +1,24 @@
+# Round-10 property-fuzz layer: Aiken-native property tests (Team A) and the
+# Python differential fuzzer (Team B); see redteam/V12.2_ROUND_10_PROPERTY_FUZZ.md.
+# Nightly runs come from the repo cron "nightly" (0 6 * * * UTC).
+when:
+  - event: push
+    branch: [main, staging]
+  - event: [cron, manual]
+
+steps:
+  - name: property-fuzz
+    image: python:3.11-bookworm
+    commands:
+      - curl -sSfL https://install.aiken-lang.org | bash
+      - export PATH="$HOME/.aiken/bin:$PATH"
+      - aikup install v1.1.22
+      - aiken --version
+      - python -m pip install --upgrade pip
+      - pip install pytest pytest-xdist z3-solver hypothesis cbor2 pycardano
+      - cd contracts
+      - aiken check
+      # one step on purpose: the --slow Tier-2 tests shell out to `aiken` and
+      # skip silently when it is not on PATH
+      - cd ../redteam/symbolic_executor
+      - pytest fuzz/ -v --slow
