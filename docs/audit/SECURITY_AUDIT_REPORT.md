@@ -2020,7 +2020,6 @@ Source files (line counts, post-remediation):
 - [CIP-33: Reference Scripts](https://cips.cardano.org/cips/cip33/)
 - [Charli3 ODV Documentation](https://docs.charli3.io/)
 - [Common Cardano Smart Contract Vulnerabilities — MLabs](https://github.com/mlabs-haskell/audit-resources)
-- [Reference audit: SaturnSwap Hydra Orderbook](https://github.com/Flux-Point-Studios/hydra-orderbook-audit/blob/main/docs/SECURITY_AUDIT_REPORT.md) — format template
 
 ---
 
